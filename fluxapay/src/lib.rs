@@ -1,7 +1,10 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, vec, Address, Env, String, Symbol, Vec,
 };
+
+mod access_control;
+use access_control::{AccessControl, role_oracle, role_settlement_operator};
 
 #[contract]
 pub struct RefundManager;
@@ -36,18 +39,64 @@ pub enum Error {
     InvalidAmount = 3,
     Unauthorized = 4,
     PaymentNotFound = 5,
+    AccessControlError = 6,
 }
 
 #[contracttype]
 pub enum DataKey {
-    Refund(String),         // refund_id -> Refund
-    PaymentRefunds(String), // payment_id -> Vec<String> (refund_ids)
-    RefundCounter,          // u64 counter for generating refund IDs
+    Refund(String),
+    PaymentRefunds(String),
+    RefundCounter,
 }
 
 #[contractimpl]
 impl RefundManager {
-    /// Create a refund request
+    pub fn initialize(env: Env, admin: Address) {
+        AccessControl::initialize(&env, admin);
+    }
+
+    pub fn grant_role(
+        env: Env,
+        admin: Address,
+        role: Symbol,
+        account: Address,
+    ) -> Result<(), Error> {
+        AccessControl::grant_role(&env, admin, role, account)
+            .map_err(|_| Error::AccessControlError)
+    }
+
+    pub fn revoke_role(
+        env: Env,
+        admin: Address,
+        role: Symbol,
+        account: Address,
+    ) -> Result<(), Error> {
+        AccessControl::revoke_role(&env, admin, role, account)
+            .map_err(|_| Error::AccessControlError)
+    }
+
+    pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
+        AccessControl::has_role(&env, &role, &account)
+    }
+
+    pub fn renounce_role(env: Env, account: Address, role: Symbol) -> Result<(), Error> {
+        AccessControl::renounce_role(&env, account, role)
+            .map_err(|_| Error::AccessControlError)
+    }
+
+    pub fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), Error> {
+        AccessControl::transfer_admin(&env, current_admin, new_admin)
+            .map_err(|_| Error::AccessControlError)
+    }
+
+    pub fn get_admin(env: Env) -> Option<Address> {
+        AccessControl::get_admin(&env)
+    }
+
     pub fn create_refund(
         env: Env,
         payment_id: String,
@@ -55,14 +104,11 @@ impl RefundManager {
         reason: String,
         requester: Address,
     ) -> Result<String, Error> {
-        // Validate input
         if refund_amount <= 0 {
             return Err(Error::InvalidAmount);
         }
 
-        // Generate unique refund ID (simple approach for no_std)
         let counter = Self::get_next_refund_id(&env);
-        // Create a simple string representation of the counter
         let refund_id = match counter {
             1 => String::from_str(&env, "refund_1"),
             2 => String::from_str(&env, "refund_2"),
@@ -74,10 +120,9 @@ impl RefundManager {
             8 => String::from_str(&env, "refund_8"),
             9 => String::from_str(&env, "refund_9"),
             10 => String::from_str(&env, "refund_10"),
-            _ => String::from_str(&env, "refund_n"), // fallback for higher numbers
+            _ => String::from_str(&env, "refund_n"),
         };
 
-        // Create refund struct
         let refund = Refund {
             refund_id: refund_id.clone(),
             payment_id: payment_id.clone(),
@@ -89,12 +134,10 @@ impl RefundManager {
             requester,
         };
 
-        // Store refund
         env.storage()
             .persistent()
             .set(&DataKey::Refund(refund_id.clone()), &refund);
 
-        // Add to payment refunds list
         let mut payment_refunds = Self::get_payment_refunds_internal(&env, &payment_id);
         payment_refunds.push_back(refund_id.clone());
         env.storage()
@@ -104,21 +147,27 @@ impl RefundManager {
         Ok(refund_id)
     }
 
-    /// Process refund (approve and complete)
-    pub fn process_refund(env: Env, refund_id: String) -> Result<(), Error> {
-        // Get refund
+    pub fn process_refund(
+        env: Env,
+        operator: Address,
+        refund_id: String,
+    ) -> Result<(), Error> {
+        let has_settlement = AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+        
+        if !has_settlement && !has_oracle {
+            return Err(Error::Unauthorized);
+        }
+
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
 
-        // Check if already processed
         if refund.status != RefundStatus::Pending {
             return Err(Error::RefundAlreadyProcessed);
         }
 
-        // Update status to completed (assuming approval for now)
         refund.status = RefundStatus::Completed;
         refund.processed_at = Some(env.ledger().timestamp());
 
-        // Store updated refund
         env.storage()
             .persistent()
             .set(&DataKey::Refund(refund_id), &refund);
@@ -126,12 +175,10 @@ impl RefundManager {
         Ok(())
     }
 
-    /// Get refund details
     pub fn get_refund(env: Env, refund_id: String) -> Result<Refund, Error> {
         Self::get_refund_internal(&env, &refund_id)
     }
 
-    /// List refunds for a payment
     pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, Error> {
         let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
         let mut refunds = vec![&env];
@@ -145,7 +192,6 @@ impl RefundManager {
         Ok(refunds)
     }
 
-    // Helper functions
     fn get_next_refund_id(env: &Env) -> u64 {
         let mut counter: u64 = env
             .storage()

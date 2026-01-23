@@ -1,13 +1,10 @@
 {
   "generators": {
-    "address": 4,
+    "address": 3,
     "nonce": 0,
     "mux_id": 0
   },
   "auth": [
-    [],
-    [],
-    [],
     [],
     [],
     []
@@ -175,9 +172,7 @@
                       "key": {
                         "symbol": "processed_at"
                       },
-                      "val": {
-                        "u64": "0"
-                      }
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -210,7 +205,7 @@
                       "val": {
                         "vec": [
                           {
-                            "symbol": "Completed"
+                            "symbol": "Pending"
                           }
                         ]
                       }
@@ -300,57 +295,6 @@
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "bool": true
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "Role"
-                },
-                {
-                  "symbol": "SETTLEMENT_OPERATOR"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "Role"
-                    },
-                    {
-                      "symbol": "SETTLEMENT_OPERATOR"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                     }
                   ]
                 },
