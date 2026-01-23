@@ -324,7 +324,7 @@
                   "symbol": "Role"
                 },
                 {
-                  "symbol": "SETTLEMENT_OPERATOR"
+                  "symbol": "ORACLE"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
@@ -347,7 +347,7 @@
                       "symbol": "Role"
                     },
                     {
-                      "symbol": "SETTLEMENT_OPERATOR"
+                      "symbol": "ORACLE"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
