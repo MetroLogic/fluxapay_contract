@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
-      name: development
+      name: "development"
       url: https://stellar.expert/explorer/testnet
     steps:
       - name: Checkout code
@@ -49,9 +49,15 @@ jobs:
           path: ~/.cargo/bin/stellar
           key: ${{ runner.os }}-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install system dependencies
+        if: steps.cache-stellar-cli-dev.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Install Stellar CLI
         if: steps.cache-stellar-cli-dev.outputs.cache-hit != 'true'
-        run: cargo install --locked stellar-cli
+        run: |
+          cargo install --locked stellar-cli
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Verify Stellar CLI
         run: stellar --version
@@ -99,7 +105,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
-      name: staging
+      name: "staging"
       url: https://stellar.expert/explorer/testnet
     steps:
       - name: Checkout code
@@ -115,11 +121,17 @@ jobs:
         id: cache-stellar-cli-staging
         with:
           path: ~/.cargo/bin/stellar
-          key: ${{ runner.os }}-stellar-cli
+          key: ${{ runner.os }}-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install system dependencies
+        if: steps.cache-stellar-cli-staging.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install Stellar CLI
         if: steps.cache-stellar-cli-staging.outputs.cache-hit != 'true'
-        run: cargo install --locked stellar-cli
+        run: |
+          cargo install --locked stellar-cli
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Verify Stellar CLI
         run: stellar --version
@@ -166,7 +178,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
-      name: production
+      name: "production"
       url: https://stellar.expert/explorer/public
     steps:
       - name: Checkout code
@@ -182,11 +194,17 @@ jobs:
         id: cache-stellar-cli-prod
         with:
           path: ~/.cargo/bin/stellar
-          key: ${{ runner.os }}-stellar-cli
+          key: ${{ runner.os }}-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install system dependencies
+        if: steps.cache-stellar-cli-prod.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install Stellar CLI
         if: steps.cache-stellar-cli-prod.outputs.cache-hit != 'true'
-        run: cargo install --locked stellar-cli
+        run: |
+          cargo install --locked stellar-cli
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Verify Stellar CLI
         run: stellar --version
