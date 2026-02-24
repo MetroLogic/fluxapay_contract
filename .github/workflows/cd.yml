@@ -42,10 +42,19 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Cache Stellar CLI
+        uses: actions/cache@v4
+        id: cache-stellar-cli-dev
+        with:
+          path: ~/.cargo/bin/stellar
+          key: ${{ runner.os }}-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install Stellar CLI
-        run: |
-          cargo install --locked stellar-cli --features opt
-          stellar --version
+        if: steps.cache-stellar-cli-dev.outputs.cache-hit != 'true'
+        run: cargo install --locked stellar-cli
+
+      - name: Verify Stellar CLI
+        run: stellar --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -110,7 +119,7 @@ jobs:
 
       - name: Install Stellar CLI
         if: steps.cache-stellar-cli-staging.outputs.cache-hit != 'true'
-        run: cargo install --locked stellar-cli --features opt
+        run: cargo install --locked stellar-cli
 
       - name: Verify Stellar CLI
         run: stellar --version
@@ -177,7 +186,7 @@ jobs:
 
       - name: Install Stellar CLI
         if: steps.cache-stellar-cli-prod.outputs.cache-hit != 'true'
-        run: cargo install --locked stellar-cli --features opt
+        run: cargo install --locked stellar-cli
 
       - name: Verify Stellar CLI
         run: stellar --version
