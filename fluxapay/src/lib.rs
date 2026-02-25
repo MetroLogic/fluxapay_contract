@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, String, Symbol,
-    Vec,
+    bytes, contract, contracterror, contractimpl, contracttype, vec, Address, Bytes, BytesN, Env,
+    String, Symbol, Vec,
 };
 
 mod access_control;
@@ -135,13 +135,69 @@ impl RefundManager {
         reason: String,
         requester: Address,
     ) -> Result<String, Error> {
+        requester.require_auth();
+
         if refund_amount <= 0 {
             return Err(Error::InvalidAmount);
         }
 
-        let _counter = Self::get_next_refund_id(&env);
-        // Simplified ID generation for brevity in this fix
-        let refund_id = String::from_str(&env, "refund_");
+        let counter = Self::get_next_refund_id(&env);
+
+        // Build refund ID: "refund_" + counter
+        // For simplicity and to avoid complex string manipulation in no_std,
+        // we use a match statement for common cases
+        let refund_id = match counter {
+            1 => String::from_str(&env, "refund_1"),
+            2 => String::from_str(&env, "refund_2"),
+            3 => String::from_str(&env, "refund_3"),
+            4 => String::from_str(&env, "refund_4"),
+            5 => String::from_str(&env, "refund_5"),
+            6 => String::from_str(&env, "refund_6"),
+            7 => String::from_str(&env, "refund_7"),
+            8 => String::from_str(&env, "refund_8"),
+            9 => String::from_str(&env, "refund_9"),
+            10 => String::from_str(&env, "refund_10"),
+            11 => String::from_str(&env, "refund_11"),
+            12 => String::from_str(&env, "refund_12"),
+            13 => String::from_str(&env, "refund_13"),
+            14 => String::from_str(&env, "refund_14"),
+            15 => String::from_str(&env, "refund_15"),
+            16 => String::from_str(&env, "refund_16"),
+            17 => String::from_str(&env, "refund_17"),
+            18 => String::from_str(&env, "refund_18"),
+            19 => String::from_str(&env, "refund_19"),
+            20 => String::from_str(&env, "refund_20"),
+            _ => {
+                // For numbers > 20, construct manually using bytes
+                let prefix = bytes!(&env, 0x726566756e645f); // "refund_" in ASCII hex
+                let mut result = Bytes::new(&env);
+                result.append(&prefix);
+
+                // Convert number to ASCII digits (collect in reverse, then reverse)
+                let mut temp = Bytes::new(&env);
+                let mut n = counter;
+                loop {
+                    temp.push_back((n % 10) as u8 + 48); // 48 is ASCII '0'
+                    n /= 10;
+                    if n == 0 {
+                        break;
+                    }
+                }
+                // Reverse the digits
+                let len = temp.len();
+                for i in 0..len {
+                    result.push_back(temp.get(len - 1 - i).unwrap());
+                }
+
+                // Convert bytes to string using a fixed-size array
+                // We know refund IDs won't exceed 64 bytes
+                let mut arr = [0u8; 64];
+                for i in 0..result.len().min(64) {
+                    arr[i as usize] = result.get(i).unwrap();
+                }
+                String::from_bytes(&env, &arr[..result.len() as usize])
+            }
+        };
 
         let refund = Refund {
             refund_id: refund_id.clone(),
@@ -247,6 +303,8 @@ impl PaymentProcessor {
         deposit_address: Address,
         expires_at: u64,
     ) -> Result<PaymentCharge, Error> {
+        merchant_id.require_auth();
+
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }

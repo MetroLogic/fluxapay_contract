@@ -23,6 +23,7 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
 #[test]
 fn test_create_payment() {
     let env = Env::default();
+    env.mock_all_auths();
     let client = setup_payment_processor(&env);
 
     let payment_id = String::from_str(&env, "payment_123");
@@ -52,6 +53,7 @@ fn test_create_payment() {
 #[test]
 fn test_verify_payment_success() {
     let env = Env::default();
+    env.mock_all_auths();
     let client = setup_payment_processor(&env);
 
     let payment_id = String::from_str(&env, "payment_123");
@@ -81,6 +83,7 @@ fn test_verify_payment_success() {
 #[test]
 fn test_create_and_get_refund() {
     let env = Env::default();
+    env.mock_all_auths();
     let (_, client) = setup_refund_manager(&env);
 
     let payment_id = String::from_str(&env, "payment_123");
@@ -99,6 +102,7 @@ fn test_create_and_get_refund() {
 #[test]
 fn test_process_refund() {
     let env = Env::default();
+    env.mock_all_auths();
     let (admin, client) = setup_refund_manager(&env);
 
     let payment_id = String::from_str(&env, "payment_123");
@@ -154,4 +158,99 @@ fn test_transfer_admin() {
 
     assert!(client.has_role(&role_admin(&env), &new_admin));
     assert_eq!(client.get_admin(), Some(new_admin));
+}
+
+#[test]
+fn test_multiple_refunds_unique_ids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_123");
+    let requester = Address::generate(&env);
+
+    // Create first refund
+    let refund_id_1 = client.create_refund(
+        &payment_id,
+        &1000i128,
+        &String::from_str(&env, "First refund"),
+        &requester,
+    );
+
+    // Create second refund
+    let refund_id_2 = client.create_refund(
+        &payment_id,
+        &500i128,
+        &String::from_str(&env, "Second refund"),
+        &requester,
+    );
+
+    // Create third refund
+    let refund_id_3 = client.create_refund(
+        &payment_id,
+        &250i128,
+        &String::from_str(&env, "Third refund"),
+        &requester,
+    );
+
+    // Verify all refund IDs are unique
+    assert_ne!(refund_id_1, refund_id_2);
+    assert_ne!(refund_id_2, refund_id_3);
+    assert_ne!(refund_id_1, refund_id_3);
+
+    // Verify all refunds can be retrieved independently
+    let refund_1 = client.get_refund(&refund_id_1);
+    let refund_2 = client.get_refund(&refund_id_2);
+    let refund_3 = client.get_refund(&refund_id_3);
+
+    assert_eq!(refund_1.amount, 1000i128);
+    assert_eq!(refund_2.amount, 500i128);
+    assert_eq!(refund_3.amount, 250i128);
+
+    // Verify refund IDs follow expected pattern
+    assert_eq!(refund_id_1, String::from_str(&env, "refund_1"));
+    assert_eq!(refund_id_2, String::from_str(&env, "refund_2"));
+    assert_eq!(refund_id_3, String::from_str(&env, "refund_3"));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
+fn test_create_refund_requires_auth() {
+    let env = Env::default();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_123");
+    let requester = Address::generate(&env);
+
+    // This should panic because we're not mocking auth
+    client.create_refund(
+        &payment_id,
+        &1000i128,
+        &String::from_str(&env, "Unauthorized refund"),
+        &requester,
+    );
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
+fn test_create_payment_requires_auth() {
+    let env = Env::default();
+    let client = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "payment_123");
+    let merchant_id = Address::generate(&env);
+    let amount = 1000000000i128;
+    let currency = Symbol::new(&env, "USDC");
+    let deposit_address = Address::generate(&env);
+    let expires_at = env.ledger().timestamp() + 3600;
+
+    // This should panic because we're not mocking auth
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &currency,
+        &deposit_address,
+        &expires_at,
+    );
 }

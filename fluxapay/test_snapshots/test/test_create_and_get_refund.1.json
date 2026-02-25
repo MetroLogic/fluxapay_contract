@@ -7,7 +7,34 @@
   "auth": [
     [],
     [],
-    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "create_refund",
+              "args": [
+                {
+                  "string": "payment_123"
+                },
+                {
+                  "i128": "1000"
+                },
+                {
+                  "string": "Reason"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
     []
   ],
   "ledger": {
@@ -97,7 +124,7 @@
                 "val": {
                   "vec": [
                     {
-                      "string": "refund_"
+                      "string": "refund_1"
                     }
                   ]
                 }
@@ -118,7 +145,7 @@
                   "symbol": "Refund"
                 },
                 {
-                  "string": "refund_"
+                  "string": "refund_1"
                 }
               ]
             },
@@ -138,7 +165,7 @@
                       "symbol": "Refund"
                     },
                     {
-                      "string": "refund_"
+                      "string": "refund_1"
                     }
                   ]
                 },
@@ -188,7 +215,7 @@
                         "symbol": "refund_id"
                       },
                       "val": {
-                        "string": "refund_"
+                        "string": "refund_1"
                       }
                     },
                     {
@@ -340,6 +367,39 @@
             "ext": "v0"
           },
           4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": "801925984706572462"
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": "801925984706572462"
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
         ]
       ],
       [
