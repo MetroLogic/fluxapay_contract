@@ -59,6 +59,31 @@ pub enum RefundStatus {
     Rejected,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeStatus {
+    Open,
+    UnderReview,
+    Resolved,
+    Rejected,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dispute {
+    pub dispute_id: String,
+    pub payment_id: String,
+    pub refund_id: Option<String>,
+    pub amount: i128,
+    pub reason: String,
+    pub evidence: String,
+    pub status: DisputeStatus,
+    pub disputer: Address,
+    pub created_at: u64,
+    pub resolved_at: Option<u64>,
+    pub resolution_notes: Option<String>,
+}
+
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -72,6 +97,8 @@ pub enum Error {
     RefundNotFound = 8,
     RefundAlreadyProcessed = 9,
     Unauthorized = 10,
+    DisputeNotFound = 11,
+    DisputeAlreadyResolved = 12,
 }
 
 #[contracttype]
@@ -80,6 +107,9 @@ pub enum DataKey {
     Refund(String),
     PaymentRefunds(String),
     RefundCounter,
+    Dispute(String),
+    PaymentDisputes(String),
+    DisputeCounter,
 }
 
 #[contractimpl]
@@ -289,6 +319,241 @@ impl RefundManager {
             .get(&DataKey::PaymentRefunds(payment_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
+
+    // Dispute handling functions
+    pub fn create_dispute(
+        env: Env,
+        payment_id: String,
+        amount: i128,
+        reason: String,
+        evidence: String,
+        disputer: Address,
+    ) -> Result<String, Error> {
+        disputer.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let counter = Self::get_next_dispute_id(&env);
+        let dispute_id = Self::build_dispute_id(&env, counter);
+
+        let dispute = Dispute {
+            dispute_id: dispute_id.clone(),
+            payment_id: payment_id.clone(),
+            refund_id: None,
+            amount,
+            reason,
+            evidence,
+            status: DisputeStatus::Open,
+            disputer,
+            created_at: env.ledger().timestamp(),
+            resolved_at: None,
+            resolution_notes: None,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+
+        let mut payment_disputes = Self::get_payment_disputes_internal(&env, &payment_id);
+        payment_disputes.push_back(dispute_id.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::PaymentDisputes(payment_id), &payment_disputes);
+
+        Ok(dispute_id)
+    }
+
+    pub fn review_dispute(env: Env, operator: Address, dispute_id: String) -> Result<(), Error> {
+        operator.require_auth();
+
+        let has_settlement =
+            AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+
+        if !has_settlement && !has_oracle {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+
+        if dispute.status != DisputeStatus::Open {
+            return Err(Error::DisputeAlreadyResolved);
+        }
+
+        dispute.status = DisputeStatus::UnderReview;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(dispute_id), &dispute);
+
+        Ok(())
+    }
+
+    pub fn resolve_dispute_with_refund(
+        env: Env,
+        operator: Address,
+        dispute_id: String,
+        resolution_notes: String,
+    ) -> Result<String, Error> {
+        operator.require_auth();
+
+        let has_settlement =
+            AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+
+        if !has_settlement && !has_oracle {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+
+        if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Rejected {
+            return Err(Error::DisputeAlreadyResolved);
+        }
+
+        // Create refund for the disputed amount
+        let refund_reason = String::from_str(&env, "Refund issued due to dispute resolution");
+
+        let refund_id = Self::create_refund(
+            env.clone(),
+            dispute.payment_id.clone(),
+            dispute.amount,
+            refund_reason,
+            dispute.disputer.clone(),
+        )?;
+
+        // Process the refund immediately
+        Self::process_refund(env.clone(), operator, refund_id.clone())?;
+
+        // Update dispute status
+        dispute.status = DisputeStatus::Resolved;
+        dispute.refund_id = Some(refund_id.clone());
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolution_notes = Some(resolution_notes);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(dispute_id), &dispute);
+
+        Ok(refund_id)
+    }
+
+    pub fn reject_dispute(
+        env: Env,
+        operator: Address,
+        dispute_id: String,
+        resolution_notes: String,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let has_settlement =
+            AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+
+        if !has_settlement && !has_oracle {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+
+        if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Rejected {
+            return Err(Error::DisputeAlreadyResolved);
+        }
+
+        dispute.status = DisputeStatus::Rejected;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolution_notes = Some(resolution_notes);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(dispute_id), &dispute);
+
+        Ok(())
+    }
+
+    pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, Error> {
+        Self::get_dispute_internal(&env, &dispute_id)
+    }
+
+    pub fn get_payment_disputes(env: Env, payment_id: String) -> Result<Vec<Dispute>, Error> {
+        let dispute_ids = Self::get_payment_disputes_internal(&env, &payment_id);
+        let mut disputes = vec![&env];
+        for id in dispute_ids.iter() {
+            if let Ok(dispute) = Self::get_dispute_internal(&env, &id) {
+                disputes.push_back(dispute);
+            }
+        }
+        Ok(disputes)
+    }
+
+    fn get_next_dispute_id(env: &Env) -> u64 {
+        let mut counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeCounter)
+            .unwrap_or(0);
+        counter += 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeCounter, &counter);
+        counter
+    }
+
+    fn build_dispute_id(env: &Env, counter: u64) -> String {
+        match counter {
+            1 => String::from_str(env, "dispute_1"),
+            2 => String::from_str(env, "dispute_2"),
+            3 => String::from_str(env, "dispute_3"),
+            4 => String::from_str(env, "dispute_4"),
+            5 => String::from_str(env, "dispute_5"),
+            6 => String::from_str(env, "dispute_6"),
+            7 => String::from_str(env, "dispute_7"),
+            8 => String::from_str(env, "dispute_8"),
+            9 => String::from_str(env, "dispute_9"),
+            10 => String::from_str(env, "dispute_10"),
+            _ => {
+                let prefix = bytes!(env, 0x646973707574655f); // "dispute_" in ASCII hex
+                let mut result = Bytes::new(env);
+                result.append(&prefix);
+
+                let mut temp = Bytes::new(env);
+                let mut n = counter;
+                loop {
+                    temp.push_back((n % 10) as u8 + 48);
+                    n /= 10;
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let len = temp.len();
+                for i in 0..len {
+                    result.push_back(temp.get(len - 1 - i).unwrap());
+                }
+
+                let mut arr = [0u8; 64];
+                for i in 0..result.len().min(64) {
+                    arr[i as usize] = result.get(i).unwrap();
+                }
+                String::from_bytes(env, &arr[..result.len() as usize])
+            }
+        }
+    }
+
+    fn get_dispute_internal(env: &Env, dispute_id: &String) -> Result<Dispute, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Dispute(dispute_id.clone()))
+            .ok_or(Error::DisputeNotFound)
+    }
+
+    fn get_payment_disputes_internal(env: &Env, payment_id: &String) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PaymentDisputes(payment_id.clone()))
+            .unwrap_or_else(|| vec![env])
+    }
 }
 
 #[contractimpl]
@@ -434,6 +699,8 @@ impl PaymentProcessor {
     }
 }
 
+#[cfg(test)]
+mod dispute_test;
 pub mod merchant_registry;
 #[cfg(test)]
 mod merchant_registry_test;
