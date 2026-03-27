@@ -123,6 +123,12 @@ const TTL_BUMP_THRESHOLD_DIVISOR: u32 = 5;
 
 #[contractimpl]
 impl RefundManager {
+    /// Initializes the Refund Manager with an administrator and the USDC token address.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The address to be set as the administrator.
+    /// - `usdc_token_address`: The address of the USDC token contract.
     pub fn initialize_refund_manager(env: Env, admin: Address, usdc_token_address: Address) {
         AccessControl::initialize(&env, admin);
         env.storage()
@@ -130,6 +136,16 @@ impl RefundManager {
             .set(&DataKey::UsdcToken, &usdc_token_address);
     }
 
+    /// Grants a specific role to an account.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The administrative address authorizing the grant.
+    /// - `role`: The symbol of the role to grant.
+    /// - `account`: The address to receive the role.
+    ///
+    /// ### Errors
+    /// - `Error::AccessControlError`: If the underlying access control operation fails.
     pub fn grant_role(
         env: Env,
         admin: Address,
@@ -139,6 +155,16 @@ impl RefundManager {
         AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
+    /// Revokes a specific role from an account.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The administrative address authorizing the revocation.
+    /// - `role`: The symbol of the role to revoke.
+    /// - `account`: The address to lose the role.
+    ///
+    /// ### Errors
+    /// - `Error::AccessControlError`: If the underlying access control operation fails.
     pub fn revoke_role(
         env: Env,
         admin: Address,
@@ -149,14 +175,41 @@ impl RefundManager {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Checks if an account has a specific role.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `role`: The symbol of the role to check.
+    /// - `account`: The address to check for the role.
+    ///
+    /// ### Returns
+    /// - `bool`: True if the account has the role, false otherwise.
     pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         AccessControl::has_role(&env, &role, &account)
     }
 
+    /// Allows an account to renounce a role they currently hold.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `account`: The address renouncing the role.
+    /// - `role`: The symbol of the role to renounce.
+    ///
+    /// ### Errors
+    /// - `Error::AccessControlError`: If the underlying access control operation fails.
     pub fn renounce_role(env: Env, account: Address, role: Symbol) -> Result<(), Error> {
         AccessControl::renounce_role(&env, account, role).map_err(|_| Error::AccessControlError)
     }
 
+    /// Transfers the administrator role to a new address.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `current_admin`: The current administrative address.
+    /// - `new_admin`: The new address to become the administrator.
+    ///
+    /// ### Errors
+    /// - `Error::AccessControlError`: If the underlying access control operation fails.
     pub fn transfer_admin(
         env: Env,
         current_admin: Address,
@@ -166,10 +219,31 @@ impl RefundManager {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Returns the address of the current administrator.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    ///
+    /// ### Returns
+    /// - `Option<Address>`: The administrator address if it has been set.
     pub fn get_admin(env: Env) -> Option<Address> {
         AccessControl::get_admin(&env)
     }
 
+    /// Creates a new refund request for a given payment.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: The ID of the payment to be refunded.
+    /// - `refund_amount`: The amount to be refunded.
+    /// - `reason`: The reason for the refund.
+    /// - `requester`: The address requesting the refund.
+    ///
+    /// ### Authorization
+    /// - Requires `requester` to provide authentication.
+    ///
+    /// ### Errors
+    /// - `Error::InvalidAmount`: If the refund amount is less than or equal to zero.
     pub fn create_refund(
         env: Env,
         payment_id: String,
@@ -223,6 +297,21 @@ impl RefundManager {
         Ok(refund_id)
     }
 
+    /// Processes a pending refund, transferring funds to the requester.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `operator`: The address of the operator processing the refund.
+    /// - `refund_id`: The ID of the refund to process.
+    ///
+    /// ### Authorization
+    /// - Requires `operator` to provide authentication.
+    /// - `operator` must have either the `SETTLEMENT_OPERATOR` or `ORACLE` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the operator does not have the required role.
+    /// - `Error::RefundNotFound`: If the refund ID does not exist.
+    /// - `Error::RefundAlreadyProcessed`: If the refund has already been completed or rejected.
     pub fn process_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         let has_settlement =
@@ -270,10 +359,26 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Retrieves the details of a specific refund.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `refund_id`: The ID of the refund to retrieve.
+    ///
+    /// ### Returns
+    /// - `Result<Refund, Error>`: The refund data or an error if not found.
     pub fn get_refund(env: Env, refund_id: String) -> Result<Refund, Error> {
         Self::get_refund_internal(&env, &refund_id)
     }
 
+    /// Retrieves all refunds associated with a specific payment.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: The ID of the payment.
+    ///
+    /// ### Returns
+    /// - `Result<Vec<Refund>, Error>`: A vector of refunds or an error.
     pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, Error> {
         let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
         let mut refunds = vec![&env];
@@ -313,6 +418,21 @@ impl RefundManager {
     }
 
     // Dispute handling functions
+    /// Creates a new dispute for a given payment.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: The ID of the payment being disputed.
+    /// - `amount`: The amount in dispute.
+    /// - `reason`: The reason for the dispute.
+    /// - `evidence`: A string containing evidence or a reference to it.
+    /// - `disputer`: The address initiating the dispute.
+    ///
+    /// ### Authorization
+    /// - Requires `disputer` to provide authentication.
+    ///
+    /// ### Errors
+    /// - `Error::InvalidAmount`: If the disputed amount is less than or equal to zero.
     pub fn create_dispute(
         env: Env,
         payment_id: String,
@@ -357,6 +477,21 @@ impl RefundManager {
         Ok(dispute_id)
     }
 
+    /// Moves a dispute into the "Under Review" status.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `operator`: The operator address reviewing the dispute.
+    /// - `dispute_id`: The ID of the dispute to review.
+    ///
+    /// ### Authorization
+    /// - Requires `operator` to provide authentication.
+    /// - `operator` must have either the `SETTLEMENT_OPERATOR` or `ORACLE` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not authorized.
+    /// - `Error::DisputeNotFound`: If the dispute does not exist.
+    /// - `Error::DisputeAlreadyResolved`: If the dispute is already resolved or rejected.
     pub fn review_dispute(env: Env, operator: Address, dispute_id: String) -> Result<(), Error> {
         operator.require_auth();
 
@@ -383,6 +518,22 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Resolves a dispute by issuing a refund to the disputer.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `operator`: The operator address resolving the dispute.
+    /// - `dispute_id`: The ID of the dispute to resolve.
+    /// - `resolution_notes`: Notes explaining the resolution.
+    ///
+    /// ### Authorization
+    /// - Requires `operator` to provide authentication.
+    /// - `operator` must have either the `SETTLEMENT_OPERATOR` or `ORACLE` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not authorized.
+    /// - `Error::DisputeNotFound`: If the dispute does not exist.
+    /// - `Error::DisputeAlreadyResolved`: If the dispute is already resolved.
     pub fn resolve_dispute_with_refund(
         env: Env,
         operator: Address,
@@ -432,6 +583,22 @@ impl RefundManager {
         Ok(refund_id)
     }
 
+    /// Rejects a dispute without issuing a refund.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `operator`: The operator address rejecting the dispute.
+    /// - `dispute_id`: The ID of the dispute to reject.
+    /// - `resolution_notes`: Notes explaining the rejection.
+    ///
+    /// ### Authorization
+    /// - Requires `operator` to provide authentication.
+    /// - `operator` must have either the `SETTLEMENT_OPERATOR` or `ORACLE` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not authorized.
+    /// - `Error::DisputeNotFound`: If the dispute does not exist.
+    /// - `Error::DisputeAlreadyResolved`: If the dispute is already resolved or rejected.
     pub fn reject_dispute(
         env: Env,
         operator: Address,
@@ -465,10 +632,26 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Retrieves the details of a specific dispute.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `dispute_id`: The ID of the dispute to retrieve.
+    ///
+    /// ### Returns
+    /// - `Result<Dispute, Error>`: The dispute data or an error if not found.
     pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, Error> {
         Self::get_dispute_internal(&env, &dispute_id)
     }
 
+    /// Retrieves all disputes associated with a specific payment.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: The ID of the payment.
+    ///
+    /// ### Returns
+    /// - `Result<Vec<Dispute>, Error>`: A vector of disputes or an error.
     pub fn get_payment_disputes(env: Env, payment_id: String) -> Result<Vec<Dispute>, Error> {
         let dispute_ids = Self::get_payment_disputes_internal(&env, &payment_id);
         let mut disputes = vec![&env];
@@ -514,10 +697,25 @@ impl RefundManager {
 
 #[contractimpl]
 impl PaymentProcessor {
+    /// Initializes the Payment Processor with an administrator.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The address to be set as the administrator.
     pub fn initialize_payment_processor(env: Env, admin: Address) {
         AccessControl::initialize(&env, admin);
     }
 
+    /// Grants a specific role to an account.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The administrative address authorizing the grant.
+    /// - `role`: The symbol of the role to grant.
+    /// - `account`: The address to receive the role.
+    ///
+    /// ### Errors
+    /// - `Error::AccessControlError`: If the underlying access control operation fails.
     pub fn grant_role(
         env: Env,
         admin: Address,
@@ -527,6 +725,27 @@ impl PaymentProcessor {
         AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
+    /// Creates a new payment charge.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: A unique identifier for the payment.
+    /// - `merchant_id`: The address of the merchant creating the payment.
+    /// - `amount`: The amount to be paid.
+    /// - `currency`: The symbol of the currency for the payment.
+    /// - `deposit_address`: The address where funds should be deposited.
+    /// - `expires_at`: The ledger timestamp when the payment expires.
+    ///
+    /// ### Returns
+    /// - `Result<PaymentCharge, Error>`: The created payment charge or an error.
+    ///
+    /// ### Authorization
+    /// - Requires `merchant_id` to provide authentication.
+    ///
+    /// ### Errors
+    /// - `Error::InvalidAmount`: If the amount is less than or equal to zero.
+    /// - `Error::PaymentAlreadyExists`: If the payment ID is already in use.
+    /// - `Error::InvalidPaymentId`: If the payment ID is empty.
     #[allow(deprecated)]
     pub fn create_payment(
         env: Env,
@@ -590,6 +809,28 @@ impl PaymentProcessor {
         Ok(payment)
     }
 
+    /// Verifies that a payment has been made on-chain.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `oracle`: The address of the oracle or operator verifying the payment.
+    /// - `payment_id`: The ID of the payment to verify.
+    /// - `transaction_hash`: The hash of the transaction that fulfilled the payment.
+    /// - `payer_address`: The address of the payer.
+    /// - `amount_received`: The actual amount received.
+    ///
+    /// ### Returns
+    /// - `Result<PaymentStatus, Error>`: The new status of the payment or an error.
+    ///
+    /// ### Authorization
+    /// - Requires `oracle` to provide authentication.
+    /// - `oracle` must have either the `ORACLE` or `SETTLEMENT_OPERATOR` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not authorized.
+    /// - `Error::PaymentNotFound`: If the payment ID does not exist.
+    /// - `Error::PaymentAlreadyProcessed`: If the payment is no longer in `Pending` status.
+    /// - `Error::PaymentExpired`: If the payment has already expired.
     #[allow(deprecated)]
     pub fn verify_payment(
         env: Env,
@@ -650,14 +891,40 @@ impl PaymentProcessor {
         Ok(PaymentStatus::Confirmed)
     }
 
+    /// Retrieves the details of a specific payment.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: The ID of the payment to retrieve.
+    ///
+    /// ### Returns
+    /// - `Result<PaymentCharge, Error>`: The payment data or an error if not found.
     pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, Error> {
         Self::get_payment_internal(&env, &payment_id)
     }
 
+    /// Retrieves all payment IDs associated with a specific merchant.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `merchant_id`: The address of the merchant.
+    ///
+    /// ### Returns
+    /// - `Vec<String>`: A vector of payment IDs.
     pub fn get_merchant_payments(env: Env, merchant_id: Address) -> Vec<String> {
         Self::get_merchant_payments_internal(&env, &merchant_id)
     }
 
+    /// Retrieves payment IDs for a merchant with pagination.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `merchant_id`: The address of the merchant.
+    /// - `offset`: The starting index for pagination.
+    /// - `limit`: The maximum number of IDs to return.
+    ///
+    /// ### Returns
+    /// - `Vec<String>`: A vector of payment IDs for the requested page.
     pub fn get_merchant_payments_paginated(
         env: Env,
         merchant_id: Address,
@@ -684,6 +951,21 @@ impl PaymentProcessor {
         page
     }
 
+    /// Cancels a pending payment.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `authority`: The merchant address or an oracle address authorizing the cancellation.
+    /// - `payment_id`: The ID of the payment to cancel.
+    ///
+    /// ### Authorization
+    /// - Requires `authority` to provide authentication.
+    /// - `authority` must be either the merchant who created the payment or have the `ORACLE` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not authorized.
+    /// - `Error::PaymentNotFound`: If the payment does not exist.
+    /// - `Error::PaymentAlreadyProcessed`: If the payment is not in `Pending` status.
     #[allow(deprecated)]
     pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
@@ -718,6 +1000,16 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Marks a pending payment as expired if its expiration time has passed.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `payment_id`: The ID of the payment to expire.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the payment has not yet reached its expiration time.
+    /// - `Error::PaymentNotFound`: If the payment does not exist.
+    /// - `Error::PaymentAlreadyProcessed`: If the payment is not in `Pending` status.
     #[allow(deprecated)]
     pub fn expire_payment(env: Env, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
@@ -745,6 +1037,22 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Settles a confirmed payment, sweeping funds to a treasury address.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `operator`: The address of the operator settling the payment.
+    /// - `payment_id`: The ID of the payment to settle.
+    /// - `treasury_address`: The address where funds should be swept.
+    ///
+    /// ### Authorization
+    /// - Requires `operator` to provide authentication.
+    /// - `operator` must have the `SETTLEMENT_OPERATOR` role.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not authorized.
+    /// - `Error::PaymentNotFound`: If the payment does not exist.
+    /// - `Error::PaymentAlreadyProcessed`: If the payment is not in `Confirmed` status.
     pub fn settle_payment(
         env: Env,
         operator: Address,
@@ -829,6 +1137,15 @@ mod merchant_registry_test;
 mod proptests;
 mod test;
 
+/// Formats a unique ID from a prefix and a counter.
+///
+/// ### Parameters
+/// - `env`: The Soroban environment.
+/// - `prefix`: The string prefix for the ID (e.g., "refund_").
+/// - `n`: The counter value.
+///
+/// ### Returns
+/// - `String`: The formatted ID string.
 pub fn format_id(env: &Env, prefix: &str, n: u64) -> String {
     let mut result = Bytes::new(env);
     for byte in prefix.as_bytes() {

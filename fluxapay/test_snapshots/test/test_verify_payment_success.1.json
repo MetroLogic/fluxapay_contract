@@ -82,7 +82,7 @@
                   "string": "payment_123"
                 },
                 {
-                  "bytes": "b39c59951418921f36327d76f5874a61e39ca8f74e73f5b1f57a217a93ddd9c2"
+                  "bytes": "16a0a64f1fc01caad8b0fb1ec662793082ac6c7dd07b149e97821f108044f15a"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
@@ -323,7 +323,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "b39c59951418921f36327d76f5874a61e39ca8f74e73f5b1f57a217a93ddd9c2"
+                        "bytes": "16a0a64f1fc01caad8b0fb1ec662793082ac6c7dd07b149e97821f108044f15a"
                       }
                     }
                   ]

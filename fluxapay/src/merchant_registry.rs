@@ -33,7 +33,14 @@ pub enum Error {
 
 #[contractimpl]
 impl MerchantRegistry {
-    /// Initialize the contract with an admin address
+    /// Initializes the Merchant Registry contract with an administrative address.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The address to be set as the contract administrator.
+    ///
+    /// ### Errors
+    /// - `Error::AdminAlreadySet`: If the administrator has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().persistent().has(&DataKey::Admin) {
             return Err(Error::AdminAlreadySet);
@@ -42,7 +49,19 @@ impl MerchantRegistry {
         Ok(())
     }
 
-    /// Register a new merchant
+    /// Registers a new merchant in the registry.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `merchant_id`: The address of the merchant to register.
+    /// - `business_name`: The name of the merchant's business.
+    /// - `settlement_currency`: The preferred currency for settlement.
+    ///
+    /// ### Authorization
+    /// - Requires `merchant_id` to provide authentication.
+    ///
+    /// ### Errors
+    /// - `Error::MerchantAlreadyExists`: If a merchant with the given address is already registered.
     pub fn register_merchant(
         env: Env,
         merchant_id: Address,
@@ -75,7 +94,20 @@ impl MerchantRegistry {
         Ok(())
     }
 
-    /// Update merchant settings
+    /// Updates the details of an existing merchant.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `merchant_id`: The address of the merchant to update.
+    /// - `business_name`: Optional new business name.
+    /// - `settlement_currency`: Optional new settlement currency.
+    /// - `active`: Optional status indicating if the merchant is active.
+    ///
+    /// ### Authorization
+    /// - Requires `merchant_id` to provide authentication.
+    ///
+    /// ### Errors
+    /// - `Error::MerchantNotFound`: If the merchant is not found in the registry.
     pub fn update_merchant(
         env: Env,
         merchant_id: Address,
@@ -104,12 +136,32 @@ impl MerchantRegistry {
         Ok(())
     }
 
-    /// Get merchant info
+    /// Retrieves the information for a specific merchant.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `merchant_id`: The address of the merchant to retrieve.
+    ///
+    /// ### Returns
+    /// - `Result<Merchant, Error>`: The merchant's data or an error if not found.
     pub fn get_merchant(env: Env, merchant_id: Address) -> Result<Merchant, Error> {
         Self::get_merchant_internal(&env, &merchant_id)
     }
 
-    /// Verify merchant (admin only)
+    /// Verifies a merchant, allowing them to fulfill certain protocol requirements.
+    ///
+    /// ### Parameters
+    /// - `env`: The Soroban environment.
+    /// - `admin`: The administrative address authorizing the verification.
+    /// - `merchant_id`: The address of the merchant to verify.
+    ///
+    /// ### Authorization
+    /// - Requires `admin` to provide authentication.
+    /// - `admin` must match the stored contract administrator.
+    ///
+    /// ### Errors
+    /// - `Error::Unauthorized`: If the caller is not the administrator.
+    /// - `Error::MerchantNotFound`: If the merchant is not found in the registry.
     pub fn verify_merchant(env: Env, admin: Address, merchant_id: Address) -> Result<(), Error> {
         admin.require_auth();
 
