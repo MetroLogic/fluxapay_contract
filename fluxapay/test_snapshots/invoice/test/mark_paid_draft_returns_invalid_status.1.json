@@ -14,19 +14,23 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "register_merchant",
+              "function_name": "create_invoice",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "Merchant"
+                  "symbol": "INV007"
                 },
                 {
-                  "string": "USDC"
+                  "i128": "1"
                 },
-                "void",
-                "void"
+                {
+                  "symbol": "USDC"
+                },
+                {
+                  "u64": "86400"
+                }
               ]
             }
           },
@@ -92,10 +96,10 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "Merchant"
+                  "symbol": "Invoice"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  "symbol": "INV007"
                 }
               ]
             },
@@ -112,10 +116,10 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Merchant"
+                      "symbol": "Invoice"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      "symbol": "INV007"
                     }
                   ]
                 },
@@ -124,44 +128,34 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "active"
+                        "symbol": "amount"
                       },
                       "val": {
-                        "bool": true
+                        "i128": "1"
                       }
                     },
                     {
                       "key": {
-                        "symbol": "bank_account"
-                      },
-                      "val": "void"
-                    },
-                    {
-                      "key": {
-                        "symbol": "business_name"
+                        "symbol": "currency"
                       },
                       "val": {
-                        "string": "Merchant"
+                        "symbol": "USDC"
                       }
                     },
                     {
                       "key": {
-                        "symbol": "created_at"
+                        "symbol": "due_date"
                       },
                       "val": {
-                        "u64": "0"
+                        "u64": "86400"
                       }
                     },
                     {
                       "key": {
-                        "symbol": "kyc_tier"
+                        "symbol": "invoice_id"
                       },
                       "val": {
-                        "vec": [
-                          {
-                            "symbol": "Unverified"
-                          }
-                        ]
+                        "symbol": "INV007"
                       }
                     },
                     {
@@ -174,16 +168,20 @@
                     },
                     {
                       "key": {
-                        "symbol": "payout_address"
+                        "symbol": "payment_id"
                       },
                       "val": "void"
                     },
                     {
                       "key": {
-                        "symbol": "settlement_currency"
+                        "symbol": "status"
                       },
                       "val": {
-                        "string": "USDC"
+                        "vec": [
+                          {
+                            "symbol": "Draft"
+                          }
+                        ]
                       }
                     }
                   ]
@@ -202,7 +200,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MerchantList"
+                  "symbol": "PaymentProcessor"
                 }
               ]
             },
@@ -219,17 +217,13 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MerchantList"
+                      "symbol": "PaymentProcessor"
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "vec": [
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                    }
-                  ]
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 }
               }
             },

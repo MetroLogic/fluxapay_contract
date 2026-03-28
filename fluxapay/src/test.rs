@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use access_control::{role_admin, role_oracle, role_settlement_operator};
+use access_control::{role_admin, role_merchant, role_oracle, role_settlement_operator};
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
     token, Address, BytesN, Env, String, Symbol,
@@ -34,7 +34,7 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
 fn test_create_payment() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_admin, client) = setup_payment_processor(&env);
+    let (admin, client) = setup_payment_processor(&env);
 
     let payment_id = String::from_str(&env, "payment_123");
     let merchant_id = Address::generate(&env);
@@ -42,6 +42,8 @@ fn test_create_payment() {
     let currency = Symbol::new(&env, "USDC");
     let deposit_address = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
+
+    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     let payment = client.create_payment(
         &payment_id,
@@ -70,6 +72,8 @@ fn test_verify_payment_success() {
     let merchant_id = Address::generate(&env);
     let amount = 1000000000i128;
     let expires_at = env.ledger().timestamp() + 3600;
+
+    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     client.create_payment(
         &payment_id,
@@ -102,12 +106,14 @@ fn test_verify_payment_success() {
 fn test_get_merchant_payments_index_and_pagination() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_admin, client) = setup_payment_processor(&env);
+    let (admin, client) = setup_payment_processor(&env);
 
     let merchant_id = Address::generate(&env);
     let currency = Symbol::new(&env, "USDC");
     let deposit_address = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
+
+    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     let payment_id_1 = String::from_str(&env, "merchant_pay_1");
     let payment_id_2 = String::from_str(&env, "merchant_pay_2");
@@ -154,11 +160,13 @@ fn test_get_merchant_payments_index_and_pagination() {
 fn test_cancel_payment_before_expiry_by_merchant() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_admin, client) = setup_payment_processor(&env);
+    let (admin, client) = setup_payment_processor(&env);
 
     let payment_id = String::from_str(&env, "cancel_before_expiry");
     let merchant_id = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
+
+    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     client.create_payment(
         &payment_id,
@@ -179,11 +187,13 @@ fn test_cancel_payment_before_expiry_by_merchant() {
 fn test_expire_payment_after_deadline() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_admin, client) = setup_payment_processor(&env);
+    let (admin, client) = setup_payment_processor(&env);
 
     let payment_id = String::from_str(&env, "expire_after_deadline");
     let merchant_id = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 10;
+
+    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     client.create_payment(
         &payment_id,
@@ -409,18 +419,18 @@ fn test_get_role_members() {
     assert_eq!(members.len(), 0);
 
     // Grant oracle to oracle1
-    client.grant_role(&admin, &oracle_role, &oracle1);
+    client.refund_grant_role(&admin, &oracle_role, &oracle1);
     let members = client.get_role_members(&oracle_role);
     assert_eq!(members.len(), 1);
     assert_eq!(members.get(0), Some(oracle1.clone()));
 
     // Grant oracle to oracle2
-    client.grant_role(&admin, &oracle_role, &oracle2);
+    client.refund_grant_role(&admin, &oracle_role, &oracle2);
     let members = client.get_role_members(&oracle_role);
     assert_eq!(members.len(), 2);
 
     // Revoke oracle1 — list should shrink
-    client.revoke_role(&admin, &oracle_role, &oracle1);
+    client.refund_revoke_role(&admin, &oracle_role, &oracle1);
     let members = client.get_role_members(&oracle_role);
     assert_eq!(members.len(), 1);
     assert_eq!(members.get(0), Some(oracle2.clone()));

@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::{
+    access_control::role_merchant,
     merchant_registry::{KycTier, MerchantRegistry, MerchantRegistryClient},
     DisputeStatus, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
     RefundManagerClient, RefundStatus,
@@ -34,7 +35,7 @@ fn setup_integration(
     token_admin_client.mint(&refund_manager, &1_000_000_000_000i128);
 
     payment_client.initialize_payment_processor(&admin);
-    merchant_client.initialize(&admin);
+    merchant_client.merchant_initialize(&admin);
 
     (admin, payment_client, refund_client, merchant_client)
 }
@@ -65,6 +66,8 @@ fn test_happy_path_flow() {
     let amount = 1000i128;
     let expires_at = env.ledger().timestamp() + 3600;
 
+    payment_client.payment_grant_role(&admin, &role_merchant(&env), &merchant);
+
     payment_client.create_payment(
         &payment_id,
         &merchant,
@@ -76,7 +79,7 @@ fn test_happy_path_flow() {
 
     let tx_hash = BytesN::<32>::random(&env);
     let oracle = Address::generate(&env);
-    payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+    payment_client.payment_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount);
 
     let payment_info = payment_client.get_payment(&payment_id);
@@ -95,7 +98,7 @@ fn test_happy_path_flow() {
     );
 
     let operator = Address::generate(&env);
-    refund_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    refund_client.refund_grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
 
     let refund_id = refund_client.resolve_dispute_with_refund(
         &operator,
@@ -122,10 +125,13 @@ fn test_settlement_path() {
     let treasury = Address::generate(&env);
     let operator = Address::generate(&env);
 
-    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    payment_client.payment_grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
 
     let payment_id = String::from_str(&env, "PAY_SETTLE");
     let amount = 2000i128;
+
+    payment_client.payment_grant_role(&admin, &role_merchant(&env), &merchant);
+
     payment_client.create_payment(
         &payment_id,
         &merchant,
@@ -136,7 +142,7 @@ fn test_settlement_path() {
     );
 
     let oracle = Address::generate(&env);
-    payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+    payment_client.payment_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     payment_client.verify_payment(
         &oracle,
         &payment_id,
@@ -164,6 +170,8 @@ fn test_failure_and_expiration_path() {
     let payment_id = String::from_str(&env, "PAY_EXPIRE");
     let amount = 500i128;
     let expires_at = env.ledger().timestamp() + 100;
+
+    payment_client.payment_grant_role(&admin, &role_merchant(&env), &merchant);
 
     payment_client.create_payment(
         &payment_id,
@@ -194,7 +202,7 @@ fn test_failure_and_expiration_path() {
     );
 
     let operator = Address::generate(&env);
-    refund_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+    refund_client.refund_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
 
     // Reject dispute
     refund_client.reject_dispute(

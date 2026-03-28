@@ -190,7 +190,7 @@ impl RefundManager {
         if !env
             .storage()
             .persistent()
-            .has(&DataKey::Payment(payment_id.clone()))
+            .has(&FluxaDataKey::Payment(payment_id.clone()))
         {
             let payment = PaymentCharge {
                 payment_id: payment_id.clone(),
@@ -207,7 +207,7 @@ impl RefundManager {
             };
             env.storage()
                 .persistent()
-                .set(&DataKey::Payment(payment_id.clone()), &payment);
+                .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
             Self::bump_payment_ttl(&env, &payment_id, &payment.status);
         }
     }
@@ -238,8 +238,8 @@ impl RefundManager {
         let payment: PaymentCharge = env
             .storage()
             .persistent()
-            .get(&DataKey::Payment(payment_id.clone()))
-            .ok_or(Error::PaymentNotFound)?;
+            .get(&FluxaDataKey::Payment(payment_id.clone()))
+            .ok_or(FluxaError::PaymentNotFound)?;
 
         // Sum existing refund amounts for this payment
         let existing_refunds = Self::get_payment_refunds_internal(env, &payment_id);
@@ -253,7 +253,7 @@ impl RefundManager {
         }
 
         if total_refunded + refund_amount > payment.amount {
-            return Err(Error::RefundExceedsPayment);
+            return Err(FluxaError::RefundExceedsPayment);
         }
 
         let counter = Self::get_next_refund_id(&env);
@@ -282,9 +282,12 @@ impl RefundManager {
         payment_refunds.push_back(refund_id.clone());
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::PaymentRefunds(payment_id), &payment_refunds);
-            .set(&DataKey::PaymentRefunds(payment_id.clone()), &payment_refunds);
-        Self::bump_ttl(&env, &DataKey::PaymentRefunds(payment_id.clone()), LONG_LIVE_TTL);
+            .set(&FluxaDataKey::PaymentRefunds(payment_id.clone()), &payment_refunds);
+        Self::bump_ttl(
+            &env,
+            &FluxaDataKey::PaymentRefunds(payment_id.clone()),
+            LONG_LIVE_TTL,
+        );
 
         Self::bump_refund_ttl(&env, &refund_id, &refund.status);
 
@@ -339,8 +342,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Refund(refund_id), &refund);
-            .set(&DataKey::Refund(refund_id.clone()), &refund);
+            .set(&FluxaDataKey::Refund(refund_id.clone()), &refund);
         Self::bump_refund_ttl(&env, &refund_id, &refund.status);
 
         // Issue #27: emit REFUND/COMPLETED event
@@ -353,20 +355,20 @@ impl RefundManager {
     }
 
     /// Reject a pending refund (operator only). Emits REFUND/REJECTED (issue #27).
-    pub fn reject_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
+    pub fn reject_refund(env: Env, operator: Address, refund_id: String) -> Result<(), FluxaError> {
         operator.require_auth();
         let has_settlement =
             AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
 
         if !has_settlement && !has_oracle {
-            return Err(Error::Unauthorized);
+            return Err(FluxaError::Unauthorized);
         }
 
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
 
         if refund.status != RefundStatus::Pending {
-            return Err(Error::RefundAlreadyProcessed);
+            return Err(FluxaError::RefundAlreadyProcessed);
         }
 
         refund.status = RefundStatus::Rejected;
@@ -374,7 +376,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Refund(refund_id.clone()), &refund);
+            .set(&FluxaDataKey::Refund(refund_id.clone()), &refund);
         Self::bump_refund_ttl(&env, &refund_id, &refund.status);
 
         // Issue #27: emit REFUND/REJECTED event
@@ -468,9 +470,15 @@ impl RefundManager {
         payment_disputes.push_back(dispute_id.clone());
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::PaymentDisputes(payment_id), &payment_disputes);
-            .set(&DataKey::PaymentDisputes(payment_id.clone()), &payment_disputes);
-        Self::bump_ttl(&env, &DataKey::PaymentDisputes(payment_id.clone()), LONG_LIVE_TTL);
+            .set(
+                &FluxaDataKey::PaymentDisputes(payment_id.clone()),
+                &payment_disputes,
+            );
+        Self::bump_ttl(
+            &env,
+            &FluxaDataKey::PaymentDisputes(payment_id.clone()),
+            LONG_LIVE_TTL,
+        );
 
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
@@ -504,8 +512,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id), &dispute);
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE/UNDER_REVIEW event
@@ -561,8 +568,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id), &dispute);
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE/RESOLVED event
@@ -602,8 +608,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id), &dispute);
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE/REJECTED event
@@ -669,7 +674,7 @@ impl RefundManager {
     }
 
     fn bump_refund_ttl(env: &Env, refund_id: &String, status: &RefundStatus) {
-        let key = DataKey::Refund(refund_id.clone());
+        let key = FluxaDataKey::Refund(refund_id.clone());
         Self::bump_ttl(env, &key, Self::refund_ttl(status));
     }
 
@@ -681,7 +686,7 @@ impl RefundManager {
     }
 
     fn bump_dispute_ttl(env: &Env, dispute_id: &String, status: &DisputeStatus) {
-        let key = DataKey::Dispute(dispute_id.clone());
+        let key = FluxaDataKey::Dispute(dispute_id.clone());
         Self::bump_ttl(env, &key, Self::dispute_ttl(status));
     }
 
@@ -696,11 +701,11 @@ impl RefundManager {
     }
 
     fn bump_payment_ttl(env: &Env, payment_id: &String, status: &PaymentStatus) {
-        let key = DataKey::Payment(payment_id.clone());
+        let key = FluxaDataKey::Payment(payment_id.clone());
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
-    fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
+    fn bump_ttl(env: &Env, key: &FluxaDataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
@@ -735,7 +740,7 @@ impl PaymentProcessor {
 
         // Verify that the merchant has the MERCHANT role (granted on verification)
         if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
-            return Err(Error::Unauthorized);
+            return Err(FluxaError::Unauthorized);
         }
 
         if amount <= 0 {
@@ -1021,6 +1026,7 @@ mod dispute_test;
 mod fx_oracle_test;
 #[cfg(test)]
 mod integration_test;
+pub mod invoice;
 pub mod merchant_registry;
 #[cfg(test)]
 mod merchant_registry_test;

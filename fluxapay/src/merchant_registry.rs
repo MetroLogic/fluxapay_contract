@@ -1,6 +1,8 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, vec, Address, Env, String, Symbol, Vec,
 };
+
+use crate::RefundManagerClient;
 
 #[contract]
 pub struct MerchantRegistry;
@@ -70,10 +72,9 @@ impl MerchantRegistry {
         merchant_id: Address,
         business_name: String,
         settlement_currency: String,
-    ) -> Result<(), MerchantError> {
         payout_address: Option<Address>,
         bank_account: Option<String>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), MerchantError> {
         merchant_id.require_auth();
 
         if env
@@ -83,8 +84,6 @@ impl MerchantRegistry {
         {
             return Err(MerchantError::MerchantAlreadyExists);
         }
-
-        let event_currency = settlement_currency.clone();
 
         let merchant = Merchant {
             merchant_id: merchant_id.clone(),
@@ -99,7 +98,9 @@ impl MerchantRegistry {
 
         env.storage()
             .persistent()
-            .set(&MerchantDataKey::Merchant(merchant_id), &merchant);
+            .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
+
+        Self::add_to_merchant_list(&env, &merchant_id);
 
         Ok(())
     }
@@ -111,10 +112,9 @@ impl MerchantRegistry {
         business_name: Option<String>,
         settlement_currency: Option<String>,
         active: Option<bool>,
-    ) -> Result<(), MerchantError> {
         payout_address: Option<Address>,
         bank_account: Option<String>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), MerchantError> {
         merchant_id.require_auth();
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
@@ -137,8 +137,7 @@ impl MerchantRegistry {
 
         env.storage()
             .persistent()
-            .set(&MerchantDataKey::Merchant(merchant_id), &merchant);
-            .set(&DataKey::Merchant(merchant_id.clone()), &merchant);
+            .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
         env.events().publish(
             (Symbol::new(&env, "MERCHANT"), Symbol::new(&env, "UPDATED")),
@@ -153,11 +152,9 @@ impl MerchantRegistry {
         Self::get_merchant_internal(&env, &merchant_id)
     }
 
-    /// Verify merchant (admin only)
-    pub fn verify_merchant(env: Env, admin: Address, merchant_id: Address) -> Result<(), MerchantError> {
     /// Verify merchant (admin only) — sets KycTier::Basic for backward compatibility.
     /// If a RefundManager address is configured, also grants the MERCHANT role there.
-    pub fn verify_merchant(env: Env, admin: Address, merchant_id: Address) -> Result<(), Error> {
+    pub fn verify_merchant(env: Env, admin: Address, merchant_id: Address) -> Result<(), MerchantError> {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -175,23 +172,21 @@ impl MerchantRegistry {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Merchant(merchant_id.clone()), &merchant);
+            .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
-        // If RefundManager is configured, grant the MERCHANT role
         if let Some(refund_manager_addr) = env
             .storage()
             .persistent()
-            .get::<DataKey, Address>(&DataKey::RefundManagerAddress)
+            .get::<MerchantDataKey, Address>(&MerchantDataKey::RefundManagerAddress)
         {
-            // Call RefundManager::grant_role to grant MERCHANT role
-            // We use try_invoke to handle cross-contract calls gracefully
-            let rm_client = crate::RefundManagerClient::new(&env, &refund_manager_addr);
-            let _ = rm_client.try_grant_role(
+            let rm_client = RefundManagerClient::new(&env, &refund_manager_addr);
+            let _ = rm_client.try_refund_grant_role(
                 &admin,
                 &Symbol::new(&env, "MERCHANT"),
                 &merchant_id,
             );
         }
+
         env.events().publish(
             (Symbol::new(&env, "MERCHANT"), Symbol::new(&env, "VERIFIED")),
             merchant_id,
@@ -206,17 +201,17 @@ impl MerchantRegistry {
         admin: Address,
         merchant_id: Address,
         tier: KycTier,
-    ) -> Result<(), Error> {
+    ) -> Result<(), MerchantError> {
         admin.require_auth();
 
         let stored_admin: Address = env
             .storage()
             .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(Error::Unauthorized)?;
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
 
         if admin != stored_admin {
-            return Err(Error::Unauthorized);
+            return Err(MerchantError::Unauthorized);
         }
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
@@ -234,45 +229,42 @@ impl MerchantRegistry {
         env: Env,
         admin: Address,
         refund_manager: Address,
-    ) -> Result<(), Error> {
+    ) -> Result<(), MerchantError> {
         admin.require_auth();
 
         let stored_admin: Address = env
             .storage()
             .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(Error::Unauthorized)?;
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
 
         if admin != stored_admin {
-            return Err(Error::Unauthorized);
+            return Err(MerchantError::Unauthorized);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::RefundManagerAddress, &refund_manager);
+        env.storage().persistent().set(
+            &MerchantDataKey::RefundManagerAddress,
+            &refund_manager,
+        );
 
         Ok(())
     }
 
     /// Get all registered merchants with pagination support
-    pub fn get_all_merchants(
-        env: Env,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Vec<Merchant>, Error> {
+    pub fn get_all_merchants(env: Env, offset: u32, limit: u32) -> Vec<Merchant> {
         let merchant_ids: Vec<Address> = env
             .storage()
             .persistent()
-            .get(&DataKey::MerchantList)
+            .get(&MerchantDataKey::MerchantList)
             .unwrap_or_else(|| vec![&env]);
 
         if limit == 0 {
-            return Ok(vec![&env]);
+            return vec![&env];
         }
 
         let mut result = vec![&env];
-        let start = offset as usize;
-        let end = core::cmp::min(merchant_ids.len(), start.saturating_add(limit as usize));
+        let start = offset;
+        let end = core::cmp::min(merchant_ids.len(), start.saturating_add(limit));
 
         let mut i = start;
         while i < end {
@@ -284,15 +276,15 @@ impl MerchantRegistry {
             i += 1;
         }
 
-        Ok(result)
+        result
     }
 
     /// Get all verified merchants (kyc_tier != Unverified)
-    pub fn get_verified_merchants(env: Env) -> Result<Vec<Merchant>, Error> {
+    pub fn get_verified_merchants(env: Env) -> Vec<Merchant> {
         let merchant_ids: Vec<Address> = env
             .storage()
             .persistent()
-            .get(&DataKey::MerchantList)
+            .get(&MerchantDataKey::MerchantList)
             .unwrap_or_else(|| vec![&env]);
 
         let mut result = vec![&env];
@@ -304,20 +296,17 @@ impl MerchantRegistry {
             }
         }
 
-        Ok(result)
+        result
     }
 
-    // Helper functions
-    fn get_merchant_internal(env: &Env, merchant_id: &Address) -> Result<Merchant, MerchantError> {
     fn add_to_merchant_list(env: &Env, merchant_id: &Address) {
-        let key = DataKey::MerchantList;
+        let key = MerchantDataKey::MerchantList;
         let mut merchants: Vec<Address> = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| vec![env]);
 
-        // Only add if not already present
         let mut found = false;
         for m in merchants.iter() {
             if m == *merchant_id {
@@ -332,60 +321,7 @@ impl MerchantRegistry {
         }
     }
 
-    /// Get all registered merchants with pagination support
-    pub fn get_all_merchants(
-        env: Env,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Vec<Merchant>, Error> {
-        let merchant_ids: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::MerchantList)
-            .unwrap_or_else(|| vec![&env]);
-
-        if limit == 0 {
-            return Ok(vec![&env]);
-        }
-
-        let mut result = vec![&env];
-        let start = offset as usize;
-        let end = core::cmp::min(merchant_ids.len(), start.saturating_add(limit as usize));
-
-        let mut i = start;
-        while i < end {
-            if let Some(merchant_id) = merchant_ids.get(i) {
-                if let Ok(merchant) = Self::get_merchant_internal(&env, &merchant_id) {
-                    result.push_back(merchant);
-                }
-            }
-            i += 1;
-        }
-
-        Ok(result)
-    }
-
-    /// Get all verified merchants (kyc_tier != Unverified)
-    pub fn get_verified_merchants(env: Env) -> Result<Vec<Merchant>, Error> {
-        let merchant_ids: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::MerchantList)
-            .unwrap_or_else(|| vec![&env]);
-
-        let mut result = vec![&env];
-        for merchant_id in merchant_ids.iter() {
-            if let Ok(merchant) = Self::get_merchant_internal(&env, &merchant_id) {
-                if merchant.kyc_tier != KycTier::Unverified {
-                    result.push_back(merchant);
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn get_merchant_internal(env: &Env, merchant_id: &Address) -> Result<Merchant, Error> {
+    fn get_merchant_internal(env: &Env, merchant_id: &Address) -> Result<Merchant, MerchantError> {
         env.storage()
             .persistent()
             .get(&MerchantDataKey::Merchant(merchant_id.clone()))
