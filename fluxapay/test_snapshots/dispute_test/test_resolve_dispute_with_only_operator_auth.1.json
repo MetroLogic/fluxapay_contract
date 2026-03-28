@@ -175,7 +175,7 @@
                   "string": "pay_auth_test"
                 },
                 {
-                  "bytes": "115e567e2f5f0b15ee24e4c41ad287567fe161972017c1901ddd01c915825602"
+                  "bytes": "b1366dec60d1ed1c5c501b1c93604bbb4abb983c5a2b79a102709a3910a0b265"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -535,7 +535,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "115e567e2f5f0b15ee24e4c41ad287567fe161972017c1901ddd01c915825602"
+                        "bytes": "b1366dec60d1ed1c5c501b1c93604bbb4abb983c5a2b79a102709a3910a0b265"
                       }
                     }
                   ]
