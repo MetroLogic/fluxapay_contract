@@ -92,24 +92,24 @@ pub struct Dispute {
 
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FluxaError {
-    PaymentNotFound = 1,
+pub enum Error {
+    PaymentNotFound = 404,
+    RefundNotFound = 405,
+    InvalidAmount = 406,
+    Unauthorized = 1,
     PaymentAlreadyExists = 2,
-    InvalidAmount = 3,
-    AccessControlError = 4,
-    PaymentExpired = 5,
-    PaymentAlreadyProcessed = 6,
-    InvalidPaymentId = 7,
-    RefundNotFound = 8,
-    RefundAlreadyProcessed = 9,
-    Unauthorized = 10,
-    DisputeNotFound = 11,
+    PaymentExpired = 3,
+    InvalidPaymentId = 4,
+    RefundAlreadyProcessed = 8,
+    DisputeNotFound = 9,
     DisputeAlreadyResolved = 12,
-    RefundExceedsPayment = 13,
+    PaymentAlreadyProcessed = 14,
+    AccessControlError = 15,
+    RefundExceedsPayment = 16,
 }
 
 #[contracttype]
-pub enum FluxaDataKey {
+pub enum DataKey {
     Payment(String),
     MerchantPayments(Address),
     Refund(String),
@@ -131,46 +131,46 @@ impl RefundManager {
         AccessControl::initialize(&env, admin);
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::UsdcToken, &usdc_token_address);
+            .set(&DataKey::UsdcToken, &usdc_token_address);
     }
 
-    pub fn refund_grant_role(
+    pub fn grant_role(
         env: Env,
         admin: Address,
         role: Symbol,
         account: Address,
-    ) -> Result<(), FluxaError> {
-        AccessControl::grant_role(&env, admin, role, account).map_err(|_| FluxaError::AccessControlError)
+    ) -> Result<(), Error> {
+        AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
-    pub fn refund_revoke_role(
+    pub fn revoke_role(
         env: Env,
         admin: Address,
         role: Symbol,
         account: Address,
-    ) -> Result<(), FluxaError> {
+    ) -> Result<(), Error> {
         AccessControl::revoke_role(&env, admin, role, account)
-            .map_err(|_| FluxaError::AccessControlError)
+            .map_err(|_| Error::AccessControlError)
     }
 
-    pub fn refund_has_role(env: Env, role: Symbol, account: Address) -> bool {
+    pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         AccessControl::has_role(&env, &role, &account)
     }
 
-    pub fn refund_renounce_role(env: Env, account: Address, role: Symbol) -> Result<(), FluxaError> {
-        AccessControl::renounce_role(&env, account, role).map_err(|_| FluxaError::AccessControlError)
+    pub fn renounce_role(env: Env, account: Address, role: Symbol) -> Result<(), Error> {
+        AccessControl::renounce_role(&env, account, role).map_err(|_| Error::AccessControlError)
     }
 
-    pub fn refund_transfer_admin(
+    pub fn transfer_admin(
         env: Env,
         current_admin: Address,
         new_admin: Address,
-    ) -> Result<(), FluxaError> {
+    ) -> Result<(), Error> {
         AccessControl::transfer_admin(&env, current_admin, new_admin)
-            .map_err(|_| FluxaError::AccessControlError)
+            .map_err(|_| Error::AccessControlError)
     }
 
-    pub fn refund_get_admin(env: Env) -> Option<Address> {
+    pub fn get_admin(env: Env) -> Option<Address> {
         AccessControl::get_admin(&env)
     }
 
@@ -190,7 +190,7 @@ impl RefundManager {
         if !env
             .storage()
             .persistent()
-            .has(&FluxaDataKey::Payment(payment_id.clone()))
+            .has(&DataKey::Payment(payment_id.clone()))
         {
             let payment = PaymentCharge {
                 payment_id: payment_id.clone(),
@@ -207,7 +207,7 @@ impl RefundManager {
             };
             env.storage()
                 .persistent()
-                .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+                .set(&DataKey::Payment(payment_id.clone()), &payment);
             Self::bump_payment_ttl(&env, &payment_id, &payment.status);
         }
     }
@@ -218,7 +218,7 @@ impl RefundManager {
         refund_amount: i128,
         reason: String,
         requester: Address,
-    ) -> Result<String, FluxaError> {
+    ) -> Result<String, Error> {
         requester.require_auth();
         Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester)
     }
@@ -229,17 +229,17 @@ impl RefundManager {
         refund_amount: i128,
         reason: String,
         requester: Address,
-    ) -> Result<String, FluxaError> {
+    ) -> Result<String, Error> {
         if refund_amount <= 0 {
-            return Err(FluxaError::InvalidAmount);
+            return Err(Error::InvalidAmount);
         }
 
         // Validate refund amount does not exceed original payment amount
         let payment: PaymentCharge = env
             .storage()
             .persistent()
-            .get(&FluxaDataKey::Payment(payment_id.clone()))
-            .ok_or(FluxaError::PaymentNotFound)?;
+            .get(&DataKey::Payment(payment_id.clone()))
+            .ok_or(Error::PaymentNotFound)?;
 
         // Sum existing refund amounts for this payment
         let existing_refunds = Self::get_payment_refunds_internal(env, &payment_id);
@@ -253,7 +253,7 @@ impl RefundManager {
         }
 
         if total_refunded + refund_amount > payment.amount {
-            return Err(FluxaError::RefundExceedsPayment);
+            return Err(Error::RefundExceedsPayment);
         }
 
         let counter = Self::get_next_refund_id(&env);
@@ -276,18 +276,14 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Refund(refund_id.clone()), &refund);
+            .set(&DataKey::Refund(refund_id.clone()), &refund);
 
         let mut payment_refunds = Self::get_payment_refunds_internal(env, &payment_id);
         payment_refunds.push_back(refund_id.clone());
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::PaymentRefunds(payment_id.clone()), &payment_refunds);
-        Self::bump_ttl(
-            &env,
-            &FluxaDataKey::PaymentRefunds(payment_id.clone()),
-            LONG_LIVE_TTL,
-        );
+            .set(&DataKey::PaymentRefunds(payment_id.clone()), &payment_refunds);
+        Self::bump_ttl(&env, &DataKey::PaymentRefunds(payment_id.clone()), LONG_LIVE_TTL);
 
         Self::bump_refund_ttl(&env, &refund_id, &refund.status);
 
@@ -300,14 +296,14 @@ impl RefundManager {
         Ok(refund_id)
     }
 
-    pub fn process_refund(env: Env, operator: Address, refund_id: String) -> Result<(), FluxaError> {
+    pub fn process_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         let has_settlement =
             AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
 
         if !has_settlement && !has_oracle {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         Self::process_refund_internal(&env, &operator, refund_id)
@@ -317,18 +313,18 @@ impl RefundManager {
         env: &Env,
         _operator: &Address,
         refund_id: String,
-    ) -> Result<(), FluxaError> {
+    ) -> Result<(), Error> {
         let mut refund = Self::get_refund_internal(env, &refund_id)?;
 
         if refund.status != RefundStatus::Pending {
-            return Err(FluxaError::RefundAlreadyProcessed);
+            return Err(Error::RefundAlreadyProcessed);
         }
 
         let usdc_token_address: Address = env
             .storage()
             .persistent()
-            .get(&FluxaDataKey::UsdcToken)
-            .ok_or(FluxaError::Unauthorized)?;
+            .get(&DataKey::UsdcToken)
+            .ok_or(Error::Unauthorized)?;
         let token_client = token::TokenClient::new(env, &usdc_token_address);
 
         let from = env.current_contract_address();
@@ -342,7 +338,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Refund(refund_id.clone()), &refund);
+            .set(&DataKey::Refund(refund_id.clone()), &refund);
         Self::bump_refund_ttl(&env, &refund_id, &refund.status);
 
         // Issue #27: emit REFUND/COMPLETED event
@@ -355,20 +351,20 @@ impl RefundManager {
     }
 
     /// Reject a pending refund (operator only). Emits REFUND/REJECTED (issue #27).
-    pub fn reject_refund(env: Env, operator: Address, refund_id: String) -> Result<(), FluxaError> {
+    pub fn reject_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         let has_settlement =
             AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
 
         if !has_settlement && !has_oracle {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
 
         if refund.status != RefundStatus::Pending {
-            return Err(FluxaError::RefundAlreadyProcessed);
+            return Err(Error::RefundAlreadyProcessed);
         }
 
         refund.status = RefundStatus::Rejected;
@@ -376,7 +372,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Refund(refund_id.clone()), &refund);
+            .set(&DataKey::Refund(refund_id.clone()), &refund);
         Self::bump_refund_ttl(&env, &refund_id, &refund.status);
 
         // Issue #27: emit REFUND/REJECTED event
@@ -388,11 +384,11 @@ impl RefundManager {
         Ok(())
     }
 
-    pub fn get_refund(env: Env, refund_id: String) -> Result<Refund, FluxaError> {
+    pub fn get_refund(env: Env, refund_id: String) -> Result<Refund, Error> {
         Self::get_refund_internal(&env, &refund_id)
     }
 
-    pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, FluxaError> {
+    pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, Error> {
         let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
         let mut refunds = vec![&env];
         for id in refund_ids.iter() {
@@ -407,26 +403,26 @@ impl RefundManager {
         let mut counter: u64 = env
             .storage()
             .persistent()
-            .get(&FluxaDataKey::RefundCounter)
+            .get(&DataKey::RefundCounter)
             .unwrap_or(0);
         counter += 1;
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::RefundCounter, &counter);
+            .set(&DataKey::RefundCounter, &counter);
         counter
     }
 
-    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, FluxaError> {
+    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
         env.storage()
             .persistent()
-            .get(&FluxaDataKey::Refund(refund_id.clone()))
-            .ok_or(FluxaError::RefundNotFound)
+            .get(&DataKey::Refund(refund_id.clone()))
+            .ok_or(Error::RefundNotFound)
     }
 
     fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
         env.storage()
             .persistent()
-            .get(&FluxaDataKey::PaymentRefunds(payment_id.clone()))
+            .get(&DataKey::PaymentRefunds(payment_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
@@ -438,11 +434,11 @@ impl RefundManager {
         reason: String,
         evidence: String,
         disputer: Address,
-    ) -> Result<String, FluxaError> {
+    ) -> Result<String, Error> {
         disputer.require_auth();
 
         if amount <= 0 {
-            return Err(FluxaError::InvalidAmount);
+            return Err(Error::InvalidAmount);
         }
 
         let counter = Self::get_next_dispute_id(&env);
@@ -464,21 +460,14 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
 
         let mut payment_disputes = Self::get_payment_disputes_internal(&env, &payment_id);
         payment_disputes.push_back(dispute_id.clone());
         env.storage()
             .persistent()
-            .set(
-                &FluxaDataKey::PaymentDisputes(payment_id.clone()),
-                &payment_disputes,
-            );
-        Self::bump_ttl(
-            &env,
-            &FluxaDataKey::PaymentDisputes(payment_id.clone()),
-            LONG_LIVE_TTL,
-        );
+            .set(&DataKey::PaymentDisputes(payment_id.clone()), &payment_disputes);
+        Self::bump_ttl(&env, &DataKey::PaymentDisputes(payment_id.clone()), LONG_LIVE_TTL);
 
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
@@ -491,7 +480,7 @@ impl RefundManager {
         Ok(dispute_id)
     }
 
-    pub fn review_dispute(env: Env, operator: Address, dispute_id: String) -> Result<(), FluxaError> {
+    pub fn review_dispute(env: Env, operator: Address, dispute_id: String) -> Result<(), Error> {
         operator.require_auth();
 
         let has_settlement =
@@ -499,20 +488,20 @@ impl RefundManager {
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
 
         if !has_settlement && !has_oracle {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
 
         if dispute.status != DisputeStatus::Open {
-            return Err(FluxaError::DisputeAlreadyResolved);
+            return Err(Error::DisputeAlreadyResolved);
         }
 
         dispute.status = DisputeStatus::UnderReview;
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE/UNDER_REVIEW event
@@ -529,7 +518,7 @@ impl RefundManager {
         operator: Address,
         dispute_id: String,
         resolution_notes: String,
-    ) -> Result<String, FluxaError> {
+    ) -> Result<String, Error> {
         operator.require_auth();
 
         let has_settlement =
@@ -537,13 +526,13 @@ impl RefundManager {
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
 
         if !has_settlement && !has_oracle {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
 
         if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Rejected {
-            return Err(FluxaError::DisputeAlreadyResolved);
+            return Err(Error::DisputeAlreadyResolved);
         }
 
         // Create refund for the disputed amount
@@ -568,7 +557,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE/RESOLVED event
@@ -585,7 +574,7 @@ impl RefundManager {
         operator: Address,
         dispute_id: String,
         resolution_notes: String,
-    ) -> Result<(), FluxaError> {
+    ) -> Result<(), Error> {
         operator.require_auth();
 
         let has_settlement =
@@ -593,13 +582,13 @@ impl RefundManager {
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
 
         if !has_settlement && !has_oracle {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
 
         if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Rejected {
-            return Err(FluxaError::DisputeAlreadyResolved);
+            return Err(Error::DisputeAlreadyResolved);
         }
 
         dispute.status = DisputeStatus::Rejected;
@@ -608,7 +597,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE/REJECTED event
@@ -620,11 +609,11 @@ impl RefundManager {
         Ok(())
     }
 
-    pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, FluxaError> {
+    pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, Error> {
         Self::get_dispute_internal(&env, &dispute_id)
     }
 
-    pub fn get_payment_disputes(env: Env, payment_id: String) -> Result<Vec<Dispute>, FluxaError> {
+    pub fn get_payment_disputes(env: Env, payment_id: String) -> Result<Vec<Dispute>, Error> {
         let dispute_ids = Self::get_payment_disputes_internal(&env, &payment_id);
         let mut disputes = vec![&env];
         for id in dispute_ids.iter() {
@@ -639,12 +628,12 @@ impl RefundManager {
         let mut counter: u64 = env
             .storage()
             .persistent()
-            .get(&FluxaDataKey::DisputeCounter)
+            .get(&DataKey::DisputeCounter)
             .unwrap_or(0);
         counter += 1;
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::DisputeCounter, &counter);
+            .set(&DataKey::DisputeCounter, &counter);
         counter
     }
 
@@ -652,17 +641,17 @@ impl RefundManager {
         format_id(env, "dispute_", counter)
     }
 
-    fn get_dispute_internal(env: &Env, dispute_id: &String) -> Result<Dispute, FluxaError> {
+    fn get_dispute_internal(env: &Env, dispute_id: &String) -> Result<Dispute, Error> {
         env.storage()
             .persistent()
-            .get(&FluxaDataKey::Dispute(dispute_id.clone()))
-            .ok_or(FluxaError::DisputeNotFound)
+            .get(&DataKey::Dispute(dispute_id.clone()))
+            .ok_or(Error::DisputeNotFound)
     }
 
     fn get_payment_disputes_internal(env: &Env, payment_id: &String) -> Vec<String> {
         env.storage()
             .persistent()
-            .get(&FluxaDataKey::PaymentDisputes(payment_id.clone()))
+            .get(&DataKey::PaymentDisputes(payment_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
@@ -674,7 +663,7 @@ impl RefundManager {
     }
 
     fn bump_refund_ttl(env: &Env, refund_id: &String, status: &RefundStatus) {
-        let key = FluxaDataKey::Refund(refund_id.clone());
+        let key = DataKey::Refund(refund_id.clone());
         Self::bump_ttl(env, &key, Self::refund_ttl(status));
     }
 
@@ -686,7 +675,7 @@ impl RefundManager {
     }
 
     fn bump_dispute_ttl(env: &Env, dispute_id: &String, status: &DisputeStatus) {
-        let key = FluxaDataKey::Dispute(dispute_id.clone());
+        let key = DataKey::Dispute(dispute_id.clone());
         Self::bump_ttl(env, &key, Self::dispute_ttl(status));
     }
 
@@ -701,11 +690,11 @@ impl RefundManager {
     }
 
     fn bump_payment_ttl(env: &Env, payment_id: &String, status: &PaymentStatus) {
-        let key = FluxaDataKey::Payment(payment_id.clone());
+        let key = DataKey::Payment(payment_id.clone());
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
-    fn bump_ttl(env: &Env, key: &FluxaDataKey, ttl: u32) {
+    fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
@@ -722,8 +711,8 @@ impl PaymentProcessor {
         admin: Address,
         role: Symbol,
         account: Address,
-    ) -> Result<(), FluxaError> {
-        AccessControl::grant_role(&env, admin, role, account).map_err(|_| FluxaError::AccessControlError)
+    ) -> Result<(), Error> {
+        AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
     #[allow(deprecated)]
@@ -735,28 +724,28 @@ impl PaymentProcessor {
         currency: Symbol,
         deposit_address: Address,
         expires_at: u64,
-    ) -> Result<PaymentCharge, FluxaError> {
+    ) -> Result<PaymentCharge, Error> {
         merchant_id.require_auth();
 
         // Verify that the merchant has the MERCHANT role (granted on verification)
         if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         if amount <= 0 {
-            return Err(FluxaError::InvalidAmount);
+            return Err(Error::InvalidAmount);
         }
 
         if env
             .storage()
             .persistent()
-            .has(&FluxaDataKey::Payment(payment_id.clone()))
+            .has(&DataKey::Payment(payment_id.clone()))
         {
-            return Err(FluxaError::PaymentAlreadyExists);
+            return Err(Error::PaymentAlreadyExists);
         }
 
         if payment_id.is_empty() {
-            return Err(FluxaError::InvalidPaymentId);
+            return Err(Error::InvalidPaymentId);
         }
 
         let payment = PaymentCharge {
@@ -775,12 +764,12 @@ impl PaymentProcessor {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         let mut merchant_payments = Self::get_merchant_payments_internal(&env, &merchant_id);
         merchant_payments.push_back(payment_id.clone());
-        let merchant_payments_key = FluxaDataKey::MerchantPayments(merchant_id);
+        let merchant_payments_key = DataKey::MerchantPayments(merchant_id);
         env.storage()
             .persistent()
             .set(&merchant_payments_key, &merchant_payments);
@@ -802,30 +791,30 @@ impl PaymentProcessor {
         transaction_hash: BytesN<32>,
         payer_address: Address,
         amount_received: i128,
-    ) -> Result<PaymentStatus, FluxaError> {
+    ) -> Result<PaymentStatus, Error> {
         oracle.require_auth();
 
         if !AccessControl::has_role(&env, &role_oracle(&env), &oracle)
             && !AccessControl::has_role(&env, &role_settlement_operator(&env), &oracle)
         {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
         if payment.status != PaymentStatus::Pending {
-            return Err(FluxaError::PaymentAlreadyProcessed);
+            return Err(Error::PaymentAlreadyProcessed);
         }
 
         if env.ledger().timestamp() > payment.expires_at {
-            return Err(FluxaError::PaymentExpired);
+            return Err(Error::PaymentExpired);
         }
 
         if amount_received != payment.amount {
             payment.status = PaymentStatus::Failed;
             env.storage()
                 .persistent()
-                .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+                .set(&DataKey::Payment(payment_id.clone()), &payment);
             Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
             env.events().publish(
@@ -843,7 +832,7 @@ impl PaymentProcessor {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
@@ -854,7 +843,7 @@ impl PaymentProcessor {
         Ok(PaymentStatus::Confirmed)
     }
 
-    pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, FluxaError> {
+    pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, Error> {
         Self::get_payment_internal(&env, &payment_id)
     }
 
@@ -889,29 +878,29 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
-    pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), FluxaError> {
+    pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
         if payment.status != PaymentStatus::Pending {
-            return Err(FluxaError::PaymentAlreadyProcessed);
+            return Err(Error::PaymentAlreadyProcessed);
         }
 
         if env.ledger().timestamp() > payment.expires_at {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         authority.require_auth();
         let is_merchant = authority == payment.merchant_id;
         let is_oracle = AccessControl::has_role(&env, &role_oracle(&env), &authority);
         if !is_merchant && !is_oracle {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         payment.status = PaymentStatus::Failed;
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
@@ -923,22 +912,22 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
-    pub fn expire_payment(env: Env, payment_id: String) -> Result<(), FluxaError> {
+    pub fn expire_payment(env: Env, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
         if payment.status != PaymentStatus::Pending {
-            return Err(FluxaError::PaymentAlreadyProcessed);
+            return Err(Error::PaymentAlreadyProcessed);
         }
 
         if env.ledger().timestamp() <= payment.expires_at {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         payment.status = PaymentStatus::Expired;
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
@@ -954,17 +943,17 @@ impl PaymentProcessor {
         operator: Address,
         payment_id: String,
         treasury_address: Address,
-    ) -> Result<(), FluxaError> {
+    ) -> Result<(), Error> {
         operator.require_auth();
 
         if !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator) {
-            return Err(FluxaError::Unauthorized);
+            return Err(Error::Unauthorized);
         }
 
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
         if payment.status != PaymentStatus::Confirmed {
-            return Err(FluxaError::PaymentAlreadyProcessed); // Or another appropriate error
+            return Err(Error::PaymentAlreadyProcessed); // Or another appropriate error
         }
 
         payment.status = PaymentStatus::Settled;
@@ -972,7 +961,7 @@ impl PaymentProcessor {
 
         env.storage()
             .persistent()
-            .set(&FluxaDataKey::Payment(payment_id.clone()), &payment);
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
@@ -983,17 +972,17 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    fn get_payment_internal(env: &Env, payment_id: &String) -> Result<PaymentCharge, FluxaError> {
+    fn get_payment_internal(env: &Env, payment_id: &String) -> Result<PaymentCharge, Error> {
         env.storage()
             .persistent()
-            .get(&FluxaDataKey::Payment(payment_id.clone()))
-            .ok_or(FluxaError::PaymentNotFound)
+            .get(&DataKey::Payment(payment_id.clone()))
+            .ok_or(Error::PaymentNotFound)
     }
 
     fn get_merchant_payments_internal(env: &Env, merchant_id: &Address) -> Vec<String> {
         env.storage()
             .persistent()
-            .get(&FluxaDataKey::MerchantPayments(merchant_id.clone()))
+            .get(&DataKey::MerchantPayments(merchant_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
@@ -1008,11 +997,11 @@ impl PaymentProcessor {
     }
 
     fn bump_payment_ttl(env: &Env, payment_id: &String, status: &PaymentStatus) {
-        let key = FluxaDataKey::Payment(payment_id.clone());
+        let key = DataKey::Payment(payment_id.clone());
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
-    fn bump_ttl(env: &Env, key: &FluxaDataKey, ttl: u32) {
+    fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
@@ -1032,6 +1021,10 @@ pub mod merchant_registry;
 mod merchant_registry_test;
 #[cfg(test)]
 mod proptests;
+mod payment_link;
+pub use payment_link::{PaymentLink, PaymentLinkManager, PaymentLinkManagerClient};
+#[cfg(test)]
+mod payment_link_test;
 mod test;
 
 pub fn format_id(env: &Env, prefix: &str, n: u64) -> String {

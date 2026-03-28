@@ -56,8 +56,8 @@ fn test_merchant_update() {
         &merchant_id,
         &business_name,
         &settlement_currency,
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     let new_name = String::from_str(&env, "New name");
@@ -96,14 +96,14 @@ fn test_merchant_verification() {
     let admin = Address::generate(&env);
     let merchant_id = Address::generate(&env);
 
-    client.merchant_initialize(&admin);
+    client.initialize(&admin);
 
     client.register_merchant(
         &merchant_id,
         &String::from_str(&env, "Merchant"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     // verify_merchant sets KycTier::Basic for backward compatibility
@@ -126,14 +126,14 @@ fn test_unauthorized_verification() {
     let attacker = Address::generate(&env);
     let merchant_id = Address::generate(&env);
 
-    client.merchant_initialize(&admin);
+    client.initialize(&admin);
 
     client.register_merchant(
         &merchant_id,
         &String::from_str(&env, "Merchant"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     // Attacker tries to verify the merchant
@@ -151,7 +151,7 @@ fn test_set_kyc_tier() {
     let admin = Address::generate(&env);
     let merchant_id = Address::generate(&env);
 
-    client.merchant_initialize(&admin);
+    client.initialize(&admin);
     client.register_merchant(
         &merchant_id,
         &String::from_str(&env, "BigCorp"),
@@ -184,13 +184,13 @@ fn test_set_kyc_tier_unauthorized() {
     let attacker = Address::generate(&env);
     let merchant_id = Address::generate(&env);
 
-    client.merchant_initialize(&admin);
+    client.initialize(&admin);
     client.register_merchant(
         &merchant_id,
         &String::from_str(&env, "Merchant"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     // Non-admin tries to set KYC tier
@@ -206,7 +206,7 @@ fn test_merchant_enumeration() {
     let client = MerchantRegistryClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.merchant_initialize(&admin);
+    client.initialize(&admin);
 
     // Register multiple merchants
     let merchant1 = Address::generate(&env);
@@ -217,22 +217,22 @@ fn test_merchant_enumeration() {
         &merchant1,
         &String::from_str(&env, "Merchant 1"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
     client.register_merchant(
         &merchant2,
         &String::from_str(&env, "Merchant 2"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
     client.register_merchant(
         &merchant3,
         &String::from_str(&env, "Merchant 3"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     // Get all merchants - should return all 3
@@ -256,7 +256,7 @@ fn test_verified_merchants_filter() {
     let client = MerchantRegistryClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.merchant_initialize(&admin);
+    client.initialize(&admin);
 
     // Register merchants
     let merchant1 = Address::generate(&env);
@@ -267,22 +267,22 @@ fn test_verified_merchants_filter() {
         &merchant1,
         &String::from_str(&env, "Merchant 1"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
     client.register_merchant(
         &merchant2,
         &String::from_str(&env, "Merchant 2"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
     client.register_merchant(
         &merchant3,
         &String::from_str(&env, "Merchant 3"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     // Verify only merchant2
@@ -296,7 +296,7 @@ fn test_verified_merchants_filter() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #10)")]
+#[should_panic(expected = "HostError: Error(Contract, #1)")]
 fn test_unverified_merchant_cannot_create_payment() {
     let env = Env::default();
     env.mock_all_auths();
@@ -316,7 +316,7 @@ fn test_unverified_merchant_cannot_create_payment() {
     // Initialize contracts
     refund_client.initialize_refund_manager(&admin, &usdc_token);
     payment_client.initialize_payment_processor(&admin);
-    merchant_client.merchant_initialize(&admin);
+    merchant_client.initialize(&admin);
 
     // Register merchant but DON'T verify them
     let merchant = Address::generate(&env);
@@ -324,8 +324,8 @@ fn test_unverified_merchant_cannot_create_payment() {
         &merchant,
         &String::from_str(&env, "Unverified Merchant"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
     // Try to create payment - should fail because merchant is not verified
@@ -364,7 +364,7 @@ fn test_verified_merchant_can_create_payment() {
     // Initialize contracts
     refund_client.initialize_refund_manager(&admin, &usdc_token);
     payment_client.initialize_payment_processor(&admin);
-    merchant_client.merchant_initialize(&admin);
+    merchant_client.initialize(&admin);
 
     // Register and verify merchant
     let merchant = Address::generate(&env);
@@ -372,11 +372,11 @@ fn test_verified_merchant_can_create_payment() {
         &merchant,
         &String::from_str(&env, "Verified Merchant"),
         &String::from_str(&env, "USDC"),
-        &None::<Address>,
-        &None::<String>,
+        &None,
+        &None,
     );
 
-    // Manually grant MERCHANT role on the payment processor
+    // Manually grant MERCHANT role (simulating what would happen with set_refund_manager_address)
     payment_client.payment_grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
     // Now create payment should succeed

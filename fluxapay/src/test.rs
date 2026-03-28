@@ -42,7 +42,6 @@ fn test_create_payment() {
     let currency = Symbol::new(&env, "USDC");
     let deposit_address = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
-
     client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     let payment = client.create_payment(
@@ -72,7 +71,6 @@ fn test_verify_payment_success() {
     let merchant_id = Address::generate(&env);
     let amount = 1000000000i128;
     let expires_at = env.ledger().timestamp() + 3600;
-
     client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     client.create_payment(
@@ -113,12 +111,11 @@ fn test_get_merchant_payments_index_and_pagination() {
     let deposit_address = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
 
-    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
-
     let payment_id_1 = String::from_str(&env, "merchant_pay_1");
     let payment_id_2 = String::from_str(&env, "merchant_pay_2");
     let payment_id_3 = String::from_str(&env, "merchant_pay_3");
 
+    client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
     client.create_payment(
         &payment_id_1,
         &merchant_id,
@@ -165,7 +162,6 @@ fn test_cancel_payment_before_expiry_by_merchant() {
     let payment_id = String::from_str(&env, "cancel_before_expiry");
     let merchant_id = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
-
     client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     client.create_payment(
@@ -192,7 +188,6 @@ fn test_expire_payment_after_deadline() {
     let payment_id = String::from_str(&env, "expire_after_deadline");
     let merchant_id = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 10;
-
     client.payment_grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     client.create_payment(
@@ -255,7 +250,7 @@ fn test_process_refund() {
     );
 
     let operator = Address::generate(&env);
-    client.refund_grant_role(&admin, &role_settlement_operator(&env), &operator);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
 
     client.process_refund(&operator, &refund_id);
 
@@ -274,8 +269,8 @@ fn test_initialize_contract() {
     let client = RefundManagerClient::new(&env, &contract_id);
     client.initialize_refund_manager(&admin, &usdc_token);
 
-    assert_eq!(client.refund_get_admin(), Some(admin.clone()));
-    assert!(client.refund_has_role(&role_admin(&env), &admin));
+    assert_eq!(client.get_admin(), Some(admin.clone()));
+    assert!(client.has_role(&role_admin(&env), &admin));
 }
 
 #[test]
@@ -286,8 +281,8 @@ fn test_grant_role() {
     let account = Address::generate(&env);
     let role = role_oracle(&env);
 
-    client.refund_grant_role(&admin, &role, &account);
-    assert!(client.refund_has_role(&role, &account));
+    client.grant_role(&admin, &role, &account);
+    assert!(client.has_role(&role, &account));
 }
 
 #[test]
@@ -297,9 +292,9 @@ fn test_transfer_admin() {
     let (current_admin, client) = setup_refund_manager(&env);
     let new_admin = Address::generate(&env);
 
-    client.refund_transfer_admin(&current_admin, &new_admin);
-    assert!(client.refund_has_role(&role_admin(&env), &new_admin));
-    assert_eq!(client.refund_get_admin(), Some(new_admin));
+    client.transfer_admin(&current_admin, &new_admin);
+    assert!(client.has_role(&role_admin(&env), &new_admin));
+    assert_eq!(client.get_admin(), Some(new_admin));
 }
 
 #[test]
@@ -383,7 +378,7 @@ fn test_create_refund_requires_auth() {
 #[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
 fn test_create_payment_requires_auth() {
     let env = Env::default();
-    let (_admin, client) = setup_payment_processor(&env);
+    let (admin, client) = setup_payment_processor(&env);
 
     let payment_id = String::from_str(&env, "payment_123");
     let merchant_id = Address::generate(&env);
@@ -419,18 +414,18 @@ fn test_get_role_members() {
     assert_eq!(members.len(), 0);
 
     // Grant oracle to oracle1
-    client.refund_grant_role(&admin, &oracle_role, &oracle1);
+    client.grant_role(&admin, &oracle_role, &oracle1);
     let members = client.get_role_members(&oracle_role);
     assert_eq!(members.len(), 1);
     assert_eq!(members.get(0), Some(oracle1.clone()));
 
     // Grant oracle to oracle2
-    client.refund_grant_role(&admin, &oracle_role, &oracle2);
+    client.grant_role(&admin, &oracle_role, &oracle2);
     let members = client.get_role_members(&oracle_role);
     assert_eq!(members.len(), 2);
 
     // Revoke oracle1 — list should shrink
-    client.refund_revoke_role(&admin, &oracle_role, &oracle1);
+    client.revoke_role(&admin, &oracle_role, &oracle1);
     let members = client.get_role_members(&oracle_role);
     assert_eq!(members.len(), 1);
     assert_eq!(members.get(0), Some(oracle2.clone()));

@@ -53,11 +53,11 @@ impl InvoiceContract {
             .set(&DataKey::PaymentProcessor, &payment_processor);
     }
 
-    pub fn get_admin(env: Env) -> Option<Address> {
+    pub fn invoice_get_admin(env: Env) -> Option<Address> {
         env.storage().persistent().get(&DataKey::Admin)
     }
 
-    pub fn get_payment_processor(env: Env) -> Option<Address> {
+    pub fn invoice_get_payment_processor(env: Env) -> Option<Address> {
         env.storage().persistent().get(&DataKey::PaymentProcessor)
     }
 
@@ -221,8 +221,8 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (admin, payment_processor, client) = setup(&env);
-        assert_eq!(client.get_admin(), Some(admin));
-        assert_eq!(client.get_payment_processor(), Some(payment_processor));
+        assert_eq!(client.invoice_get_admin(), Some(admin));
+        assert_eq!(client.invoice_get_payment_processor(), Some(payment_processor));
     }
 
     #[test]

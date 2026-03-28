@@ -28,7 +28,7 @@ jobs:
       url: ${{ inputs.is_production && 'https://stellar.expert/explorer/public' || 'https://stellar.expert/explorer/testnet' }}
 
     permissions:
-      contents: read
+      contents: write
       deployments: write
 
     steps:
@@ -98,17 +98,62 @@ jobs:
           echo "✓ All checks passed for production deployment"
 
       - name: Deploy to Stellar ${{ inputs.stellar_network }}
+        id: deploy
         env:
           STELLAR_NETWORK: ${{ inputs.stellar_network }}
           STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
         run: |
           echo "Deploying fluxapay to Stellar ${{ inputs.stellar_network }}"
-          # Using environment variables for secrets is safer than shell arguments
-          # stellar contract deploy \
-          #   --wasm ../target/wasm32-unknown-unknown/release/fluxapay.wasm \
-          #   --network ${{ inputs.stellar_network }} \
-          #   --source $STELLAR_SECRET_KEY
-          echo "Contract deployed successfully to ${{ inputs.environment_name }}"
+          # Deploy and capture contract ID
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/fluxapay.wasm \
+            --network ${{ inputs.stellar_network }} \
+            --source $STELLAR_SECRET_KEY)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Contract deployed successfully: $CONTRACT_ID"
+
+      - name: Generate TypeScript bindings
+        id: generate_bindings
+        run: |
+          echo "Generating bindings for contract ${{ steps.deploy.outputs.contract_id }}"
+          stellar contract bindings typescript \
+            --contract-id ${{ steps.deploy.outputs.contract_id }} \
+            --output-dir bindings/ \
+            --network ${{ inputs.stellar_network }} \
+            --overwrite
+          
+          # Add versioning info based on git SHA
+          cd bindings/
+          # Update package name to be network-specific
+          PACKAGE_NAME="@fluxapay/contract-client-${{ inputs.stellar_network }}"
+          # Use git SHA as part of the version
+          VERSION="1.0.0-${{ github.sha }}"
+          
+          # Using node to update package.json
+          node -e "
+            const pkg = require('./package.json');
+            pkg.name = '$PACKAGE_NAME';
+            pkg.version = '$VERSION';
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));
+          "
+          echo "Generated bindings for $PACKAGE_NAME version $VERSION"
+
+      - name: Publish bindings to npm
+        if: success()
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd bindings/
+          # Create .npmrc for authentication
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
+          # Publish to npm
+          npm publish --access public
+
+      - name: Commit generated bindings
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update contract bindings [${{ inputs.environment_name }}]"
+          file_pattern: 'bindings/*'
 
       - name: Deployment Smoke Test
         if: success()

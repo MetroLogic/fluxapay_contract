@@ -183,6 +183,8 @@ The system returns the following errors:
 - `Unauthorized` (10): Caller doesn't have required role
 - `DisputeNotFound` (11): Dispute ID doesn't exist
 - `DisputeAlreadyResolved` (12): Dispute has already been resolved or rejected
+- `PaymentNotFound` (1): Associated payment ID doesn't exist
+- `RefundExceedsPayment` (13): Disputed amount would exceed the original payment amount
 
 ## Access Control
 
@@ -212,3 +214,7 @@ Comprehensive tests are available in `src/dispute_test.rs` covering:
 - Rejecting disputes
 - Retrieving dispute information
 - Error cases (invalid amounts, unauthorized access)
+
+
+---
+Last verified against commit: f2098716f548ac3523e3f114634acf813490ff87

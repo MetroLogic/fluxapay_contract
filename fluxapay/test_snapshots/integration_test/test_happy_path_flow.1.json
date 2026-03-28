@@ -202,7 +202,7 @@
                   "string": "PAY_01"
                 },
                 {
-                  "bytes": "c57dbd6d0edd5706573af5f861ff38ea0047565f19fd4178cc6fb2915bcb15a0"
+                  "bytes": "69c0c9d1e206dcba299f7921b52614352806a4485215acd799bf6aea7eecf75c"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
@@ -257,7 +257,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "function_name": "refund_grant_role",
+              "function_name": "grant_role",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
@@ -588,7 +588,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "c57dbd6d0edd5706573af5f861ff38ea0047565f19fd4178cc6fb2915bcb15a0"
+                        "bytes": "69c0c9d1e206dcba299f7921b52614352806a4485215acd799bf6aea7eecf75c"
                       }
                     }
                   ]

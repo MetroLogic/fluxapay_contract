@@ -1,3 +1,4 @@
+#![no_std]
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
 
 use crate::access_control::{role_admin, role_oracle, AccessControl};
@@ -51,7 +52,7 @@ impl FXOracle {
         AccessControl::has_role(&env, &role, &account)
     }
 
-    pub fn get_oracle_admin(env: Env) -> Option<Address> {
+    pub fn get_fx_admin(env: Env) -> Option<Address> {
         AccessControl::get_admin(&env)
     }
 

@@ -57,7 +57,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "function_name": "refund_grant_role",
+              "function_name": "grant_role",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -175,7 +175,7 @@
                   "string": "payment_003"
                 },
                 {
-                  "bytes": "440f0cdb4dd195e018894201077fe9a0b6688a6c5aeed3ba08e9d11ddbd4a8c7"
+                  "bytes": "5d8a9a6aa7f03c5a5131b47ac40a994c015dca3e7cc435b7b99f7ba7470d734d"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -535,7 +535,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "440f0cdb4dd195e018894201077fe9a0b6688a6c5aeed3ba08e9d11ddbd4a8c7"
+                        "bytes": "5d8a9a6aa7f03c5a5131b47ac40a994c015dca3e7cc435b7b99f7ba7470d734d"
                       }
                     }
                   ]

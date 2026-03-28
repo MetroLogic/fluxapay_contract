@@ -1,8 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, vec, Vec,
 };
-
-use crate::RefundManagerClient;
 
 #[contract]
 pub struct MerchantRegistry;
@@ -58,7 +56,7 @@ pub enum MerchantError {
 #[contractimpl]
 impl MerchantRegistry {
     /// Initialize the contract with an admin address
-    pub fn merchant_initialize(env: Env, admin: Address) -> Result<(), MerchantError> {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), MerchantError> {
         if env.storage().persistent().has(&MerchantDataKey::Admin) {
             return Err(MerchantError::AdminAlreadySet);
         }
@@ -99,7 +97,7 @@ impl MerchantRegistry {
         env.storage()
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
-
+        
         Self::add_to_merchant_list(&env, &merchant_id);
 
         Ok(())
@@ -174,19 +172,20 @@ impl MerchantRegistry {
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
+        // If RefundManager is configured, grant the MERCHANT role
         if let Some(refund_manager_addr) = env
             .storage()
             .persistent()
             .get::<MerchantDataKey, Address>(&MerchantDataKey::RefundManagerAddress)
         {
-            let rm_client = RefundManagerClient::new(&env, &refund_manager_addr);
-            let _ = rm_client.try_refund_grant_role(
+            let rm_client = crate::RefundManagerClient::new(&env, &refund_manager_addr);
+            let _ = rm_client.try_grant_role(
                 &admin,
                 &Symbol::new(&env, "MERCHANT"),
                 &merchant_id,
             );
         }
-
+        
         env.events().publish(
             (Symbol::new(&env, "MERCHANT"), Symbol::new(&env, "VERIFIED")),
             merchant_id,
@@ -242,16 +241,19 @@ impl MerchantRegistry {
             return Err(MerchantError::Unauthorized);
         }
 
-        env.storage().persistent().set(
-            &MerchantDataKey::RefundManagerAddress,
-            &refund_manager,
-        );
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::RefundManagerAddress, &refund_manager);
 
         Ok(())
     }
 
     /// Get all registered merchants with pagination support
-    pub fn get_all_merchants(env: Env, offset: u32, limit: u32) -> Vec<Merchant> {
+    pub fn get_all_merchants(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Merchant> {
         let merchant_ids: Vec<Address> = env
             .storage()
             .persistent()
@@ -263,10 +265,9 @@ impl MerchantRegistry {
         }
 
         let mut result = vec![&env];
-        let start = offset;
-        let end = core::cmp::min(merchant_ids.len(), start.saturating_add(limit));
+        let end = core::cmp::min(merchant_ids.len(), offset.saturating_add(limit));
 
-        let mut i = start;
+        let mut i = offset;
         while i < end {
             if let Some(merchant_id) = merchant_ids.get(i) {
                 if let Ok(merchant) = Self::get_merchant_internal(&env, &merchant_id) {
@@ -299,6 +300,7 @@ impl MerchantRegistry {
         result
     }
 
+    // Helper functions
     fn add_to_merchant_list(env: &Env, merchant_id: &Address) {
         let key = MerchantDataKey::MerchantList;
         let mut merchants: Vec<Address> = env
@@ -307,6 +309,7 @@ impl MerchantRegistry {
             .get(&key)
             .unwrap_or_else(|| vec![env]);
 
+        // Only add if not already present
         let mut found = false;
         for m in merchants.iter() {
             if m == *merchant_id {

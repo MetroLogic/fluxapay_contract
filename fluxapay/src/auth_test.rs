@@ -33,7 +33,7 @@ fn setup_contracts(
     token_admin_client.mint(&refund_manager, &1_000_000_000_000i128);
 
     payment_client.initialize_payment_processor(&admin);
-    merchant_client.merchant_initialize(&admin);
+    merchant_client.initialize(&admin);
 
     (admin, payment_client, refund_client, merchant_client)
 }
@@ -45,7 +45,7 @@ fn test_grant_role_without_admin_signature() {
     let (admin, _payment_client, refund_client, _merchant_client) = setup_contracts(&env);
     let account = Address::generate(&env);
     let role = Symbol::new(&env, "ORACLE");
-    refund_client.refund_grant_role(&admin, &role, &account);
+    refund_client.grant_role(&admin, &role, &account);
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn test_revoke_role_without_admin_signature() {
     let (admin, _payment_client, refund_client, _merchant_client) = setup_contracts(&env);
     let account = Address::generate(&env);
     let role = Symbol::new(&env, "ORACLE");
-    refund_client.refund_revoke_role(&admin, &role, &account);
+    refund_client.revoke_role(&admin, &role, &account);
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn test_transfer_admin_without_admin_signature() {
     let env = Env::default();
     let (admin, _payment_client, refund_client, _merchant_client) = setup_contracts(&env);
     let new_admin = Address::generate(&env);
-    refund_client.refund_transfer_admin(&admin, &new_admin);
+    refund_client.transfer_admin(&admin, &new_admin);
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn test_create_dispute_without_disputer_signature() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #10)")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_process_refund_without_operator_role() {
     let env = Env::default();
     env.mock_all_auths();
