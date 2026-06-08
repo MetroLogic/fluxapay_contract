@@ -638,6 +638,161 @@ fn test_payout_address_rotation_delay_success_after_48_hours() {
 }
 
 #[test]
+fn test_payout_history_initially_empty_after_first_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let merchant_id = Address::generate(&env);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    let events_before = env.events().all().len();
+    let payout_addr = Address::generate(&env);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr),
+        &None,
+        &None,
+    );
+
+    let history = client.get_payout_history(&merchant_id);
+    assert_eq!(history.len(), 0);
+    assert_eq!(env.events().all().len(), events_before + 1);
+}
+
+#[test]
+fn test_payout_history_records_previous_addresses_in_order() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let merchant_id = Address::generate(&env);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    let payout_addr1 = Address::generate(&env);
+    let payout_addr2 = Address::generate(&env);
+    let payout_addr3 = Address::generate(&env);
+
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr1.clone()),
+        &None,
+        &None,
+    );
+
+    env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
+    let events_before_second_update = env.events().all().len();
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr2.clone()),
+        &None,
+        &None,
+    );
+
+    let history_after_second_update = client.get_payout_history(&merchant_id);
+    assert_eq!(history_after_second_update.len(), 1);
+    assert_eq!(history_after_second_update.get(0).unwrap(), payout_addr1.clone());
+    assert_eq!(
+        env.events().all().len(),
+        events_before_second_update + 2
+    );
+
+    env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr3),
+        &None,
+        &None,
+    );
+
+    let history = client.get_payout_history(&merchant_id);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap(), payout_addr1);
+    assert_eq!(history.get(1).unwrap(), payout_addr2);
+}
+
+#[test]
+fn test_unchanged_payout_address_does_not_add_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let merchant_id = Address::generate(&env);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    let payout_addr = Address::generate(&env);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr.clone()),
+        &None,
+        &None,
+    );
+
+    let new_name = String::from_str(&env, "Merchant renamed");
+    let events_before_same_address_update = env.events().all().len();
+    client.update_merchant(
+        &merchant_id,
+        &Some(new_name.clone()),
+        &None,
+        &None,
+        &Some(payout_addr.clone()),
+        &None,
+        &None,
+    );
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert_eq!(merchant.business_name, new_name);
+    assert_eq!(merchant.payout_address, Some(payout_addr));
+    assert_eq!(client.get_payout_history(&merchant_id).len(), 0);
+    assert_eq!(
+        env.events().all().len(),
+        events_before_same_address_update + 1
+    );
+}
+
+#[test]
 #[should_panic(expected = "HostError: Error(Contract, #3)")]
 fn test_suspend_merchant_unauthorized() {
     let env = Env::default();

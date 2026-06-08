@@ -100,6 +100,7 @@ pub struct Merchant {
 #[contracttype]
 pub enum MerchantDataKey {
     Merchant(Address),
+    MerchantPayoutHistory(Address),
     Admin,
     /// Stores the list of all registered merchants for enumeration
     MerchantList,
@@ -229,31 +230,57 @@ impl MerchantRegistry {
             merchant.active = is_active;
         }
         if let Some(addr) = payout_address {
-            // Validate against whitelist if whitelist is not empty (issue #210)
-            if !merchant.payout_whitelist.is_empty() {
-                let mut is_whitelisted = false;
-                for whitelisted_addr in merchant.payout_whitelist.iter() {
-                    if whitelisted_addr == addr {
-                        is_whitelisted = true;
-                        break;
+            let previous_payout_address = merchant.payout_address.clone();
+            let payout_changed = previous_payout_address
+                .as_ref()
+                .map_or(true, |previous_addr| previous_addr != &addr);
+
+            if payout_changed {
+                // Validate against whitelist if whitelist is not empty (issue #210)
+                if !merchant.payout_whitelist.is_empty() {
+                    let mut is_whitelisted = false;
+                    for whitelisted_addr in merchant.payout_whitelist.iter() {
+                        if whitelisted_addr == addr {
+                            is_whitelisted = true;
+                            break;
+                        }
+                    }
+                    if !is_whitelisted {
+                        return Err(MerchantError::PayoutAddressNotWhitelisted);
                     }
                 }
-                if !is_whitelisted {
-                    return Err(MerchantError::PayoutAddressNotWhitelisted);
+
+                // Enforce 48-hour delay on payout address changes (issue #212)
+                let current_time = env.ledger().timestamp();
+                let forty_eight_hours = 48 * 60 * 60; // 48 hours in seconds
+                if let Some(last_change_time) = merchant.last_payout_change_at {
+                    if current_time < last_change_time + forty_eight_hours {
+                        return Err(MerchantError::Unauthorized); // Reuse Unauthorized error or create new one
+                    }
                 }
-            }
-            
-            // Enforce 48-hour delay on payout address changes (issue #212)
-            let current_time = env.ledger().timestamp();
-            let forty_eight_hours = 48 * 60 * 60; // 48 hours in seconds
-            if let Some(last_change_time) = merchant.last_payout_change_at {
-                if current_time < last_change_time + forty_eight_hours {
-                    return Err(MerchantError::Unauthorized); // Reuse Unauthorized error or create new one
+
+                if let Some(old_addr) = previous_payout_address {
+                    let history_key = MerchantDataKey::MerchantPayoutHistory(merchant_id.clone());
+                    let mut history: Vec<Address> = env
+                        .storage()
+                        .persistent()
+                        .get(&history_key)
+                        .unwrap_or_else(|| vec![&env]);
+                    history.push_back(old_addr.clone());
+                    env.storage().persistent().set(&history_key, &history);
+
+                    env.events().publish(
+                        (
+                            Symbol::new(&env, "MERCHANT"),
+                            Symbol::new(&env, "PAYOUT_UPDATED"),
+                        ),
+                        (merchant_id.clone(), old_addr, addr.clone()),
+                    );
                 }
+
+                merchant.payout_address = Some(addr);
+                merchant.last_payout_change_at = Some(current_time);
             }
-            
-            merchant.payout_address = Some(addr);
-            merchant.last_payout_change_at = Some(current_time);
         }
         if let Some(acct) = bank_account {
             merchant.bank_account = Some(acct);
@@ -327,6 +354,20 @@ impl MerchantRegistry {
 
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         Ok(merchant.bank_account)
+    }
+
+    /// Get the previous payout addresses for a merchant in chronological order.
+    pub fn get_payout_history(
+        env: Env,
+        merchant_id: Address,
+    ) -> Result<Vec<Address>, MerchantError> {
+        Self::get_merchant_internal(&env, &merchant_id)?;
+
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::MerchantPayoutHistory(merchant_id))
+            .unwrap_or_else(|| vec![&env]))
     }
 
     /// Verify merchant (admin only) — sets KycTier::Basic for backward compatibility.
