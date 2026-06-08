@@ -9,22 +9,84 @@ use soroban_sdk::{
 
 #[test]
 fn test_datakey_discriminant_stability() {
-    let _env = Env::default();
+    let env = Env::default();
 
-    // We verify that the enum variants have stable discriminants.
-    // In Soroban, discriminants are 0-indexed based on definition order.
-    // If someone reorders the enum, these tests will fail (if we check XDR).
-    // A simpler way is to check that we can still read what we write.
+    // This is a storage-compatibility canary. `#[contracttype]` encodes enum
+    // variants by their definition order, so reordering `DataKey` variants would
+    // make existing ledger entries unreadable by the original keys.
+    let merchant = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let payment_id = String::from_str(&env, "PAY_STABLE");
+    let refund_id = String::from_str(&env, "REF_STABLE");
 
-    // However, the task specifically asked to check index.
-    // We can use core::mem::discriminant if it was stable across compiles, but
-    // in Rust it's not guaranteed unless #[repr(u32)] is used.
-    // DataKey in lib.rs DOES NOT have #[repr(u32)].
+    let payment = PaymentCharge {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        amount: 2500,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address,
+        status: PaymentStatus::Pending,
+        payer_address: Some(payer.clone()),
+        transaction_hash: None,
+        created_at: 10,
+        confirmed_at: None,
+        expires_at: 70,
+        amount_received: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        metadata_hash: None,
+        original_token: None,
+        swap_path: None,
+        fx_rate: None,
+        fx_rate_at: None,
+    };
+    env.storage()
+        .persistent()
+        .set(&DataKey::Payment(payment_id.clone()), &payment);
+    let stored_payment: PaymentCharge = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Payment(payment_id.clone()))
+        .unwrap();
+    assert_eq!(stored_payment, payment);
 
-    // But Soroban's contracttype macro for enums uses the order of variants.
-    // Let's check the first few variants.
+    let refund = Refund {
+        refund_id: refund_id.clone(),
+        payment_id: payment_id.clone(),
+        amount: 500,
+        reason: String::from_str(&env, "customer-request"),
+        status: RefundStatus::Pending,
+        requester: payer,
+        created_at: 20,
+        processed_at: None,
+        approved: false,
+        receipt_hash: None,
+        expiry_at: 100,
+    };
+    env.storage()
+        .persistent()
+        .set(&DataKey::Refund(refund_id.clone()), &refund);
+    let stored_refund: Refund = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Refund(refund_id))
+        .unwrap();
+    assert_eq!(stored_refund, refund);
 
-    // We can't easily check the raw discriminant without converting to XDR.
+    let mut merchant_payments = vec![&env];
+    merchant_payments.push_back(payment_id);
+    env.storage().persistent().set(
+        &DataKey::MerchantPayments(merchant.clone()),
+        &merchant_payments,
+    );
+    let stored_merchant_payments: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::MerchantPayments(merchant))
+        .unwrap();
+    assert_eq!(stored_merchant_payments, merchant_payments);
 }
 
 fn setup_payment_processor(env: &Env) -> (Address, PaymentProcessorClient<'_>) {
