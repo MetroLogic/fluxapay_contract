@@ -23,13 +23,14 @@ use crate::utils::validate_id;
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
-    Address, BytesN, Env, Symbol,
+    token, Address, BytesN, Env, String, Symbol,
 };
 
 use crate::{
-    access_control::{role_merchant, role_oracle},
-    Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
-    RefundManagerClient, RefundStatus, PAYMENT_TOLERANCE,
+    access_control::{role_merchant, role_oracle, role_settlement_operator},
+    BillingInterval, Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
+    RefundManagerClient, RefundStatus, SubscriptionStatus, PAYMENT_TOLERANCE,
+    SUBSCRIPTION_RETRY_INTERVAL_SECS,
 };
 
 fn setup_payment_processor(env: &Env) -> (Address, PaymentProcessorClient<'_>) {
@@ -57,6 +58,36 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
     token_admin_client.mint(&contract_id, &1_000_000_000_000_000i128);
 
     (admin, client)
+}
+
+fn setup_subscription_env(env: &Env, mint_payer: bool) -> (Address, RefundManagerClient<'_>, Address, Address, Address, Address) {
+    let contract_id = env.register(RefundManager, ());
+    let client = RefundManagerClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+
+    let token_admin = Address::generate(env);
+    let usdc_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    client.initialize_refund_manager(&admin, &usdc_token);
+
+    let token_admin_client = token::StellarAssetClient::new(env, &usdc_token);
+    token_admin_client.mint(&contract_id, &1_000_000_000_000i128);
+
+    let merchant = Address::generate(env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let operator = Address::generate(env);
+    client.grant_role(&admin, &role_oracle(&env), &operator);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let payer = Address::generate(env);
+    if mint_payer {
+        token_admin_client.mint(&payer, &1_000_000_000_000i128);
+    }
+
+    (admin, client, merchant, usdc_token, payer, operator)
 }
 
 proptest! {
@@ -137,6 +168,8 @@ proptest! {
             client_token: None,
             metadata_hash: None, metadata: None,
             fee_waiver_code: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
         };
 
         client.create_payment(&args);
@@ -149,6 +182,7 @@ proptest! {
             &BytesN::<32>::random(&env),
             &Address::generate(&env),
             &amount,
+            &None,
         );
 
         assert_eq!(result, Err(Ok(Error::PaymentExpired)));
@@ -189,6 +223,8 @@ proptest! {
             client_token: None,
             metadata_hash: None, metadata: None,
             fee_waiver_code: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
         };
 
         client.create_payment(&args);
@@ -199,6 +235,7 @@ proptest! {
             &BytesN::<32>::random(&env),
             &Address::generate(&env),
             &(amount + delta),
+            &None,
         );
 
         let expected = if delta > PAYMENT_TOLERANCE {
@@ -421,5 +458,148 @@ proptest! {
             .map(|r| r.amount)
             .sum();
         prop_assert!(tracked_total <= payment_amount);
+    }
+
+    /// Issue #681: Subscription cannot be charged before the billing interval has elapsed.
+    #[test]
+    fn prop_subscription_cannot_charge_before_interval(
+        interval_secs in 60u64..=86_400u64,
+        amount in 1i128..=1_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client, merchant, _usdc_token, payer, operator) = setup_subscription_env(&env, true);
+
+        let plan_id = String::from_str(&env, "prop_plan");
+        client.create_subscription_plan(
+            &merchant,
+            &plan_id,
+            &String::from_str(&env, "Prop Plan"),
+            &String::from_str(&env, "prop"),
+            &amount,
+            &Symbol::new(&env, "USDC"),
+            &BillingInterval::Weekly,
+        );
+
+        let sub_id = client.subscribe(
+            &payer,
+            &plan_id,
+            &None,
+            &None,
+            &None,
+        );
+
+        // Immediately try to charge - should return Active without charging
+        let status = client.process_subscription(&operator, &sub_id);
+        assert_eq!(status, SubscriptionStatus::Active);
+
+        let sub = client.get_subscription(&sub_id);
+        assert!(sub.last_payment_at.is_none(), "Should not have charged yet");
+
+        // Fast-forward past the interval
+        let now = env.ledger().timestamp();
+        env.ledger().set_timestamp(now + interval_secs + 1);
+
+        // Now charge should succeed
+        let status2 = client.process_subscription(&operator, &sub_id);
+        assert_eq!(status2, SubscriptionStatus::Active);
+
+        let sub2 = client.get_subscription(&sub_id);
+        assert!(sub2.last_payment_at.is_some());
+        let last_charged = sub2.last_payment_at.unwrap();
+        assert!(last_charged >= now + interval_secs,
+            "last_payment_at {} should be >= now + interval {}",
+            last_charged, now + interval_secs);
+    }
+
+    /// Issue #681: Subscription charge timestamps are monotonic.
+    #[test]
+    fn prop_subscription_charge_timestamp_monotonic(
+        interval_secs in 60u64..=86_400u64,
+        num_charges in 1u32..=5u32,
+        amount in 1i128..=1_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client, merchant, _usdc_token, payer, operator) = setup_subscription_env(&env, true);
+
+        let plan_id = String::from_str(&env, "prop_plan_mono");
+        client.create_subscription_plan(
+            &merchant,
+            &plan_id,
+            &String::from_str(&env, "Prop Plan Mono"),
+            &String::from_str(&env, "prop"),
+            &amount,
+            &Symbol::new(&env, "USDC"),
+            &BillingInterval::Weekly,
+        );
+
+        let sub_id = client.subscribe(
+            &payer,
+            &plan_id,
+            &None,
+            &None,
+            &None,
+        );
+
+        let mut last_charged: u64 = 0;
+        for i in 0..num_charges {
+            let now = env.ledger().timestamp();
+            env.ledger().set_timestamp(now + interval_secs + 1);
+
+            let status = client.process_subscription(&operator, &sub_id);
+            assert_eq!(status, SubscriptionStatus::Active);
+
+            let sub = client.get_subscription(&sub_id);
+            let current_charged = sub.last_payment_at.unwrap();
+            assert!(current_charged > last_charged,
+                "charge {}: last_payment_at {} should be > previous {}",
+                i, current_charged, last_charged);
+            last_charged = current_charged;
+        }
+    }
+
+    /// Issue #681: Retry interval is independent of billing interval.
+    #[test]
+    fn prop_subscription_retry_interval_independent_of_billing_interval(
+        interval_secs in 60u64..=86_400u64,
+        amount in 1i128..=1_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, client, merchant, _usdc_token, payer, operator) = setup_subscription_env(&env, false);
+
+        let plan_id = String::from_str(&env, "prop_plan_retry");
+        client.create_subscription_plan(
+            &merchant,
+            &plan_id,
+            &String::from_str(&env, "Prop Plan Retry"),
+            &String::from_str(&env, "prop"),
+            &amount,
+            &Symbol::new(&env, "USDC"),
+            &BillingInterval::Weekly,
+        );
+
+        let sub_id = client.subscribe(
+            &payer,
+            &plan_id,
+            &None,
+            &None,
+            &None,
+        );
+
+        // Advance time to make subscription due
+        let now = env.ledger().timestamp();
+        env.ledger().set_timestamp(now + interval_secs + 1);
+
+        // Charge will fail because payer has no tokens
+        let status = client.try_process_subscription(&operator, &sub_id);
+        assert_eq!(status, Err(Ok(Error::SubscriptionInGracePeriod)));
+
+        let sub = client.get_subscription(&sub_id);
+        let expected_retry = now + interval_secs + 1 + SUBSCRIPTION_RETRY_INTERVAL_SECS;
+        assert_eq!(sub.next_retry_at, Some(expected_retry),
+            "next_retry_at {:?} should equal now + SUBSCRIPTION_RETRY_INTERVAL_SECS ({})",
+            sub.next_retry_at, expected_retry);
     }
 }

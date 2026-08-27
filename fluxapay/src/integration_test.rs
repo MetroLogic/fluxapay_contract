@@ -105,8 +105,7 @@ fn test_create_payment_with_verified_registry_merchant_succeeds() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
@@ -129,8 +128,7 @@ fn test_create_payment_with_unverified_registry_merchant_fails() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
 
@@ -152,8 +150,7 @@ fn test_create_payment_with_suspended_registry_merchant_fails() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.suspend_merchant(
         &admin,
@@ -200,8 +197,7 @@ fn test_happy_path_flow() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     let merchant_info = merchant_client.get_merchant(&merchant);
     assert_eq!(merchant_info.kyc_tier, KycTier::Basic);
@@ -679,8 +675,7 @@ fn test_settle_payment_with_zero_merchant_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &0i128, &0i128, &None::<Address>);
 
@@ -743,8 +738,7 @@ fn test_settle_payment_with_bps_only_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &500i128, &0i128, &None::<Address>);
 
@@ -807,8 +801,7 @@ fn test_settle_payment_with_fixed_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &0i128, &100i128, &None::<Address>);
 
@@ -871,8 +864,7 @@ fn test_settle_payment_with_combined_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &200i128, &50i128, &None::<Address>);
 
@@ -989,8 +981,7 @@ fn test_cross_contract_happy_path() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
 
     let merchant_info = merchant_client.get_merchant(&merchant);
     assert_eq!(merchant_info.kyc_tier, KycTier::Unverified);
@@ -1066,8 +1057,7 @@ fn test_cross_contract_unverified_merchant_rejection() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
 
     // Try to create payment with unverified merchant
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
@@ -1113,8 +1103,7 @@ fn test_cross_contract_suspended_merchant_rejection() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
 
     // Suspend the merchant
@@ -1169,8 +1158,7 @@ fn test_cross_contract_registry_not_set_regression() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
 
     // Try to create payment without registry wired
     // Should check merchant role, not merchant verification status
@@ -1248,8 +1236,7 @@ fn setup_dispute(
         &String::from_str(env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(admin, &merchant);
 
     let pid = String::from_str(env, payment_id);
@@ -1270,6 +1257,8 @@ fn setup_dispute(
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
     payment_client.create_payment(&args);
 

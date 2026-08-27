@@ -37,7 +37,13 @@ import {
 export { FLUXAPAY_CONTRACT_IDS, UNSET_CONTRACT_ID } from "./network-profiles.js";
 export type { FluxapayContractIds } from "./network-profiles.js";
 import { FxOracleClient } from "./contracts/fx-oracle.js";
-import { MerchantRegistryClient } from "./contracts/merchant-registry.js";
+import {
+  MerchantRegistryClient,
+  type MerchantRegistryConfig,
+  type AddCurrencyPayoutParams,
+  type CurrencyPayout,
+  type BankAccount,
+} from "./contracts/merchant-registry.js";
 import {
   PaymentLinkManagerClient,
   type PaymentLinkManagerConfig,
@@ -347,28 +353,38 @@ export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
   31: "SubscriptionRetryExhausted",
   32: "InvalidResumeTimestamp",
   33: "MerchantAuthError",
-  34: "TierVolumeLimitExceeded",
-  35: "BatchTooLarge",
+  34: "InvalidSplitSum",
+  35: "MissingReceiptHash",
   36: "RefundExpired",
-  37: "InsufficientArbitrators",
-  38: "ArbitrationVotingThresholdNotMet",
-  39: "FeeProposalNotReady",
-  40: "InvalidEvidenceFormat",
-  41: "InvalidSettlementSignature",
+  37: "AlreadyVoted",
+  38: "TierVolumeLimitExceeded",
+  39: "BatchTooLarge",
+  40: "InsufficientArbitrators",
+  41: "ArbitrationVotingThresholdNotMet",
   42: "RefundCooldownNotElapsed",
-  43: "Reentrancy",
+  43: "FeeProposalNotReady",
   44: "NoFeeProposal",
-  45: "StaleOracleRate",
-  46: "LinkExpired", // ambiguous: also InsufficientTreasuryBalance = 46
-  47: "MetadataValueTooLong",
-  48: "UpgradeFailed",
-  49: "MetadataTooLarge",
-  50: "InvalidMemoType",
-  51: "MemoTooLong",
-  52: "InvalidMemoId",
-  53: "PayerNotWhitelisted",
-  54: "DisputeRateLimitExceeded", // ambiguous: also LinkMaxUsesReached, DirectTransferNotDisputable, MaxRetriesExceeded, InvalidStatusTransition = 54
-  55: "RateDeviationExceeded",
+  45: "InvalidEvidenceFormat",
+  46: "DisputeRateLimitExceeded",
+  47: "InvalidSettlementSignature",
+  48: "StaleOracleRate",
+  49: "LinkExpired",
+  50: "Reentrancy",
+  51: "UpgradeFailed",
+  52: "InsufficientTreasuryBalance",
+  53: "MetadataTooLarge",
+  54: "MetadataValueTooLong",
+  55: "InvalidMemoType",
+  56: "MemoTooLong",
+  57: "InvalidMemoId",
+  58: "PayerNotWhitelisted",
+  59: "LinkMaxUsesReached",
+  60: "DirectTransferNotDisputable",
+  61: "MaxRetriesExceeded",
+  62: "InvalidStatusTransition",
+  63: "RefundNotApproved",
+  64: "RouterNotAllowed",
+  65: "RouteOutputInsufficient",
   404: "PaymentNotFound",
   405: "RefundNotFound",
   406: "InvalidAmount",
@@ -1643,7 +1659,13 @@ export {
 };
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
-export { MerchantRegistryClient, type MerchantRegistryConfig } from "./contracts/merchant-registry.js";
+export {
+  MerchantRegistryClient,
+  type MerchantRegistryConfig,
+  type AddCurrencyPayoutParams,
+  type CurrencyPayout,
+  type BankAccount,
+} from "./contracts/merchant-registry.js";
 export {
   FxOracleClient,
   FxOracleError,

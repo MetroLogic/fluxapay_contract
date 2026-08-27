@@ -275,6 +275,14 @@ For a detailed understanding of the contract structure, cross-contract interacti
 
 For a unified reference of every contract error code (`PaymentProcessor`, `RefundManager`, `AccessControl`, `Stream`, `FXOracle`, `MerchantRegistry`, `MerchantAuth`, `DexRouter`, `AccountAbstraction`) with common causes and remediation steps, see [docs/error-codes.md](docs/error-codes.md).
 
+## FAQ
+
+Common questions from merchants and developers: [docs/faq.md](docs/faq.md)
+
+## Scripts
+
+Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](scripts/README.md)
+
 ## Telegram link
 
 <https://t.me/+m23gN14007w0ZmQ0>

@@ -43,7 +43,7 @@ pub enum FXOracleError {
     /// Batch rate update exceeds the maximum of 20 pairs.
     BatchTooLarge = 4,
     /// Issue #478: Rate deviation exceeds configured limit
-    RateDeviationExceeded = 4,
+    RateDeviationExceeded = 5,
 }
 
 #[contracttype]
