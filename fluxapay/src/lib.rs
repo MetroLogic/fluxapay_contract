@@ -136,6 +136,49 @@ pub struct PaymentCharge {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentSummary {
+    pub payment_id: String,
+    pub amount: i128,
+    pub fee: i128,
+    pub refund_amount: i128,
+    pub status: PaymentStatus,
+    pub settled_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub merchant_id: Address,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub payments: Vec<PaymentSummary>,
+    pub total_gross: i128,
+    pub total_fees: i128,
+    pub total_refunds: i128,
+    pub total_net_settled: i128,
+    pub dispute_adjustments: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationPage {
+    pub items: Vec<PaymentSummary>,
+    pub total_confirmed: i128,
+    pub total_settled: i128,
+    pub page_total: i128,
+    pub has_more: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentStatusEvent {
+    pub status: PaymentStatus,
+    pub timestamp: u64,
+    pub tx_hash: Option<BytesN<32>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KycTierLimits {
     pub tier: KycTier,
     pub max_amount: i128,
@@ -153,6 +196,31 @@ pub enum PaymentStatus {
     PartiallyPaid,
     /// Customer sent more than the required amount (e.g. tip or rounding).
     Overpaid,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentSummary {
+    pub payment_id: String,
+    pub amount: i128,
+    pub fee: i128,
+    pub refund_amount: i128,
+    pub status: PaymentStatus,
+    pub settled_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub merchant_id: Address,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub payments: Vec<PaymentSummary>,
+    pub total_gross: i128,
+    pub total_fees: i128,
+    pub total_refunds: i128,
+    pub total_net_settled: i128,
+    pub dispute_adjustments: i128,
 }
 
 #[contracttype]
@@ -366,6 +434,8 @@ pub enum Error {
     RouterNotAllowed = 64,
     /// Issue #436: Aggregate route output is less than minimum output amount.
     RouteOutputInsufficient = 65,
+    /// Issue #682: Batch payment creation contains duplicate payment IDs.
+    BatchContainsDuplicates = 66,
 }
 
 #[contracttype]
@@ -869,6 +939,7 @@ pub const DISPUTE_GLOBAL_WINDOW_SECS: u64 = 3600;
 #[contracttype]
 pub enum DataKey {
     Payment(String),
+    PaymentStatusHistory(String),
     MerchantPayments(Address),
     MerchantRateLimit(Address),
     Refund(String),
@@ -1013,6 +1084,9 @@ pub enum DataKey {
     PaymentsByExpiry(u32),
     /// Issue #504: Sorted set of expiry buckets that currently contain payment IDs.
     PaymentExpiryBuckets,
+    /// Issue #678: Daily-bucketed payment ID index for O(days) analytics queries.
+    /// Key: (merchant_id, day_bucket = created_at / 86_400) → Vec<payment_id>.
+    DailyPaymentIndex(Address, u64),
     /// Issue #666: Paginated log of platform-fee collection events (newest-first,
     /// capped at `FEE_COLLECTION_HISTORY_CAP`), consumed by `get_platform_fee_report`.
     FeeCollectionHistory,
@@ -1063,6 +1137,18 @@ pub struct MerchantAnalytics {
     pub dispute_count: u32,
     pub refund_count: u32,
     pub net_settled_volume: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractHealth {
+    pub version: String,
+    pub is_paused: bool,
+    pub is_creation_paused: bool,
+    pub treasury_balance: i128,
+    pub active_payment_count: u32,
+    pub fx_oracle_configured: bool,
+    pub merchant_registry_configured: bool,
 }
 #[cfg_attr(
     any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
@@ -1234,6 +1320,35 @@ impl RefundManager {
             .instance()
             .set(&DataKey::RefundFeeBps, &bps);
         Ok(())
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
+            .unwrap_or(REFUND_COOLDOWN_SECS)
+    }
+
+    fn get_refund_fee_bps_internal(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::RefundFeeBps)
+            .unwrap_or(REFUND_FEE_BPS)
+    }
+
+    pub fn get_refund_fee_bps(env: Env) -> i128 {
+        Self::get_refund_fee_bps_internal(&env)
+    }
+
+    fn get_dispute_bond_amount(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::DisputeBondAmount)
+            .unwrap_or(DISPUTE_BOND_AMOUNT)
     }
 
     /// Admin: configure the DEX router used to route swap_and_pay refunds
@@ -2130,10 +2245,10 @@ impl RefundManager {
                 .get::<DataKey, Address>(&DataKey::DexRouterAddress)
             {
                 let mut reversed_path = Vec::new(env);
-                for i in (0..swap_path.len()).rev() {
-                    if let Some(addr) = swap_path.get(i) {
-                        reversed_path.push_back(addr);
-                    }
+                let mut i = swap_path.len();
+                while i > 0 {
+                    i = i - 1;
+                    reversed_path.push_back(swap_path.get_unchecked(i));
                 }
                 if !reversed_path.is_empty() {
                     let dex_client = crate::dex_router::DexRouterClient::new(env, &dex_router);
@@ -5456,6 +5571,22 @@ impl RefundManager {
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
+    fn record_payment_status(env: &Env, payment: &PaymentCharge) {
+        let key = DataKey::PaymentStatusHistory(payment.payment_id.clone());
+        let mut history: Vec<PaymentStatusEvent> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        history.push_back(PaymentStatusEvent {
+            status: payment.status.clone(),
+            timestamp: env.ledger().timestamp(),
+            tx_hash: payment.transaction_hash.clone(),
+        });
+        env.storage().persistent().set(&key, &history);
+        Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
+    }
+
     fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
@@ -5516,6 +5647,46 @@ impl PaymentProcessor {
         Self::version(env)
     }
 
+    /// Issue #683: Return a summary of key contract metrics for dashboards
+    /// and monitoring. No authentication required — this is a public read.
+    pub fn get_contract_health(env: Env) -> ContractHealth {
+        let version = Self::version(env.clone());
+        let is_paused = Self::is_paused(env.clone());
+        let creation_paused: bool = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PauseState>(&DataKey::CreationPaused)
+            .map(|s| s.paused)
+            .unwrap_or(false);
+        let treasury_balance = Self::get_treasury_balance(env.clone());
+
+        let active_payment_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPaymentCount(env.current_contract_address()))
+            .unwrap_or(0u64) as u32;
+
+        let fx_oracle_configured = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::FxOracleAddress)
+            .is_some();
+
+        let merchant_registry_configured = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+            .is_some();
+
+        ContractHealth {
+            version,
+            is_paused,
+            is_creation_paused: creation_paused,
+            treasury_balance,
+            active_payment_count,
+            fx_oracle_configured,
+            merchant_registry_configured,
+        }
     /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
@@ -6619,6 +6790,25 @@ impl PaymentProcessor {
         }
     }
 
+    /// Issue #678: Append payment_id to the daily bucket index for the given merchant.
+    /// Bucket granularity is one day (86 400 seconds). The index allows analytics
+    /// queries to scan only the relevant day buckets rather than all payments.
+    fn index_payment_by_date(env: &Env, merchant_id: &Address, payment_id: &String, created_at: u64) {
+        const SECONDS_PER_DAY: u64 = 86_400;
+        let day_bucket = created_at / SECONDS_PER_DAY;
+        let key = DataKey::DailyPaymentIndex(merchant_id.clone(), day_bucket);
+        let mut ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        if !ids.contains(payment_id) {
+            ids.push_back(payment_id.clone());
+            env.storage().persistent().set(&key, &ids);
+            Self::bump_ttl(env, &key, LONG_LIVE_TTL);
+        }
+    }
+
     fn remove_payment_from_expiry_bucket(env: &Env, payment_id: &String, expires_at: u64) {
         let bucket = Self::expiry_bucket_for(expires_at);
         let key = DataKey::PaymentsByExpiry(bucket);
@@ -6867,8 +7057,10 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::Payment(args.payment_id.clone()), &payment);
+        Self::record_payment_status(&env, &payment);
         Self::bump_payment_ttl(&env, &args.payment_id, &payment.status);
         Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
+        Self::index_payment_by_date(&env, &args.merchant_id, &args.payment_id, payment.created_at);
 
         // Issue #489: Store reverse index for metadata_hash → payment_id lookup
         if let Some(ref hash) = args.metadata_hash {
@@ -6946,6 +7138,22 @@ impl PaymentProcessor {
 
         if args_list.is_empty() {
             return Ok(vec![&env]);
+        }
+
+        // Issue #682: Detect duplicate payment_ids within the batch
+        let mut seen_payment_ids: Vec<String> = vec![&env];
+        for args in args_list.iter() {
+            let mut is_duplicate = false;
+            for seen_id in seen_payment_ids.iter() {
+                if args.payment_id == seen_id {
+                    is_duplicate = true;
+                    break;
+                }
+            }
+            if is_duplicate {
+                return Err(Error::BatchContainsDuplicates);
+            }
+            seen_payment_ids.push_back(args.payment_id.clone());
         }
 
         let mut batch_merchants: Vec<Address> = vec![&env];
@@ -7436,6 +7644,7 @@ impl PaymentProcessor {
 
         // Issue #505: Validate status transition through state machine
         payment.status = payment_state_machine::transition_status(&payment.status, new_status.clone())?;
+        Self::record_payment_status(&env, &payment);
 
         if let Some(refund_amount) = overpaid_refund_amount {
             if Self::get_auto_refund_overpayment(&env) {
@@ -7546,6 +7755,7 @@ impl PaymentProcessor {
         }
 
         payment.status = PaymentStatus::Confirmed;
+        Self::record_payment_status(&env, &payment);
         let amount_received = payment.amount_received.unwrap_or(payment.amount);
         payment.amount = amount_received;
 
@@ -7588,6 +7798,7 @@ impl PaymentProcessor {
         }
 
         payment.status = PaymentStatus::Pending;
+        Self::record_payment_status(&env, &payment);
         payment.amount = payment.amount.saturating_add(top_up_amount);
 
         env.storage()
@@ -7725,6 +7936,18 @@ impl PaymentProcessor {
         Ok(payment)
     }
 
+    pub fn get_payment_status_history(
+        env: Env,
+        payment_id: String,
+    ) -> Result<Vec<PaymentStatusEvent>, Error> {
+        Self::get_payment_internal(&env, &payment_id)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::PaymentStatusHistory(payment_id))
+            .unwrap_or_else(|| vec![&env]))
+    }
+
     /// Issue #489: Reverse lookup payment by metadata_hash for order reconciliation.
     pub fn get_payment_by_metadata_hash(env: Env, metadata_hash: BytesN<32>) -> Result<PaymentCharge, Error> {
         let payment_id = env
@@ -7782,7 +8005,7 @@ impl PaymentProcessor {
 
         let capped_limit = if limit == 0 { sorted.len() } else { limit.min(sorted.len()) };
         let mut result = vec![&env];
-        let mut idx = 0;
+        let mut idx = 0u32;
         while idx < capped_limit {
             if let Some(profile) = sorted.get(idx) {
                 result.push_back(profile);
@@ -7887,7 +8110,25 @@ impl PaymentProcessor {
 
         let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
 
-        let all_payment_ids = Self::get_merchant_payments_internal(&env, &merchant_id);
+        const SECONDS_PER_DAY: u64 = 86_400;
+        let start_bucket = from_ts / SECONDS_PER_DAY;
+        let end_bucket = to_ts / SECONDS_PER_DAY;
+
+        let mut candidate_ids: Vec<String> = vec![&env];
+        let mut bucket = start_bucket;
+        while bucket <= end_bucket {
+            let key = DataKey::DailyPaymentIndex(merchant_id.clone(), bucket);
+            if let Some(bucket_ids) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Vec<String>>(&key)
+            {
+                for id in bucket_ids.iter() {
+                    candidate_ids.push_back(id);
+                }
+            }
+            bucket = bucket.saturating_add(1);
+        }
 
         let mut payments_in_period = vec![&env];
         let mut total_gross: i128 = 0;
@@ -7920,7 +8161,7 @@ impl PaymentProcessor {
             default_fee_bps
         };
 
-        for payment_id in all_payment_ids.iter() {
+        for payment_id in candidate_ids.iter() {
             if let Ok(payment) = Self::get_payment_internal(&env, &payment_id) {
                 let payment_time = payment.confirmed_at.unwrap_or(payment.created_at);
                 
@@ -7986,6 +8227,32 @@ impl PaymentProcessor {
         })
     }
 
+    pub fn generate_reconciliation_report_paginated(
+        env: Env,
+        merchant_id: Address,
+        from_ts: u64,
+        to_ts: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ReconciliationPage, Error> {
+        let report = Self::generate_reconciliation_report(
+            env.clone(), merchant_id, from_ts, to_ts, offset, limit,
+        )?;
+        let mut page_total = 0i128;
+        for item in report.payments.iter() {
+            page_total = page_total.saturating_add(item.amount);
+        }
+        let page_size = if limit == 0 { 100 } else { limit.min(100) };
+        let has_more = page_size > 0 && page_size == report.payments.len() as u32;
+        Ok(ReconciliationPage {
+            items: report.payments,
+            total_confirmed: report.total_gross,
+            total_settled: report.total_net_settled,
+            page_total,
+            has_more,
+        })
+    }
+
     #[allow(deprecated)]
     pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
@@ -7999,6 +8266,7 @@ impl PaymentProcessor {
         // Ensure the current time is less than the expiry time; if not, mark as expired and return.
         if env.ledger().timestamp() >= payment.expires_at {
             payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Expired)?;
+            Self::record_payment_status(&env, &payment);
 
             env.storage()
                 .persistent()
@@ -8028,6 +8296,7 @@ impl PaymentProcessor {
         }
 
         payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Failed)?;
+        Self::record_payment_status(&env, &payment);
 
         env.storage()
             .persistent()
@@ -8063,6 +8332,7 @@ impl PaymentProcessor {
         }
 
         payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Expired)?;
+        Self::record_payment_status(&env, &payment);
 
         env.storage()
             .persistent()
@@ -8466,6 +8736,7 @@ impl PaymentProcessor {
                     );
 
                     payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
+                    Self::record_payment_status(&env, &payment);
                     env.storage()
                         .persistent()
                         .set(&DataKey::Payment(payment_id.clone()), &payment);
@@ -8593,6 +8864,7 @@ impl PaymentProcessor {
         }
 
         payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
+        Self::record_payment_status(&env, &payment);
 
         // Issue #480: Accumulate net merchant amount to pending settlement.
         let net_merchant_amount: i128 = splits
@@ -9360,6 +9632,27 @@ impl PaymentProcessor {
             .ok_or(Error::PaymentNotFound)
     }
 
+    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id.clone()))
+            .ok_or(Error::RefundNotFound)
+    }
+
+    fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PaymentRefunds(payment_id.clone()))
+            .unwrap_or_else(|| vec![env])
+    }
+
+    pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantDisputeCount(merchant_id))
+            .unwrap_or(0u64)
+    }
+
     /// Issue #397: Validate Stellar memo type constraints.
     ///
     /// Allowed types: Text, Id, Hash, Return
@@ -9497,9 +9790,35 @@ impl PaymentProcessor {
     /// Issue #487: Query aggregate analytics for a merchant over a time range.
     /// Returns total_payments, confirmed_payments, failed_payments, total_volume,
     /// avg_payment_amount, dispute_count, refund_count, net_settled_volume.
-    /// Aggregates are computed lazily from stored payment records (paginated internally, max 500).
+    /// Issue #678: When from_ts/to_ts are provided, uses the DailyPaymentIndex
+    /// to scan only the relevant day buckets (O(days) ledger reads).
     pub fn get_merchant_analytics(env: Env, merchant_id: Address, from_ts: u64, to_ts: u64) -> MerchantAnalytics {
-        let payments = Self::get_merchant_payments_internal(&env, &merchant_id);
+        const SECONDS_PER_DAY: u64 = 86_400;
+        let use_index = from_ts > 0 || to_ts < u64::MAX;
+
+        let candidate_ids: Vec<String> = if use_index {
+            let start_bucket = from_ts / SECONDS_PER_DAY;
+            let end_bucket = to_ts / SECONDS_PER_DAY;
+            let mut ids: Vec<String> = vec![&env];
+            let mut bucket = start_bucket;
+            while bucket <= end_bucket {
+                let key = DataKey::DailyPaymentIndex(merchant_id.clone(), bucket);
+                if let Some(bucket_ids) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Vec<String>>(&key)
+                {
+                    for id in bucket_ids.iter() {
+                        ids.push_back(id);
+                    }
+                }
+                bucket = bucket.saturating_add(1);
+            }
+            ids
+        } else {
+            Self::get_merchant_payments_internal(&env, &merchant_id)
+        };
+
         let mut total_payments = 0u32;
         let mut confirmed_payments = 0u32;
         let mut failed_payments = 0u32;
@@ -9509,7 +9828,7 @@ impl PaymentProcessor {
         let max_samples = 500usize;
         let mut sample_count = 0usize;
 
-        for payment_id in payments.iter() {
+        for payment_id in candidate_ids.iter() {
             if sample_count >= max_samples {
                 break;
             }
@@ -10138,7 +10457,7 @@ impl PaymentProcessor {
     /// Migration function: recompute all merchant payment counts from payment vector.
     /// Scans all merchants and rebuilds the persistent payment count index.
     /// Admin-only operation. Use this after upgrading from older contract versions.
-    pub fn recompute_merchant_counts(env: Env, admin: Address) -> Result<u64, Error> {
+    pub fn recompute_merchant_payment_count(env: Env, admin: Address) -> Result<u64, Error> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -10239,6 +10558,12 @@ impl PaymentProcessor {
     }
 
     pub fn get_merchant_invoices(env: Env, merchant_id: Address) -> Vec<String> {
+        let internal = Self::get_merchant_invoices_internal(&env, &merchant_id);
+        let mut result = vec![&env];
+        for s in internal.iter() {
+            result.push_back(s);
+        }
+        result
         Self::get_merchant_invoices_internal(&env, &merchant_id)
     }
 
@@ -10260,7 +10585,7 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .get::<DataKey, Vec<String>>(&DataKey::MerchantInvoices(merchant_id.clone()))
-            .unwrap_or_else(|| Vec::new(env))
+             .unwrap_or_else(|| Vec::new(env))
     }
 }
 

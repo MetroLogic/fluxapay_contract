@@ -115,6 +115,8 @@ fn create_payment_args(
         client_token: None,
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     }
 }
 
@@ -249,6 +251,27 @@ fn test_create_payments_batch_is_atomic_on_validation_error() {
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
     assert!(!env.storage().persistent().has(&DataKey::Payment(payment_id_1)));
     assert!(!env.storage().persistent().has(&DataKey::Payment(payment_id_2)));
+}
+
+/// Issue #682: Batch with duplicate payment_ids returns BatchContainsDuplicates.
+#[test]
+fn test_create_payments_batch_rejects_duplicate_payment_ids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let payment_id = String::from_str(&env, "dup_payment_id");
+    let batch = vec![
+        &env,
+        create_payment_args(&env, &payment_id, &merchant_id, 100i128),
+        create_payment_args(&env, &payment_id, &merchant_id, 200i128),
+    ];
+
+    let result = client.try_create_payments_batch(&batch);
+    assert_eq!(result, Err(Ok(Error::BatchContainsDuplicates)));
 }
 
 #[test]
@@ -534,7 +557,9 @@ fn test_verify_payment_success() {
         &transaction_hash,
         &payer_address,
         &amount,
-    , &None::<u64>);
+        &None::<u64>);
+        &None,
+    );
 
     assert_eq!(status, PaymentStatus::Confirmed);
     let payment = client.get_payment(&payment_id);
@@ -4015,7 +4040,7 @@ fn test_get_merchant_payments_full_limit_capped_at_50() {
 }
 
 #[test]
-fn test_get_merchant_payment_count_for_dashboard() {
+fn test_get_merchant_payment_count() {
     let env = Env::default();
     env.mock_all_auths();
     let (admin, client) = setup_payment_processor(&env);

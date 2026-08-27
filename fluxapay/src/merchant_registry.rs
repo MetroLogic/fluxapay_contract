@@ -175,6 +175,8 @@ pub struct Merchant {
     /// Issue #481: Total dispute count for this merchant (incremented on dispute creation).
     pub dispute_count: u32,
     /// Issue #481: Count of disputes resolved against this merchant (incremented on unfavorable resolution).
+    pub lost_disputes_count: u32,
+    /// Global payment tolerance in basis points for this merchant.
     pub resolved_against_count: u32,
     pub payment_tolerance: Option<i128>,
 }
@@ -209,6 +211,8 @@ pub enum MerchantDataKey {
     MerchantPendingSettlement(Address),
     /// Issue #481: Admin-configurable dispute threshold for auto-suspension (default 10)
     DisputeThreshold,
+    /// Global payment tolerance in basis points
+    GlobalPaymentTolerance,
     SuspensionProposal(u64),
     SuspensionVote(u64, Address),
     SuspensionProposalCounter,
@@ -461,6 +465,7 @@ impl MerchantRegistry {
             last_settlement_at: None,
             whitelist_mode: false,
             dispute_count: 0,
+            lost_disputes_count: 0,
             resolved_against_count: 0,
             payment_tolerance: None,
         };
@@ -1700,21 +1705,18 @@ impl MerchantRegistry {
             Some(cfg) => cfg.anchor_domain.clone(),
             None => String::from_str(&env, ""),
         };
+        merchant.anchor_config = MaybeAnchorConfig::from(anchor_config);
         merchant.anchor_config = MaybeAnchorConfig::from(anchor_config.clone());
         env.storage()
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
-        let domain = match &anchor_config {
-            Some(cfg) => cfg.anchor_domain.clone(),
-            None => String::from_str(&env, ""),
-        };
         env.events().publish(
             (
                 Symbol::new(&env, "MERCHANT"),
                 Symbol::new(&env, "ANCHOR_UPDATED"),
             ),
-            (merchant_id, domain),
+            (merchant_id, domain_for_event),
         );
         Ok(())
     }
@@ -1939,7 +1941,7 @@ impl MerchantRegistry {
     }
 
     /// Issue #481: Set the global dispute threshold for auto-suspension.
-    /// When a merchant's resolved_against_merchant_count reaches or exceeds this,
+    /// When a merchant's lost_disputes_count reaches or exceeds this,
     /// the merchant is automatically suspended.
     pub fn set_dispute_threshold(
         env: Env,
@@ -2060,6 +2062,7 @@ impl MerchantRegistry {
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        merchant.lost_disputes_count = merchant.lost_disputes_count.saturating_add(1);
         merchant.resolved_against_count = merchant.resolved_against_count.saturating_add(1);
         
         let threshold = Self::get_dispute_threshold(env.clone());
@@ -2077,6 +2080,7 @@ impl MerchantRegistry {
                 ),
                 (
                     merchant_id.clone(),
+                    merchant.lost_disputes_count,
                     merchant.resolved_against_count,
                     threshold,
                 ),

@@ -65,6 +65,21 @@ export interface SetMerchantFeeWaiverParams {
   expiresAt?: bigint | null;
 }
 
+export interface AddCurrencyPayoutParams {
+  merchant: string;
+  currency: string;
+  payoutAddress: string;
+}
+
+export interface CurrencyPayout {
+  currency: string;
+  payoutAddress: string;
+}
+
+export interface BankAccount {
+  address: string;
+}
+
 /**
  * MerchantRegistryClient provides a high-level interface for interacting with the MerchantRegistry contract.
  * Manages merchant registration, verification, and account status operations.
@@ -283,16 +298,47 @@ export class MerchantRegistryClient {
    *
    * Emits `(MERCHANT, FEE_WAIVER_SET)` on success.
    */
-  async setMerchantFeeWaiver(params: SetMerchantFeeWaiverParams): Promise<void> {
+  /**
+   * Add a per-currency payout address for a merchant (issue #216).
+   * Requires the merchant's signature.
+   */
+  async addCurrencyPayout(params: AddCurrencyPayoutParams): Promise<void> {
     return withMappedContractError(() =>
-      this.getContract().set_merchant_fee_waiver({
-        admin: params.admin,
-        merchant_id: params.merchantId,
-        expires_at:
-          params.expiresAt === null || params.expiresAt === undefined
-            ? null
-            : params.expiresAt,
+      this.getContract().add_currency_payout({
+        merchant_id: params.merchant,
+        currency: params.currency,
+        payout_address: params.payoutAddress,
       }),
     );
+  }
+
+  /**
+   * Get the payout address configured for a specific currency for a merchant (issue #216).
+   * Returns null if no payout address is configured for the given currency.
+   */
+  async getCurrencyPayout(merchantId: string, currency: string): Promise<string | null> {
+    return withMappedContractError(() =>
+      this.getContract().get_currency_payout({
+        merchant_id: merchantId,
+        currency: currency,
+      }),
+    );
+  }
+
+  /**
+   * Get all currency payout mappings for a merchant (issue #216).
+   * Returns a map of currency code to payout address.
+   */
+  async getAllCurrencyPayouts(merchantId: string): Promise<Record<string, string>> {
+    const result = await withMappedContractError(() =>
+      this.getContract().get_all_currency_payouts({
+        merchant_id: merchantId,
+      }),
+    );
+    const payouts: Record<string, string> = {};
+    for (const [currency, address] of Object.entries(result as Record<string, string>)) {
+      payouts[currency] = address;
+    }
+    return payouts;
   }
 }

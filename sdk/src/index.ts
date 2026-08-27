@@ -37,7 +37,13 @@ import {
 export { FLUXAPAY_CONTRACT_IDS, UNSET_CONTRACT_ID } from "./network-profiles.js";
 export type { FluxapayContractIds } from "./network-profiles.js";
 import { FxOracleClient } from "./contracts/fx-oracle.js";
-import { MerchantRegistryClient } from "./contracts/merchant-registry.js";
+import {
+  MerchantRegistryClient,
+  type MerchantRegistryConfig,
+  type AddCurrencyPayoutParams,
+  type CurrencyPayout,
+  type BankAccount,
+} from "./contracts/merchant-registry.js";
 import {
   PaymentLinkManagerClient,
   type PaymentLinkManagerConfig,
@@ -177,6 +183,19 @@ export interface PaymentStream {
   accruedAtCheckpoint: bigint;
   status: StreamStatus;
   milestonesApproved: boolean;
+}
+
+/** Mirrors the on-chain `SubscriptionPlan` struct in `fluxapay/src/lib.rs`. */
+export interface SubscriptionPlan {
+  planId: string;
+  merchantId: string;
+  name: string;
+  description: string;
+  amount: bigint;
+  currency: string;
+  intervalSecs: bigint;
+  billingInterval: "Daily" | "Weekly" | "Monthly" | "Annually";
+  active: boolean;
 }
 
 export interface CreateStreamParams {
@@ -347,28 +366,38 @@ export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
   31: "SubscriptionRetryExhausted",
   32: "InvalidResumeTimestamp",
   33: "MerchantAuthError",
-  34: "TierVolumeLimitExceeded",
-  35: "BatchTooLarge",
+  34: "InvalidSplitSum",
+  35: "MissingReceiptHash",
   36: "RefundExpired",
-  37: "InsufficientArbitrators",
-  38: "ArbitrationVotingThresholdNotMet",
-  39: "FeeProposalNotReady",
-  40: "InvalidEvidenceFormat",
-  41: "InvalidSettlementSignature",
+  37: "AlreadyVoted",
+  38: "TierVolumeLimitExceeded",
+  39: "BatchTooLarge",
+  40: "InsufficientArbitrators",
+  41: "ArbitrationVotingThresholdNotMet",
   42: "RefundCooldownNotElapsed",
-  43: "Reentrancy",
+  43: "FeeProposalNotReady",
   44: "NoFeeProposal",
-  45: "StaleOracleRate",
-  46: "LinkExpired", // ambiguous: also InsufficientTreasuryBalance = 46
-  47: "MetadataValueTooLong",
-  48: "UpgradeFailed",
-  49: "MetadataTooLarge",
-  50: "InvalidMemoType",
-  51: "MemoTooLong",
-  52: "InvalidMemoId",
-  53: "PayerNotWhitelisted",
-  54: "DisputeRateLimitExceeded", // ambiguous: also LinkMaxUsesReached, DirectTransferNotDisputable, MaxRetriesExceeded, InvalidStatusTransition = 54
-  55: "RateDeviationExceeded",
+  45: "InvalidEvidenceFormat",
+  46: "DisputeRateLimitExceeded",
+  47: "InvalidSettlementSignature",
+  48: "StaleOracleRate",
+  49: "LinkExpired",
+  50: "Reentrancy",
+  51: "UpgradeFailed",
+  52: "InsufficientTreasuryBalance",
+  53: "MetadataTooLarge",
+  54: "MetadataValueTooLong",
+  55: "InvalidMemoType",
+  56: "MemoTooLong",
+  57: "InvalidMemoId",
+  58: "PayerNotWhitelisted",
+  59: "LinkMaxUsesReached",
+  60: "DirectTransferNotDisputable",
+  61: "MaxRetriesExceeded",
+  62: "InvalidStatusTransition",
+  63: "RefundNotApproved",
+  64: "RouterNotAllowed",
+  65: "RouteOutputInsufficient",
   404: "PaymentNotFound",
   405: "RefundNotFound",
   406: "InvalidAmount",
@@ -1126,6 +1155,51 @@ export class FluxapayClient {
     );
   }
 
+  async getPaymentStatusHistory(paymentId: string) {
+    return withMappedContractError(() =>
+      (this.contract as any).get_payment_status_history({ payment_id: paymentId }),
+    );
+  }
+
+  async generateReconciliationReportPaginated(params: {
+    merchantId: string;
+    fromTs: bigint;
+    toTs: bigint;
+    offset: number;
+    limit: number;
+  }) {
+    return withMappedContractError(() =>
+      (this.contract as any).generate_reconciliation_report_paginated({
+        merchant_id: params.merchantId,
+        from_ts: params.fromTs,
+        to_ts: params.toTs,
+        offset: params.offset,
+        limit: params.limit,
+      }),
+    );
+  }
+
+  async getAllReconciliationPages(params: {
+    merchantId: string;
+    fromTs: bigint;
+    toTs: bigint;
+    pageSize?: number;
+  }) {
+    const items: unknown[] = [];
+    let offset = 0;
+    const limit = params.pageSize ?? 100;
+    for (;;) {
+      const page = await this.generateReconciliationReportPaginated({
+        ...params,
+        offset,
+        limit,
+      }) as any;
+      items.push(...page.items);
+      if (!page.has_more) return { ...page, items };
+      offset += limit;
+    }
+  }
+
   /**
    * Issue #489: Get payment by metadata_hash for order reconciliation.
    * Performs reverse lookup using the merchant-supplied metadata hash.
@@ -1449,6 +1523,102 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #683: Fetch a health summary of the PaymentProcessor contract.
+   * No authentication required — this is a public read endpoint.
+   * @returns ContractHealth with version, pause state, treasury balance, and config flags.
+   */
+  async getContractHealth(): Promise<{
+    version: string;
+    is_paused: boolean;
+    is_creation_paused: boolean;
+    treasury_balance: bigint;
+    active_payment_count: number;
+    fx_oracle_configured: boolean;
+    merchant_registry_configured: boolean;
+  }> {
+    const raw = await (this.contract as any).get_contract_health({});
+    return raw.result;
+  }
+
+  /**
+   * Issue #679: Create a subscription plan (merchant only).
+   * Maps to `PaymentProcessor.create_subscription_plan` on-chain.
+   */
+  async createSubscriptionPlan(params: {
+    merchant: string;
+    planId: string;
+    name: string;
+    description: string;
+    amount: bigint;
+    currency: string;
+    billingInterval: "Daily" | "Weekly" | "Monthly" | "Annually";
+  }): Promise<void> {
+    const billingIntervalMap: Record<string, number> = {
+      Daily: 0,
+      Weekly: 1,
+      Monthly: 2,
+      Annually: 3,
+    };
+    return withMappedContractError(() =>
+      (this.contract as any).create_subscription_plan({
+        merchant: params.merchant,
+        plan_id: params.planId,
+        name: params.name,
+        description: params.description,
+        amount: params.amount,
+        currency: params.currency,
+        billing_interval: billingIntervalMap[params.billingInterval] ?? 2,
+      }),
+    );
+  }
+
+  /**
+   * Issue #679: Fetch a subscription plan by ID.
+   * Maps to `PaymentProcessor.get_subscription_plan` on-chain.
+   */
+  async getSubscriptionPlan(planId: string): Promise<SubscriptionPlan> {
+    const raw = await withMappedContractError(() =>
+      (this.contract as any).get_subscription_plan({ plan_id: planId }),
+    );
+    const p = raw.result;
+    const billingIntervalLabels: Record<number, SubscriptionPlan["billingInterval"]> = {
+      0: "Daily",
+      1: "Weekly",
+      2: "Monthly",
+      3: "Annually",
+    };
+    return {
+      planId: p.plan_id,
+      merchantId: p.merchant_id,
+      name: p.name,
+      description: p.description,
+      amount: p.amount,
+      currency: p.currency,
+      intervalSecs: p.interval_secs,
+      billingInterval: billingIntervalLabels[p.billing_interval] ?? "Monthly",
+      active: p.active,
+    };
+  }
+
+  /**
+   * Issue #679: Subscribe a payer to a subscription plan.
+   * Maps to `PaymentProcessor.subscribe_to_plan` on-chain.
+   */
+  async subscribeToPlan(params: {
+    payer: string;
+    planId: string;
+    paymentId: string;
+  }): Promise<void> {
+    return withMappedContractError(() =>
+      (this.contract as any).subscribe_to_plan({
+        payer: params.payer,
+        plan_id: params.planId,
+        payment_id: params.paymentId,
+      }),
+    );
+  }
+
+  /**
    * Create a new payment stream. Tokens are pulled from `params.sender` into
    * the contract and streamed to `params.receiver` at `ratePerSecond`.
    * Maps to `PaymentProcessor.create_stream` on-chain.
@@ -1576,6 +1746,7 @@ export {
   FeeConfig,
   MaybeFeeConfig,
   CreatePaymentArgs,
+  SubscriptionPlan,
   FluxapayOfflineSigner,
   OfflineTransactionPayload,
   SubscriptionBillingClient,
@@ -1598,7 +1769,13 @@ export {
 };
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
-export { MerchantRegistryClient, type MerchantRegistryConfig } from "./contracts/merchant-registry.js";
+export {
+  MerchantRegistryClient,
+  type MerchantRegistryConfig,
+  type AddCurrencyPayoutParams,
+  type CurrencyPayout,
+  type BankAccount,
+} from "./contracts/merchant-registry.js";
 export {
   FxOracleClient,
   FxOracleError,

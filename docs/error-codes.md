@@ -43,47 +43,43 @@ document on every CI run to catch drift between them.
 | 31 | `SubscriptionRetryExhausted` | Subscription exhausted all retries and is now cancelled. | Payment method kept failing through all retry attempts. | Re-subscribe with a valid, funded payment method. |
 | 32 | `InvalidResumeTimestamp` | Resume timestamp is in the past or otherwise invalid. | Resuming a paused subscription/stream with a bad timestamp. | Pass a resume timestamp ≥ current ledger time. |
 | 33 | `MerchantAuthError` | An underlying `MerchantAuthError` occurred (see that table). | Pre-authorization pull failed a sub-check. | Inspect the wrapped `MerchantAuthError` variant for specifics. |
-| 34 | `TierVolumeLimitExceeded` | Merchant exceeded their KYC tier's monthly volume cap. | Processing volume exceeded the tier's `AmountLimits`. | Request a tier upgrade, or wait for the monthly window to reset. |
-| 35 | `BatchTooLarge` | Batch payment request exceeds the supported maximum size. | Submitting too many payments in one batch call. | Split into smaller batches under the documented max size. |
-| 36 | `RefundExpired` | The refund request has expired (30-day window) and cannot be processed. | Approving/rejecting a refund after `expiry_at`. | Requester must create a new refund request. |
-| 37 | `InsufficientArbitrators` | Not enough arbitrators are available to vote on a dispute. | Dispute arbitration pool too small. | Register additional arbitrators before opening disputes. |
-| 38 | `ArbitrationVotingThresholdNotMet` | Dispute voting threshold hasn't been reached yet. | Resolving a dispute before enough arbitrators voted. | Wait for more votes before attempting resolution. |
-| 39 | `FeeProposalNotReady` | Fee proposal hasn't matured past the required 7-day timelock. | Applying a fee change before the timelock elapses. | Wait until 7 days after the proposal was created. |
-| 40 | `InvalidEvidenceFormat` | Dispute evidence is not a valid IPFS multihash (CIDv0/CIDv1). | Passing an arbitrary string instead of a CID. | Pass a valid IPFS CIDv0/CIDv1 hash as evidence. |
-| 41 | `InvalidSettlementSignature` | One or both collaborative-settlement signatures are invalid. | Signature doesn't match the expected signer/payload. | Re-sign the settlement payload with the correct key. |
+| 34 | `InvalidSplitSum` | Dispute payout_splits amounts don't sum to the dispute amount. | Miscalculated split allocation in dispute resolution. | Ensure payout_splits sum equals the dispute amount. |
+| 35 | `MissingReceiptHash` | Refund policy requires a `receipt_hash` but none was provided. | Creating a refund without a required receipt attachment. | Supply a valid receipt hash with the refund request. |
+| 36 | `RefundExpired` | The refund's `expiry_at` deadline has passed. | Approving/rejecting a refund after `expiry_at`. | Requester must create a new refund request. |
+| 37 | `AlreadyVoted` | Arbitrator has already cast a vote on this dispute. | Double-voting on the same dispute. | Each arbitrator may vote once per dispute. |
+| 38 | `TierVolumeLimitExceeded` | Merchant exceeded their KYC tier's monthly volume cap. | Processing volume exceeded the tier's `AmountLimits`. | Request a tier upgrade, or wait for the monthly window to reset. |
+| 39 | `BatchTooLarge` | Batch payment request exceeds the supported maximum size. | Submitting too many payments in one batch call. | Split into smaller batches under the documented max size. |
+| 40 | `InsufficientArbitrators` | Not enough arbitrators are available to vote on a dispute. | Dispute arbitration pool too small. | Register additional arbitrators before opening disputes. |
+| 41 | `ArbitrationVotingThresholdNotMet` | Dispute voting threshold hasn't been reached yet. | Resolving a dispute before enough arbitrators voted. | Wait for more votes before attempting resolution. |
 | 42 | `RefundCooldownNotElapsed` | Refund requested before the post-confirmation cooldown elapsed. | Requesting a refund immediately after payment confirmation. | Wait until `confirmed_at + refund_cooldown_secs` has passed. |
-| 43 | `Reentrancy` | Reentrancy detected in `process_refund_internal`/`settle_payment`. | Nested/reentrant contract call during a guarded operation. | Not user-fixable — indicates a caller bug; avoid recursive invocations. |
+| 43 | `FeeProposalNotReady` | Fee proposal hasn't matured past the required 7-day timelock. | Applying a fee change before the timelock elapses. | Wait until 7 days after the proposal was created. |
 | 44 | `NoFeeProposal` | No active fee-change proposal exists. | Trying to apply/cancel a proposal that was never created. | Create a fee proposal first via the appropriate admin call. |
-| 45 | `StaleOracleRate` | FX oracle rate is stale or unavailable. | Oracle hasn't been updated within the staleness threshold. | Wait for (or trigger) an oracle rate update before retrying. |
-| 46 | `LinkExpired` **/** `InsufficientTreasuryBalance` ⚠️ | Payment link has expired **or** treasury balance is below the requested withdrawal — both variants share code 46 in the source (see "Known discriminant collisions" below). | Using an expired payment link, or withdrawing more than the treasury holds. | Check `docs/error-codes.md`'s collision note; disambiguate via the calling context (link vs. treasury operation). |
-| 47 | `MetadataValueTooLong` | A metadata value exceeds 256 characters. | Oversized value in the `metadata` map. | Shorten the value to ≤ 256 characters. |
-| 48 | `UpgradeFailed` | Contract upgrade rejected the new WASM hash. | Invalid or incompatible upgrade payload. | Verify the WASM hash and upgrade authorization, then retry. |
-| 49 | `MetadataTooLarge` | Metadata map has more than 20 keys. | Attaching too many metadata fields to a payment. | Reduce to ≤ 20 keys, or store extra data off-chain. |
-| 50 | `InvalidMemoType` | `memo_type` is not one of `Text`, `Id`, `Hash`, `Return`. | Typo or unsupported memo type string. | Use exactly one of the four supported memo types. |
-| 51 | `MemoTooLong` | Text memo exceeds the 28-byte Stellar limit. | Memo text too long for a Stellar `MEMO_TEXT`. | Shorten the memo to ≤ 28 bytes. |
-| 52 | `InvalidMemoId` | `Id`-type memo is not parseable as a `u64`. | Passing a non-numeric string as an `Id` memo. | Pass a valid unsigned 64-bit integer as a string. |
-| 53 | `PayerNotWhitelisted` | Payer address is not on the merchant's customer whitelist. | Merchant has whitelist mode enabled and payer isn't listed. | Merchant must add the payer via the whitelist management call. |
-| 54 | `DisputeRateLimitExceeded` **/** `LinkMaxUsesReached` **/** `DirectTransferNotDisputable` **/** `MaxRetriesExceeded` **/** `InvalidStatusTransition` ⚠️ | Five distinct variants share code 54 in the source (see "Known discriminant collisions" below). | Any of: too many disputes opened; a payment link hit `max_uses`; disputing a `direct_transfer` payment; exceeding the 3-hop retry chain; an invalid status transition. | Disambiguate via the calling context — which operation returned the error tells you which variant applies. |
-| 55 | `RateDeviationExceeded` | FX oracle rate deviation exceeds the configured limit. | Requested rate differs too much from the oracle's tracked rate. | Re-quote against the current oracle rate before retrying. |
+| 45 | `InvalidEvidenceFormat` | Dispute evidence is not a valid IPFS multihash (CIDv0/CIDv1). | Passing an arbitrary string instead of a CID. | Pass a valid IPFS CIDv0/CIDv1 hash as evidence. |
+| 46 | `DisputeRateLimitExceeded` | Dispute creation rate limit exceeded (per-payer open cap or global hourly cap). | Opening too many disputes in a short window. | Back off and retry after the rate-limit window resets. |
+| 47 | `InvalidSettlementSignature` | One or both collaborative-settlement signatures are invalid. | Signature doesn't match the expected signer/payload. | Re-sign the settlement payload with the correct key. |
+| 48 | `StaleOracleRate` | FX oracle rate is stale or unavailable. | Oracle hasn't been updated within the staleness threshold. | Wait for (or trigger) an oracle rate update before retrying. |
+| 49 | `LinkExpired` | Payment link has expired. | Using an expired payment link. | Create a new payment link. |
+| 50 | `Reentrancy` | Reentrancy detected in `process_refund_internal`/`settle_payment`. | Nested/reentrant contract call during a guarded operation. | Not user-fixable — indicates a caller bug; avoid recursive invocations. |
+| 51 | `UpgradeFailed` | Contract upgrade rejected the new WASM hash. | Invalid or incompatible upgrade payload. | Verify the WASM hash and upgrade authorization, then retry. |
+| 52 | `InsufficientTreasuryBalance` | Treasury balance is smaller than the requested withdrawal amount. | Withdrawing more than the treasury holds. | Reduce the withdrawal amount, or wait for treasury deposits. |
+| 53 | `MetadataTooLarge` | Metadata map has more than 20 keys. | Attaching too many metadata fields to a payment. | Reduce to ≤ 20 keys, or store extra data off-chain. |
+| 54 | `MetadataValueTooLong` | A metadata value exceeds 256 characters. | Oversized value in the `metadata` map. | Shorten the value to ≤ 256 characters. |
+| 55 | `InvalidMemoType` | `memo_type` is not one of `Text`, `Id`, `Hash`, `Return`. | Typo or unsupported memo type string. | Use exactly one of the four supported memo types. |
+| 56 | `MemoTooLong` | Text memo exceeds the 28-byte Stellar limit. | Memo text too long for a Stellar `MEMO_TEXT`. | Shorten the memo to ≤ 28 bytes. |
+| 57 | `InvalidMemoId` | `Id`-type memo is not parseable as a `u64`. | Passing a non-numeric string as an `Id` memo. | Pass a valid unsigned 64-bit integer as a string. |
+| 58 | `PayerNotWhitelisted` | Payer address is not on the merchant's customer whitelist. | Merchant has whitelist mode enabled and payer isn't listed. | Merchant must add the payer via the whitelist management call. |
+| 59 | `LinkMaxUsesReached` | Payment link has reached its configured `max_uses` limit. | Payment link was used too many times. | Create a new payment link with a higher `max_uses`. |
+| 60 | `DirectTransferNotDisputable` | Payment was created via a `direct_transfer` link and disputes are not allowed. | Attempting to dispute a direct-transfer payment. | Direct-transfer payments are non-disputable by design. |
+| 61 | `MaxRetriesExceeded` | Maximum retry chain depth (3) exceeded for payment retry. | Payment retry chain too deep. | Resolve the underlying payment failure before retrying. |
+| 62 | `InvalidStatusTransition` | Invalid payment status transition attempted. | Attempting a disallowed state change (e.g. `Confirmed` → `Pending`). | Check the payment's current status and allowed transitions. |
+| 63 | `RefundNotApproved` | Customer called `claim_refund` before an operator approved it. | Claiming a refund that hasn't been operator-approved yet. | Wait for an operator to approve the refund first. |
+| 64 | `RouterNotAllowed` | DEX router is not in the allowed routers list. | Using a router not configured for this deployment. | Use an approved router, or have an admin update the allowed list. |
+| 65 | `RouteOutputInsufficient` | Aggregate route output is less than minimum output amount. | Swap output too low due to slippage or thin liquidity. | Re-quote with a lower minimum output, or reduce trade size. |
 | 404 | `PaymentNotFound` | No payment exists with the given `payment_id`. | Typo'd ID, or payment was never created. | Verify the ID via `get_payment` / listing endpoints. |
 | 405 | `RefundNotFound` | No refund exists with the given `refund_id`. | Typo'd ID, or refund was never created. | Verify the ID via `get_refund` / `get_payment_refunds`. |
 | 406 | `InvalidAmount` | Amount is zero, negative, or otherwise invalid. | Passing a non-positive amount to a payment/refund call. | Pass a strictly positive `i128` amount. |
 
-### ⚠️ Known discriminant collisions
-
-The Rust source currently assigns the **same** numeric value to multiple
-`Error` variants in two places:
-
-- **Code 46**: `LinkExpired` and `InsufficientTreasuryBalance`
-- **Code 54**: `DisputeRateLimitExceeded`, `LinkMaxUsesReached`,
-  `DirectTransferNotDisputable`, `MaxRetriesExceeded`, `InvalidStatusTransition`
-
-This means a bare `Error(Contract, #54)` cannot be mapped to a single name
-with certainty — callers must disambiguate using which operation raised the
-error. `FLUXAPAY_CONTRACT_ERROR_MAP` picks the first-declared variant name
-for these two codes as a best-effort default. Giving each variant a unique
-discriminant in `fluxapay/src/lib.rs::Error` would resolve this; that change
-is out of scope here since it alters the contract's wire-level error codes.
+> **Note:** Every `Error` variant has a unique discriminant — there are no code collisions in the current Rust source.
 
 ## `AccessControlError` (`fluxapay/src/access_control.rs`)
 

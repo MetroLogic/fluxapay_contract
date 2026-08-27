@@ -324,6 +324,7 @@ fn test_withdraw_blocked_before_milestone_approval() {
 }
 
 #[test]
+fn test_withdrawn_event_includes_remaining_deposit() {
 fn test_approve_stream_milestone_unblocks_withdrawal() {
     let env = Env::default();
     env.mock_all_auths();
