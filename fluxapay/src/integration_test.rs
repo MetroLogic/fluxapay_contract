@@ -4,6 +4,7 @@ use crate::{
     PaymentStatus, RefundManager, RefundManagerClient, RefundStatus, SettlementSplit,
 };
 use soroban_sdk::{
+use crate::merchant_registry::MaybeFeeConfig;
     testutils::{Address as _, BytesN as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol,
 };
@@ -227,7 +228,7 @@ fn test_happy_path_flow() {
     let tx_hash = BytesN::<32>::random(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>, );
 
     let payment_info = payment_client.get_payment(&payment_id);
     assert_eq!(payment_info.status, PaymentStatus::Confirmed);
@@ -304,6 +305,7 @@ fn test_settlement_path() {
         &BytesN::<32>::random(&env),
         &customer,
         &amount,
+        &None::<u64>,
     );
 
     // Settle payment to treasury as a single split
@@ -1019,7 +1021,7 @@ fn test_cross_contract_happy_path() {
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>, );
 
     let confirmed = payment_client.get_payment(&payment_id);
     assert_eq!(confirmed.status, PaymentStatus::Confirmed);
@@ -1189,7 +1191,7 @@ fn test_cross_contract_registry_not_set_regression() {
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>, );
 
     let payment_info = payment_client.get_payment(&payment_id);
     assert_eq!(payment_info.status, PaymentStatus::Confirmed);
@@ -1265,7 +1267,7 @@ fn setup_dispute(
     let tx_hash = BytesN::<32>::random(env);
     let oracle = Address::generate(env);
     payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &pid, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &pid, &tx_hash, &customer, &amount, &None::<u64>, );
 
     refund_client.register_payment(&pid, &merchant, &amount, &Symbol::new(env, "USDC"));
     mint_dispute_bonds(env, refund_client, &customer, &merchant);

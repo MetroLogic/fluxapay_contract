@@ -77,6 +77,7 @@ fn setup_open_dispute<'a>(
         &BytesN::from_array(env, &[7u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
 
     let token_address = env.as_contract(&refund_client.address, || {
@@ -232,7 +233,7 @@ fn test_create_dispute() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount, &None::<u64>);
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -277,7 +278,7 @@ fn test_review_dispute() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount, &None::<u64>);
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -319,7 +320,7 @@ fn test_check_dispute_deadline_escalates_once() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount, &None::<u64>);
 
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
 
@@ -378,7 +379,7 @@ fn test_resolve_dispute_with_refund() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount, &None::<u64>);
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -438,7 +439,7 @@ fn test_reject_dispute() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount, &None::<u64>);
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -482,7 +483,7 @@ fn test_get_payment_disputes() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount, &None::<u64>);
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -561,7 +562,7 @@ fn test_resolve_dispute_with_only_operator_auth() {
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>);
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -626,7 +627,7 @@ fn setup_dispute_under_review(
     let oracle = Address::generate(env);
     payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(env);
-    payment_client.verify_payment(&oracle, payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(&oracle, payment_id, &tx_hash, &customer, &amount, &None::<u64>);
 
     refund_client.register_payment(payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
 
@@ -802,6 +803,10 @@ fn test_vote_dispute_non_arbitrator_blocked() {
         &payment_client,
         &refund_client,
         &payment_id,
+        &BytesN::from_array(env, &[7u8; 32]),
+        &customer,
+        &amount,
+        &None::<u64>,
         400i128,
     );
 
@@ -876,6 +881,7 @@ fn test_dispute_rate_limit_sixth_open_rejected() {
         &BytesN::from_array(&env, &[9u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
     let token_address = env.as_contract(&refund_client.address, || {
         env.storage()
@@ -956,6 +962,7 @@ fn test_dispute_global_hourly_rate_limit() {
         &BytesN::from_array(&env, &[3u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
     let token_address = env.as_contract(&refund_client.address, || {
         env.storage()
