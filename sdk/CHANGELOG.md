@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial npm publish workflow (`sdk/v*` tags) and scoped package configuration.
+- [SDK Migration Guide](../docs/sdk-migration-guide.md) documenting breaking
+  changes and upgrade steps between major SDK versions.
 
 ## [0.1.0] - 2026-06-25
 

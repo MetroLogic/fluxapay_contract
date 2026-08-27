@@ -16,7 +16,7 @@
 //! env.events().publish_event(&EventStruct { ... });
 //! ```
 
-use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
 
 // ============================================================================
 // Payment Events
@@ -270,6 +270,30 @@ pub struct DisputeBondForfeited {
     pub disputer: Address,
     pub recipient: Address,
     pub amount: i128,
+}
+
+/// Issue #677: Emit a `DISPUTE/BOND_RETURNED` event when a dispute bond is
+/// released back to `recipient` after a dispute is resolved in their favor.
+pub fn emit_dispute_bond_returned(env: &Env, dispute_id: String, recipient: Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "DISPUTE"), Symbol::new(env, "BOND_RETURNED")),
+        (dispute_id, recipient, amount),
+    );
+}
+
+/// Issue #677: Emit a `DISPUTE/BOND_FORFEITED` event when a dispute bond is
+/// forfeited to `recipient` (the treasury/collector) after a dispute is
+/// rejected.
+pub fn emit_dispute_bond_forfeited(
+    env: &Env,
+    dispute_id: String,
+    recipient: Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "DISPUTE"), Symbol::new(env, "BOND_FORFEITED")),
+        (dispute_id, recipient, amount),
+    );
 }
 
 // ============================================================================

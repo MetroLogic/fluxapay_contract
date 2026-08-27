@@ -157,6 +157,18 @@ export class FxOracleClient {
     );
   }
 
+  async setOracleQuorum(admin: string, quorum: number) {
+    return withFxOracleContractError(() =>
+      (this.getContract() as any).set_oracle_quorum({ admin, quorum }),
+    );
+  }
+
+  async getOracleSubmissions(pair: string) {
+    return withFxOracleContractError(() =>
+      (this.getContract() as any).get_oracle_submissions({ pair }),
+    );
+  }
+
   /**
    * Retrieve the current exchange rate for a currency pair.
    * Rejects stale rates based on the configured staleness threshold.

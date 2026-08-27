@@ -29,6 +29,12 @@ export interface PaymentLink {
   metadata?: Record<string, string>;
   /** Canonical shareable checkout URL (`{base_url}/pay/{link_id}`), if configured */
   shareable_url?: string;
+  /**
+   * Per-link fee override in basis points (0-10000), set via
+   * `setPaymentLinkFeeBps`. When unset, `useLink` falls back to the
+   * contract-wide default fee (issue #663).
+   */
+  fee_bps?: bigint;
 }
 
 /**
@@ -197,6 +203,41 @@ export class PaymentLinkManagerClient {
     return withMappedContractError(() =>
       this.getContract().set_payment_base_url({ admin, url }),
     );
+  }
+
+  /**
+   * Admin: set a per-link or contract-wide default fee override (basis
+   * points, 0-10000) for payment links (issue #663).
+   *
+   * @param admin - The admin address (must match the address passed to `initialize`)
+   * @param linkId - Set the override on this specific link, or `null` to set the
+   *                 contract-wide default applied to links without their own override
+   * @param feeBps - Fee in basis points, or `null` to clear the override
+   */
+  async setPaymentLinkFeeBps(
+    admin: string,
+    linkId: string | null,
+    feeBps: bigint | null,
+  ): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().set_payment_link_fee_bps({
+        admin,
+        link_id: linkId ?? undefined,
+        fee_bps: feeBps ?? undefined,
+      }),
+    );
+  }
+
+  /**
+   * Get the fee (basis points) that `useLink` would currently apply to a
+   * link: its own override if set, otherwise the contract-wide default,
+   * otherwise `null` (no fee).
+   */
+  async getEffectiveFeeBps(linkId: string): Promise<bigint | null> {
+    return withMappedContractError(async () => {
+      const bps = await this.getContract().get_effective_fee_bps({ link_id: linkId });
+      return bps ?? null;
+    });
   }
 
   /**

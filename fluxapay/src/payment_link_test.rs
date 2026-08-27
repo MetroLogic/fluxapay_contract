@@ -1326,7 +1326,7 @@ fn test_batch_expire_links_sweep() {
 
     let mut link_ids = soroban_sdk::vec![&env];
     for i in 0..3 {
-        let lid = String::from_str(&env, &format!("batch_{}", i));
+        let lid = crate::utils::format_id(&env, "batch_", i as u64);
         client.create_link(
             &merchant,
             &lid,
@@ -1355,7 +1355,7 @@ fn test_batch_expire_links_max_20() {
 
     let mut oversized = soroban_sdk::vec![&env];
     for i in 0..21 {
-        oversized.push_back(String::from_str(&env, &format!("ovr_{}", i)));
+        oversized.push_back(crate::utils::format_id(&env, "ovr_", i as u64));
     }
 
     let result = client.try_batch_expire_links(&oversized);
@@ -1409,5 +1409,130 @@ fn test_link_expired_event_emitted() {
                     == Some(Symbol::new(&env, "EXPIRED"))
         });
     assert!(has_expired_event);
+}
+
+// -- Issue #663: Per-link / global fee_bps override --------------------------
+
+#[test]
+fn test_use_link_zero_fee_bps_collects_no_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PaymentLinkManager, ());
+    let client = PaymentLinkManagerClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let token_admin = Address::generate(&env);
+    let usdc_token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &usdc_token);
+    let token_client = token::TokenClient::new(&env, &usdc_token);
+
+    let merchant = Address::generate(&env);
+    let payer = Address::generate(&env);
+    token_admin_client.mint(&payer, &5000i128);
+
+    let link_id = String::from_str(&env, "zero_fee_link");
+    let amount = 1000i128;
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(amount),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Zero fee"),
+        &None,
+        &None,
+        &true,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Explicitly set a 0 bps override on this link.
+    client.set_payment_link_fee_bps(&admin, &Some(link_id.clone()), &Some(0i128));
+    assert_eq!(client.get_effective_fee_bps(&link_id), Some(0i128));
+
+    let merchant_balance_before = token_client.balance(&merchant);
+    client.use_link(&payer, &link_id, &amount, &Some(usdc_token.clone()));
+    let merchant_balance_after = token_client.balance(&merchant);
+
+    // Merchant receives the full amount; no fee is deducted.
+    assert_eq!(merchant_balance_after - merchant_balance_before, amount);
+}
+
+#[test]
+fn test_use_link_falls_back_to_global_fee_bps_when_link_has_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PaymentLinkManager, ());
+    let client = PaymentLinkManagerClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let token_admin = Address::generate(&env);
+    let usdc_token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &usdc_token);
+    let token_client = token::TokenClient::new(&env, &usdc_token);
+
+    let merchant = Address::generate(&env);
+    let payer = Address::generate(&env);
+    token_admin_client.mint(&payer, &5000i128);
+
+    // Admin sets a 5% (500 bps) global default fee for links.
+    client.set_payment_link_fee_bps(&admin, &None, &Some(500i128));
+
+    let link_id = String::from_str(&env, "global_fee_link");
+    let amount = 1000i128;
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(amount),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Global fee fallback"),
+        &None,
+        &None,
+        &true,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Link itself has no fee_bps override -> global 500 bps applies.
+    assert_eq!(client.get_effective_fee_bps(&link_id), Some(500i128));
+
+    let merchant_balance_before = token_client.balance(&merchant);
+    let admin_balance_before = token_client.balance(&admin);
+    client.use_link(&payer, &link_id, &amount, &Some(usdc_token.clone()));
+    let merchant_balance_after = token_client.balance(&merchant);
+    let admin_balance_after = token_client.balance(&admin);
+
+    let expected_fee = amount * 500 / 10_000;
+    assert_eq!(
+        merchant_balance_after - merchant_balance_before,
+        amount - expected_fee
+    );
+    assert_eq!(admin_balance_after - admin_balance_before, expected_fee);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_payment_link_fee_bps_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PaymentLinkManager, ());
+    let client = PaymentLinkManagerClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let not_admin = Address::generate(&env);
+
+    // Non-admin caller must be rejected with Unauthorized (#1).
+    client.set_payment_link_fee_bps(&not_admin, &None, &Some(100i128));
 }
 

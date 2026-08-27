@@ -12,10 +12,6 @@
  * Exits non-zero (fails CI) if:
  *   - a variant declared in `Error` is missing from the SDK map, or
  *   - a code in the SDK map doesn't correspond to any declared variant.
- *
- * Known discriminant collisions (documented in `docs/error-codes.md`,
- * codes 46 and 54) are tolerated: the SDK map only needs to contain *one*
- * of the colliding variant names for that code.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

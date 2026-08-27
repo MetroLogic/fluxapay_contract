@@ -175,7 +175,10 @@ pub struct Merchant {
     /// Issue #481: Total dispute count for this merchant (incremented on dispute creation).
     pub dispute_count: u32,
     /// Issue #481: Count of disputes resolved against this merchant (incremented on unfavorable resolution).
-    pub resolved_against_merchant_count: u32,
+    pub lost_disputes_count: u32,
+    /// Global payment tolerance in basis points for this merchant.
+    pub resolved_against_count: u32,
+    pub payment_tolerance: Option<i128>,
 }
 
 #[contracttype]
@@ -208,11 +211,21 @@ pub enum MerchantDataKey {
     MerchantPendingSettlement(Address),
     /// Issue #481: Admin-configurable dispute threshold for auto-suspension (default 10)
     DisputeThreshold,
+    /// Global payment tolerance in basis points
+    GlobalPaymentTolerance,
     SuspensionProposal(u64),
     SuspensionVote(u64, Address),
     SuspensionProposalCounter,
     SuspensionThreshold,
+    /// Issue #667: Arbitrary on-chain contract metadata (description, deployment
+    /// notes, audit commit hash, etc.), keyed by an admin-chosen Symbol.
+    ContractMetadata(Symbol),
+    GlobalPaymentTolerance,
 }
+
+/// ~3 years at 5s/ledger — mirrors `LONG_LIVE_TTL` in lib.rs (issue #667).
+const LONG_LIVE_TTL: u32 = 18_921_600;
+const TTL_BUMP_THRESHOLD_DIVISOR: u32 = 5;
 
 /// Platform fee configuration stored in MerchantRegistry.
 #[contracttype]
@@ -289,7 +302,76 @@ impl MerchantRegistry {
             },
         );
 
+        // Issue #667: pre-populate on-chain metadata with description, version, and
+        // deployment timestamp so explorers/integrators can identify the contract.
+        env.storage().instance().set(
+            &MerchantDataKey::ContractMetadata(Symbol::new(&env, "description")),
+            &String::from_str(&env, "FluxaPay MerchantRegistry contract"),
+        );
+        env.storage().instance().set(
+            &MerchantDataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &String::from_str(&env, "1"),
+        );
+        env.storage().instance().set(
+            &MerchantDataKey::ContractMetadata(Symbol::new(&env, "deployed_at")),
+            &Self::u64_to_string(&env, env.ledger().timestamp()),
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().instance().extend_ttl(threshold, LONG_LIVE_TTL);
+
         Ok(())
+    }
+
+    /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
+    /// description, deployment notes, or audit commit hash. Stored in instance
+    /// storage under a caller-chosen key, with the instance TTL bumped to
+    /// `LONG_LIVE_TTL` so metadata survives archival.
+    pub fn set_contract_metadata(
+        env: Env,
+        admin: Address,
+        key: Symbol,
+        value: String,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        env.storage()
+            .instance()
+            .set(&MerchantDataKey::ContractMetadata(key), &value);
+
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().instance().extend_ttl(threshold, LONG_LIVE_TTL);
+
+        Ok(())
+    }
+
+    /// Public read of an on-chain metadata entry set via `set_contract_metadata`
+    /// (issue #667). Returns `None` if the key was never set.
+    pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
+        env.storage()
+            .instance()
+            .get(&MerchantDataKey::ContractMetadata(key))
+    }
+
+    /// Formats a u64 as a decimal `String` without relying on `alloc`/`format!`
+    /// (this crate is `#![no_std]`). Used to store `deployed_at` as metadata
+    /// text so it round-trips through `get_contract_metadata`'s `String` type.
+    fn u64_to_string(env: &Env, mut n: u64) -> String {
+        if n == 0 {
+            return String::from_str(env, "0");
+        }
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        while n > 0 {
+            i -= 1;
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        let s = core::str::from_utf8(&buf[i..]).unwrap_or("0");
+        String::from_str(env, s)
     }
 
     pub fn grant_role(env: Env, admin: Address, role: Symbol, account: Address) -> Result<(), MerchantError> {
@@ -346,7 +428,7 @@ impl MerchantRegistry {
         settlement_currency: String,
         payout_address: Option<Address>,
         bank_account: Option<String>,
-        fee_config: Option<FeeConfig>,
+        fee_config: MaybeFeeConfig,
     ) -> Result<(), MerchantError> {
         merchant_id.require_auth();
 
@@ -373,7 +455,7 @@ impl MerchantRegistry {
             suspension_expires_at: None,
             oracle_signature: None,
             last_payout_change_at: None,
-            fee_config: MaybeFeeConfig::from(fee_config),
+            fee_config,
             metadata_hash: None,
             currency_payout_addresses: map![&env],
             payout_whitelist: vec![&env],
@@ -383,7 +465,9 @@ impl MerchantRegistry {
             last_settlement_at: None,
             whitelist_mode: false,
             dispute_count: 0,
-            resolved_against_merchant_count: 0,
+            lost_disputes_count: 0,
+            resolved_against_count: 0,
+            payment_tolerance: None,
         };
 
         env.storage()
@@ -404,7 +488,7 @@ impl MerchantRegistry {
         active: Option<bool>,
         payout_address: Option<Address>,
         bank_account: Option<String>,
-        fee_config: Option<FeeConfig>,
+        fee_config: Option<MaybeFeeConfig>,
     ) -> Result<(), MerchantError> {
         merchant_id.require_auth();
 
@@ -476,7 +560,7 @@ impl MerchantRegistry {
             merchant.bank_account = Some(acct);
         }
         if let Some(config) = fee_config {
-            merchant.fee_config = MaybeFeeConfig::Some(config);
+            merchant.fee_config = config;
         }
 
         env.storage()
@@ -1627,18 +1711,43 @@ impl MerchantRegistry {
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
-        let domain = match &anchor_config {
-            Some(cfg) => cfg.anchor_domain.clone(),
-            None => String::from_str(&env, ""),
-        };
         env.events().publish(
             (
                 Symbol::new(&env, "MERCHANT"),
                 Symbol::new(&env, "ANCHOR_UPDATED"),
             ),
-            (merchant_id, domain),
+            (merchant_id, domain_for_event),
         );
         Ok(())
+    }
+
+    /// Issue #669: Set (or replace) a merchant's SEP-6/SEP-24 anchor
+    /// configuration. Thin, always-set wrapper around `set_merchant_anchor`
+    /// (which also supports clearing via `None`) that additionally requires
+    /// the merchant to hold at least `KycTier::Basic` before an anchor may be
+    /// attached, per the SEP-6/SEP-24 integration guide.
+    ///
+    /// Requires the merchant's own signature (same auth as `set_merchant_anchor`).
+    pub fn set_anchor_config(
+        env: Env,
+        merchant_id: Address,
+        config: AnchorConfig,
+    ) -> Result<(), MerchantError> {
+        let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        if merchant.kyc_tier == KycTier::Unverified {
+            return Err(MerchantError::NotVerified);
+        }
+
+        Self::set_merchant_anchor(env, merchant_id, Some(config))
+    }
+
+    /// Issue #669: Public read-only accessor for a merchant's anchor
+    /// configuration. Returns `None` if the merchant has not configured an
+    /// anchor (or does not exist).
+    pub fn get_anchor_config(env: Env, merchant_id: Address) -> Option<AnchorConfig> {
+        Self::get_merchant_internal(&env, &merchant_id)
+            .ok()
+            .and_then(|m| m.anchor_config.into_option())
     }
 
     /// Enable/disable whitelist mode for a merchant (issue #516).
@@ -1832,7 +1941,7 @@ impl MerchantRegistry {
     }
 
     /// Issue #481: Set the global dispute threshold for auto-suspension.
-    /// When a merchant's resolved_against_merchant_count reaches or exceeds this,
+    /// When a merchant's lost_disputes_count reaches or exceeds this,
     /// the merchant is automatically suspended.
     pub fn set_dispute_threshold(
         env: Env,
@@ -1948,17 +2057,18 @@ impl MerchantRegistry {
 
     /// Issue #481: Increment the resolved-against count for a merchant and check auto-suspension.
     /// Returns the new resolved_against_merchant_count.
-    pub fn increment_resolved_against_merchant_count(
+    pub fn increment_resolved_against_count(
         env: Env,
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
-        merchant.resolved_against_merchant_count = merchant.resolved_against_merchant_count.saturating_add(1);
+        merchant.lost_disputes_count = merchant.lost_disputes_count.saturating_add(1);
+        merchant.resolved_against_count = merchant.resolved_against_count.saturating_add(1);
         
         let threshold = Self::get_dispute_threshold(env.clone());
         
         // Auto-suspend if threshold reached
-        if merchant.resolved_against_merchant_count >= threshold && merchant.suspension_reason.is_none() {
+        if merchant.resolved_against_count >= threshold && merchant.suspension_reason.is_none() {
             merchant.active = false;
             merchant.suspension_reason = Some(String::from_str(&env, "Auto-suspended due to dispute threshold"));
             merchant.suspended_at = Some(env.ledger().timestamp());
@@ -1970,7 +2080,8 @@ impl MerchantRegistry {
                 ),
                 (
                     merchant_id.clone(),
-                    merchant.resolved_against_merchant_count,
+                    merchant.lost_disputes_count,
+                    merchant.resolved_against_count,
                     threshold,
                 ),
             );
@@ -1980,7 +2091,7 @@ impl MerchantRegistry {
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id), &merchant);
 
-        Ok(merchant.resolved_against_merchant_count)
+        Ok(merchant.resolved_against_count)
     }
 
     /// Issue #481: Appeal a merchant suspension. Creates a review record requiring operator approval.

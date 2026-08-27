@@ -12,6 +12,10 @@ npm install @fluxapay/sdk
 
 See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
+Upgrading between major versions? See the
+[SDK Migration Guide](../docs/sdk-migration-guide.md) for breaking changes
+and before/after code snippets.
+
 ## Quick Start
 
 ```typescript
@@ -231,6 +235,106 @@ const dispute = await client.getDispute("dispute_001");
 const paymentDisputes = await client.getPaymentDisputes("pay_123");
 ```
 
+## Partial / Overpaid Payments (FluxapayClient)
+
+When `verifyPayment` sees an amount that doesn't match the expected total, the
+payment moves to `PaymentStatus.PartiallyPaid` (underpaid) or
+`PaymentStatus.Overpaid` (overpaid) instead of `Confirmed`.
+
+```typescript
+// Merchant accepts the partial amount actually received (no refund issued
+// for the shortfall) — moves the payment to Confirmed.
+await client.acceptPartialPayment("G...MERCHANT", "pay_123");
+
+// Customer tops up a PartiallyPaid payment instead — moves it back to
+// Pending so a following verifyPayment call can confirm it with the
+// combined amount.
+await client.completePartialPayment("G...CUSTOMER", "pay_123", 250000n);
+```
+
+Both calls throw `FluxapayError` with `contractErrorName: "PaymentAlreadyProcessed"`
+if the payment isn't currently `PartiallyPaid`.
+## Compliance / Admin Tooling (FluxapayClient)
+
+Blacklist management for blocking fraudulent payers, merchants, or requesters.
+`addToBlacklist` / `removeFromBlacklist` require the PaymentProcessor `ADMIN`
+role; `isBlacklisted` is a read-only call with no authorization required.
+Blacklisted addresses are rejected on subsequent payment, refund, and
+dispute operations.
+
+```typescript
+// Block an address (admin only)
+await client.addToBlacklist("G...ADMIN", "G...FRAUDULENT_ADDRESS");
+
+// Check blacklist status (no auth required)
+const blocked = await client.isBlacklisted("G...FRAUDULENT_ADDRESS"); // true
+
+// Unblock an address (admin only)
+await client.removeFromBlacklist("G...ADMIN", "G...FRAUDULENT_ADDRESS");
+```
+
+## Treasury / Platform Fee Reporting (FluxapayClient)
+
+`getPlatformFeeReport` aggregates platform fee collection over a queried
+time period `[fromTs, toTs]` (ledger timestamps, in seconds) for treasury
+reporting. Read-only — no authorization required.
+
+```typescript
+const report = await client.getPlatformFeeReport(1700000000n, 1700086400n);
+// { totalFeesCollected, treasuryShare, developerShare, paymentCount }
+```
+
+## Collaborative Dispute Settlement (issue #665)
+
+When the buyer and merchant agree on a settlement amount off-chain, they can
+close the dispute instantly by each signing the settlement with Ed25519
+instead of waiting on operator/arbitrator review:
+
+```typescript
+// Both parties sign SHA-256(dispute_id || settlement_amount_le16) off-chain
+// and hand their signatures to whichever party submits the transaction.
+const refundId = await client.settleDisputeCollaboratively({
+  disputeId: "dispute_001",
+  settlementAmount: 250_000n,
+  buyerPubkey: buyerPubkeyBytes, // 32-byte Ed25519 public key
+  signatureBuyer: buyerSigBytes, // 64-byte Ed25519 signature
+  merchantPubkey: merchantPubkeyBytes,
+  signatureMerchant: merchantSigBytes,
+});
+
+// Look up the recorded settlement (null if none exists / dispute not found).
+const settlement = await client.getCollaborativeSettlement("dispute_001");
+```
+
+An invalid or mismatched signature surfaces as a mapped `InvalidSettlementSignature`
+`FluxapayError` (see `docs/error-codes.md`).
+
+## Usage-Based Billing (Metered Subscriptions) (issue #664)
+
+For pay-per-use subscriptions, an operator (oracle or settlement-operator
+role) reports usage units for a billing cycle; the subscription's charge
+amount is overridden to `units * unitPrice` and charged immediately:
+
+```typescript
+await client.submitUsageMetrics({
+  subscriptionId: "sub_123",
+  units: 1_500n,
+  unitPrice: 100n, // smallest unit of the subscription's token
+  token: "C...",
+  caller: "G_operator...",
+});
+
+// Query usage history recorded for a subscription in a time range.
+const history = await client.getUsageMetrics(
+  "sub_123",
+  Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60, // 30 days ago
+  Math.floor(Date.now() / 1000),
+);
+```
+
+Submitting metrics for a Cancelled/Expired subscription is rejected with a
+mapped `InvalidStatusTransition` `FluxapayError`.
+
 ## Merchant Pre-Authorization (Pull Billing)
 
 `MerchantPreAuth` lets a customer grant a merchant permission to pull up to a
@@ -440,6 +544,24 @@ console.log("Active links:", activeLinkIds);
 ```typescript
 // Only the merchant that created the link can deactivate it
 await client.deactivateLink("G...", linkId);
+```
+
+### Per-link and global fee overrides (issue #663)
+
+By default, payments collected via a link don't have any link-level fee
+deducted. An admin can override this per-link (e.g. a promotional 0-fee
+link) or set a contract-wide default that applies to any link without its
+own override — available on the standalone `PaymentLinkManagerClient`:
+
+```typescript
+// Zero-fee promotional link: overrides take precedence over the global default.
+await linkClient.setPaymentLinkFeeBps("G_admin...", linkId, 0n);
+
+// Contract-wide default fee (500 bps = 5%) for links with no override.
+await linkClient.setPaymentLinkFeeBps("G_admin...", null, 500n);
+
+// Inspect what fee would currently apply to a link.
+const feeBps = await linkClient.getEffectiveFeeBps(linkId);
 ```
 
 ### Standalone PaymentLinkManagerClient

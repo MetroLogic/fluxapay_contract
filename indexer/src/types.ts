@@ -41,6 +41,20 @@ export interface DisputeEvent extends ContractEvent {
   };
 }
 
+/**
+ * Issue #677: dispute bond lifecycle events. Emitted when a bond is
+ * released back to its owner (BOND_RETURNED) or forfeited to the treasury
+ * (BOND_FORFEITED) after a dispute is resolved or rejected.
+ */
+export interface DisputeBondEvent extends ContractEvent {
+  topic: ["DISPUTE", "BOND_RETURNED" | "BOND_FORFEITED"];
+  value: {
+    dispute_id: string;
+    recipient: string;
+    amount: number;
+  };
+}
+
 export interface MerchantEvent extends ContractEvent {
   topic: ["MERCHANT", "REGISTERED" | "VERIFIED" | "SUSPENDED"];
   value: {
@@ -81,6 +95,7 @@ export type AnyEvent =
   | PaymentEvent
   | RefundEvent
   | DisputeEvent
+  | DisputeBondEvent
   | MerchantEvent
   | StreamEvent
   | SubscriptionEvent

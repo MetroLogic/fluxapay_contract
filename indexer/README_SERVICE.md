@@ -276,6 +276,44 @@ migrations/
   001_initial_schema.sql  # Initial database schema
 ```
 
+## Authentication
+
+The REST API (`src/server.ts`) requires a SEP-10 (Stellar Web Authentication)
+JWT on every request except `GET /health`:
+
+```
+Authorization: Bearer <jwt>
+```
+
+Clients obtain the JWT by completing the SEP-10 challenge/response flow
+against `STELLAR_WEB_AUTH_ENDPOINT` (see `SEP10Authenticator` in
+`sdk/src/sep10.ts` for the client-side implementation). The JWT's `sub`
+claim is the authenticated Stellar account.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STELLAR_WEB_AUTH_ENDPOINT` | `https://testanchor.stellar.org/auth` | SEP-10 challenge endpoint |
+| `STELLAR_HOME_DOMAIN` | `fluxapay.stellar.org` | Home domain asserted in the SEP-10 challenge |
+| `STELLAR_SERVER_PUBLIC_KEY` | _(required)_ | Stellar account used to verify issued JWTs |
+| `INDEXER_ADMIN_ACCOUNTS` | _(empty)_ | Comma-separated Stellar accounts allowed on `/admin/*` |
+| `INDEXER_API_PORT` | `3001` | Port for `npm run dev:api` / `start:api` |
+
+### Endpoints
+
+| Endpoint | Auth | Notes |
+|----------|------|-------|
+| `GET /health` | none | Liveness check |
+| `GET /merchants/:merchantId/payments` | SEP-10, merchant-scoped | 403 if JWT `sub` ≠ `:merchantId` and caller isn't an admin |
+| `GET /merchants/:merchantId/refunds` | SEP-10, merchant-scoped | Same scoping as above |
+| `GET /merchants/:merchantId/disputes` | SEP-10, merchant-scoped | Same scoping as above |
+| `GET /admin/stats` | SEP-10, admin-only | 403 unless caller is in `INDEXER_ADMIN_ACCOUNTS` |
+
+Run it standalone:
+```bash
+npm run dev:api    # ts-node, for local development
+npm run start:api  # compiled dist/server.js
+```
+
 ## API (Future)
 
 The merchant dashboard connects to this indexer. Query examples:

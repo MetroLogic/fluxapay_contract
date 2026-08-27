@@ -159,4 +159,24 @@ export class RefundManagerClient {
       }),
     );
   }
+
+  /**
+   * Issue #676: Read the consolidated refund policy — `require_receipt_hash`,
+   * `refund_expiry_secs`, `refund_fee_bps`, and `cooldown_secs` — in one call.
+   * @returns A promise resolving to the current `RefundPolicy`.
+   */
+  async getRefundPolicy(): Promise<RefundPolicy> {
+    return withMappedContractError(() => this.getContract().get_refund_policy());
+  }
+}
+
+/**
+ * Issue #676: consolidated refund configuration, mirroring the on-chain
+ * `RefundPolicy` struct returned by `get_refund_policy`.
+ */
+export interface RefundPolicy {
+  requireReceiptHash: boolean;
+  refundExpirySecs: bigint;
+  refundFeeBps: bigint;
+  cooldownSecs: bigint;
 }
