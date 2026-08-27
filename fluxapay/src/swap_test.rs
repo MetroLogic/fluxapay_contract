@@ -5,6 +5,7 @@ use crate::{
     ZERO_CONTRACT_STRKEY,
 };
 use soroban_sdk::{
+use crate::merchant_registry::MaybeFeeConfig;
     testutils::Address as _, testutils::Events, token, vec, Address, Env, String, Symbol,
     Vec,
 };

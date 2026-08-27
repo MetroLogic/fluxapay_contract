@@ -163,6 +163,7 @@ fn test_memo_persists_after_verification() {
         &BytesN::<32>::random(&env),
         &Address::generate(&env),
         &amount,
+        &None::<u64>,
     );
 
     // Check memo persists after verification

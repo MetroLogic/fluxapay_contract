@@ -1,6 +1,7 @@
 use super::merchant_registry::*;
 use crate::{PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient};
 use soroban_sdk::{
+use crate::merchant_registry::MaybeFeeConfig;
     testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, String, Symbol,
     TryIntoVal,
 };
@@ -74,8 +75,7 @@ fn test_merchant_update() {
         &Some(false),
         &Some(new_payout.clone()),
         &Some(String::from_str(&env, "BANK-002")),
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     let updated_merchant = client.get_merchant(&merchant_id);
 
@@ -557,8 +557,7 @@ fn test_payout_address_rotation_delay() {
         &None,
         &Some(payout_addr1.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Try to update payout address again within 48 hours - should fail
     let payout_addr2 = Address::generate(&env);
@@ -569,8 +568,7 @@ fn test_payout_address_rotation_delay() {
         &None,
         &Some(payout_addr2.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 }
 
 #[test]
@@ -603,8 +601,7 @@ fn test_payout_address_rotation_delay_success_after_48_hours() {
         &None,
         &Some(payout_addr1.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Advance ledger time by 48 hours + 1 second
     env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
@@ -618,8 +615,7 @@ fn test_payout_address_rotation_delay_success_after_48_hours() {
         &None,
         &Some(payout_addr2.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.payout_address, Some(payout_addr2));
@@ -903,8 +899,7 @@ fn test_update_merchant_with_non_whitelisted_payout() {
         &None,
         &Some(non_whitelisted_addr),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 }
 
 #[test]
@@ -937,8 +932,7 @@ fn test_update_merchant_with_whitelisted_payout() {
         &None,
         &Some(whitelisted_addr.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.payout_address, Some(whitelisted_addr));
@@ -1514,8 +1508,7 @@ fn test_first_payout_address_set_produces_no_history() {
         &None,
         &Some(new_addr.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Merchant has the new payout address
     let merchant = client.get_merchant(&merchant_id);
@@ -1545,8 +1538,7 @@ fn test_payout_address_update_appends_old_to_history_and_emits_event() {
         &None,
         &Some(first_addr.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Advance time past the 48-hour rotation delay
     env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
@@ -1559,8 +1551,7 @@ fn test_payout_address_update_appends_old_to_history_and_emits_event() {
         &None,
         &Some(second_addr.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.payout_address, Some(second_addr.clone()));
@@ -1605,8 +1596,7 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
         &None,
         &Some(addr.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Advance past delay
     env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
@@ -1619,8 +1609,7 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
         &None,
         &Some(addr.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 0, "Expected no history when address is unchanged");
@@ -1665,8 +1654,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
         &Some(addr1.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Advance and change to addr2 (history: [addr1])
     env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
@@ -1677,8 +1665,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
         &Some(addr2.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     // Advance and change to addr3 (history: [addr1, addr2])
     env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
@@ -1689,8 +1676,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
         &Some(addr3.clone()),
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None,);
 
     let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 2, "Expected two history entries");
@@ -1835,7 +1821,7 @@ fn test_whitelist_mode_toggle() {
     let (admin, _payment_client, registry_client, merchant, _oracle) =
         setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &None);
+    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &MaybeFeeConfig::None,);
 
     registry_client.set_merchant_whitelist_mode(&merchant, &true);
     assert!(registry_client.get_merchant(&merchant).whitelist_mode);
@@ -1853,7 +1839,7 @@ fn test_non_whitelisted_payer_rejected() {
     let (admin, payment_client, registry_client, merchant, _oracle) =
         setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &None);
+    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &MaybeFeeConfig::None,);
     registry_client.set_merchant_whitelist_mode(&merchant, &true);
 
     let payer = Address::generate(&env);
@@ -1888,7 +1874,7 @@ fn test_whitelisted_payer_accepted() {
     let (admin, payment_client, registry_client, merchant, _oracle) =
         setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &None);
+    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &MaybeFeeConfig::None,);
     registry_client.set_merchant_whitelist_mode(&merchant, &true);
 
     let payer = Address::generate(&env);

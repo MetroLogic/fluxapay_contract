@@ -3,6 +3,7 @@
 use super::*;
 use access_control::{role_admin, role_oracle, role_settlement_operator};
 use soroban_sdk::{
+use crate::merchant_registry::MaybeFeeConfig;
     testutils::{Address as _, BytesN as _, Events as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
@@ -533,7 +534,7 @@ fn test_verify_payment_success() {
         &transaction_hash,
         &payer_address,
         &amount,
-    );
+    , &None::<u64>);
 
     assert_eq!(status, PaymentStatus::Confirmed);
     let payment = client.get_payment(&payment_id);
@@ -845,6 +846,7 @@ fn test_cancel_fails_when_confirmed() {
         &BytesN::<32>::random(&env),
         &Address::generate(&env),
         &amount,
+        &None::<u64>,
     );
 
     let res = client.try_cancel_payment(&merchant_id, &payment_id);
@@ -936,7 +938,7 @@ fn test_create_and_get_refund() {
         &Symbol::new(&env, "USDC"),
     );
 
-    let refund_id = client.create_refund(&payment_id, &refund_amount, &reason, &requester, &None);
+    let refund_id = client.create_refund(&payment_id, &refund_amount, &reason, &requester);
     let refund = client.get_refund(&refund_id);
 
     assert_eq!(refund.payment_id, payment_id);
@@ -1794,9 +1796,7 @@ fn test_cancel_refund_already_cancelled() {
         &payment_id,
         &500i128,
         &String::from_str(&env, "reason"),
-        &requester,
-        &None,
-    );
+        &requester);
 
     client.cancel_refund(&requester, &refund_id);
 
@@ -1824,9 +1824,7 @@ fn test_cancel_refund_does_not_count_toward_total() {
         &payment_id,
         &600i128,
         &String::from_str(&env, "will cancel"),
-        &requester,
-        &None,
-    );
+        &requester);
 
     client.cancel_refund(&requester, &refund_id);
 
@@ -1835,9 +1833,7 @@ fn test_cancel_refund_does_not_count_toward_total() {
         &payment_id,
         &1000i128,
         &String::from_str(&env, "full after cancel"),
-        &requester,
-        &None,
-    );
+        &requester);
     assert!(!refund_id_2.is_empty());
 }
 
@@ -1904,9 +1900,7 @@ fn test_refund_fee_bps_applied_on_process() {
         &payment_id,
         &refund_amount,
         &String::from_str(&env, "fee test"),
-        &requester,
-        &None,
-    );
+        &requester);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
@@ -2680,6 +2674,7 @@ fn make_confirmed_payment(
         &BytesN::<32>::random(env),
         &Address::generate(env),
         &amount,
+        &None::<u64>,
     );
 }
 
@@ -3150,7 +3145,7 @@ fn test_process_refund_reentrancy_guard_normal_flow() {
     );
 
     let payer = Address::generate(&env);
-    let _sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let _sub_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
 
     // process_due_subscriptions immediately — subscription was just created
     // with next_payment_at = now + 1 month, so it should NOT be due yet
@@ -3175,7 +3170,7 @@ fn test_cancelled_subscription_removed_from_active_index() {
     let (client, admin, plan_id) = setup_refund_manager_with_plan(&env);
 
     let payer = Address::generate(&env);
-    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
 
     // Cancel the subscription
     client.cancel_subscription(&payer, &sub_id, &false);
@@ -3198,7 +3193,7 @@ fn test_paused_subscription_removed_from_active_index() {
     let (client, admin, plan_id) = setup_refund_manager_with_plan(&env);
 
     let payer = Address::generate(&env);
-    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
 
     // Pause the subscription
     client.pause_subscription(&payer, &sub_id);
@@ -3221,7 +3216,7 @@ fn test_resumed_subscription_added_back_to_active_index() {
     let (client, admin, plan_id) = setup_refund_manager_with_plan(&env);
 
     let payer = Address::generate(&env);
-    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
 
     // Pause, then resume
     client.pause_subscription(&payer, &sub_id);
@@ -3245,7 +3240,7 @@ fn test_process_due_subscriptions_auto_cancels_on_max_payments() {
     let (client, admin, plan_id) = setup_refund_manager_with_plan(&env);
 
     let payer = Address::generate(&env);
-    let _sub_id = client.subscribe(&payer, &plan_id, &Some(2), &None, &None);
+    let _sub_id = client.subscribe(&payer, &plan_id, &Some(2), &None, &MaybeFeeConfig::None,);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_oracle(&env), &operator);
@@ -3438,7 +3433,7 @@ fn test_verify_payment_rejects_stale_fx_rate() {
     payment_client.grant_role(&admin, &role_oracle(&env), &operator);
     let tx_hash = BytesN::from_array(&env, &[0u8; 32]);
     let payer = Address::generate(&env);
-    payment_client.verify_payment(&operator, &payment_id, &tx_hash, &payer, &1000i128);
+    payment_client.verify_payment(&operator, &payment_id, &tx_hash, &payer, &1000i128, &None::<u64>, );
 
     // Advance time past the staleness threshold (25 hours)
     env.ledger()
@@ -3449,7 +3444,7 @@ fn test_verify_payment_rejects_stale_fx_rate() {
     let args2 = create_payment_args(&env, &payment_id2, &merchant, 1000i128);
     payment_client.create_payment(&args2);
 
-    let result = payment_client.try_verify_payment(&operator, &payment_id2, &tx_hash, &payer, &1000i128);
+    let result = payment_client.try_verify_payment(&operator, &payment_id2, &tx_hash, &payer, &1000i128, &None::<u64>);
     assert_eq!(result, Err(Ok(Error::StaleOracleRate)));
 }
 
@@ -3500,7 +3495,7 @@ fn test_verify_payment_stores_fx_rate_on_success() {
     payment_client.grant_role(&admin, &role_oracle(&env), &operator);
     let tx_hash = BytesN::from_array(&env, &[0u8; 32]);
     let payer = Address::generate(&env);
-    payment_client.verify_payment(&operator, &payment_id, &tx_hash, &payer, &1000i128);
+    payment_client.verify_payment(&operator, &payment_id, &tx_hash, &payer, &1000i128, &None::<u64>, );
 
     // Verify the payment has the FX rate stored
     let payment = payment_client.get_payment(&payment_id);
@@ -3527,7 +3522,7 @@ fn test_verify_payment_no_fx_oracle_config_skips_check() {
     client.grant_role(&admin, &role_oracle(&env), &operator);
     let tx_hash = BytesN::from_array(&env, &[0u8; 32]);
     let payer = Address::generate(&env);
-    let status = client.verify_payment(&operator, &payment_id, &tx_hash, &payer, &1000i128);
+    let status = client.verify_payment(&operator, &payment_id, &tx_hash, &payer, &1000i128, &None::<u64>, );
     assert_eq!(status, PaymentStatus::Confirmed);
 
     let payment = client.get_payment(&payment_id);
@@ -3802,7 +3797,7 @@ fn test_settle_payment_zero_fee_rate_no_deduction_no_event() {
     // No PAYMENT/FEE_COLLECTED event should have been emitted
     let events = env.events().all();
     let fee_event_count = events.iter().filter(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -3883,7 +3878,7 @@ fn test_settle_payment_emits_fee_collected_event() {
     // Verify PAYMENT/FEE_COLLECTED event was emitted
     let events = env.events().all();
     let found = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -3898,7 +3893,7 @@ fn test_settle_payment_emits_fee_collected_event() {
     assert!(found, "PAYMENT/FEE_COLLECTED event should be emitted when fee > 0");
 
     let settled = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -4192,7 +4187,7 @@ fn test_proposal_threshold_met_executes_dispute_bond() {
     // Verify ADMIN/PROPOSAL_EXECUTED event was emitted.
     let events = env.events().all();
     let found = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -4535,7 +4530,7 @@ fn test_settle_payment_emits_fee_split_event() {
     // Verify PAYMENT/FEE_SPLIT event was emitted
     let events = env.events().all();
     let found = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -4649,7 +4644,7 @@ fn test_settle_payment_no_fee_split_config_falls_back_to_treasury_balance() {
     // Legacy: FEE_COLLECTED event, not FEE_SPLIT
     let events = env.events().all();
     let fee_collected = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -4664,7 +4659,7 @@ fn test_settle_payment_no_fee_split_config_falls_back_to_treasury_balance() {
     assert!(fee_collected, "FEE_COLLECTED event must be emitted on legacy path");
 
     let fee_split = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        let topics = match &e.body { soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.clone().into(), _ => return false, };
         if topics.len() < 2 {
             return false;
         }
@@ -5297,6 +5292,7 @@ fn test_merchant_payment_count_not_decremented_on_cancel() {
         &BytesN::<32>::random(&env),
         &Address::generate(&env),
         &amount,
+        &None::<u64>,
     );
 
     let operator = Address::generate(&env);
@@ -5494,7 +5490,7 @@ fn test_subscription_max_retries_cancelled() {
     );
 
     // Create subscription
-    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
     let subscription = client.get_subscription(&subscription_id).unwrap();
     assert_eq!(subscription.status, SubscriptionStatus::Active);
 }
@@ -5521,7 +5517,7 @@ fn test_subscription_retry_counter_reset_on_success() {
         &crate::BillingInterval::Weekly,
     );
 
-    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
     let subscription = client.get_subscription(&subscription_id).unwrap();
     assert_eq!(subscription.retry_count, 0u32);
 }
@@ -5548,7 +5544,7 @@ fn test_admin_reactivate_max_retries_cancelled_subscription() {
         &crate::BillingInterval::Weekly,
     );
 
-    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &MaybeFeeConfig::None,);
 
     // Manually mark subscription as cancelled to simulate max retries cancellation
     let contract_id = client.address.clone();

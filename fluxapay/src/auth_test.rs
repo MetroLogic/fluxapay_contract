@@ -3,6 +3,7 @@ use crate::{
     PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient,
 };
 use soroban_sdk::{
+use crate::merchant_registry::MaybeFeeConfig;
     testutils::{Address as _, BytesN as _},
     token, vec, Address, BytesN, Env, String, Symbol,
 };

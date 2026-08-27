@@ -4,6 +4,7 @@ use crate::{
 };
 use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
 
+use crate::merchant_registry::MaybeFeeConfig;
 fn setup_swap_env(
     env: &Env,
 ) -> (
