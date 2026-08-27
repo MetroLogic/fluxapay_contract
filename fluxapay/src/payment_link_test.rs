@@ -374,6 +374,7 @@ fn test_max_uses_exact_accepted_and_emits_event() {
         &false,
         &None,
         &MaybeFiatConfig::None,
+        &None,
     );
 
     client.use_link(&payer, &link_id, &50i128, &None);
@@ -419,6 +420,7 @@ fn test_unlimited_link_never_blocked_by_max_uses() {
         &false,
         &None,
         &MaybeFiatConfig::None,
+        &None,
     );
 
     for _ in 0..5 {
@@ -623,6 +625,45 @@ fn test_metadata_none_succeeds() {
     assert_eq!(id, link_id);
     let link = client.get_link(&link_id);
     assert!(link.metadata.is_none());
+}
+
+#[test]
+fn test_create_link_with_metadata_stores_and_returns_correct_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+
+    let link_id = String::from_str(&env, "meta_store_test");
+    let mut metadata = Map::new(&env);
+    metadata.set(String::from_str(&env, "order_id"), String::from_str(&env, "ORD-2026-001"));
+    metadata.set(String::from_str(&env, "campaign"), String::from_str(&env, "summer_sale"));
+
+    let id = client.create_link(
+        &merchant,
+        &link_id,
+        &Some(2000i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Metadata Store Test"),
+        &None,
+        &None,
+        &false,
+        &Some(metadata),
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    assert_eq!(id, link_id);
+    let link = client.get_link(&link_id);
+    assert!(link.metadata.is_some());
+    let stored = link.metadata.unwrap();
+    assert_eq!(
+        stored.get(String::from_str(&env, "order_id")),
+        Some(String::from_str(&env, "ORD-2026-001"))
+    );
+    assert_eq!(
+        stored.get(String::from_str(&env, "campaign")),
+        Some(String::from_str(&env, "summer_sale"))
+    );
 }
 
 // -- Issue #413: Multi-Currency Invoicing (Fiat) ----------------------------
@@ -1096,8 +1137,14 @@ fn test_set_payment_base_url_used_as_default() {
         &Symbol::new(&env, "USDC"),
         &String::from_str(&env, "Default Base"),
         &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
     );
 
+    let payer = Address::generate(&env);
     let result = client.try_use_link(&payer, &link_id, &1000, &None);
     assert!(result.is_ok());
 }
@@ -1205,6 +1252,7 @@ fn test_expire_link_idempotent() {
         &false,
         &None,
         &MaybeFiatConfig::None,
+        &None,
     );
 
     // Calling expire_link twice should succeed both times.
@@ -1234,6 +1282,7 @@ fn test_expire_link_non_expired_skips() {
         &false,
         &None,
         &MaybeFiatConfig::None,
+        &None,
     );
 
     client.expire_link(&link_id);
@@ -1260,6 +1309,7 @@ fn test_get_link_auto_deactivates_expired() {
         &false,
         &None,
         &MaybeFiatConfig::None,
+        &None,
     );
 
     // get_link should return active: false for expired links.
@@ -1288,6 +1338,7 @@ fn test_batch_expire_links_sweep() {
             &false,
             &None,
             &MaybeFiatConfig::None,
+            &None,
         );
         link_ids.push_back(lid);
     }
@@ -1340,6 +1391,7 @@ fn test_link_expired_event_emitted() {
         &false,
         &None,
         &MaybeFiatConfig::None,
+        &None,
     );
 
     client.expire_link(&link_id);

@@ -4,6 +4,7 @@ import type {
   Merchant,
   Refund,
   CreatePaymentParams,
+  SubscriptionPlan,
   Invoice,
   LineItem,
   InvoiceStatus,
@@ -12,6 +13,7 @@ import type {
 import { useFluxapayClient } from "./FluxapayProvider.js";
 import { useAsync, type AsyncState } from "./useAsync.js";
 
+export type { SubscriptionPlan } from "@fluxapay/sdk";
 export type { Invoice, LineItem, InvoiceStatus };
 
 /** Fetch a single payment by id. Re-fetches whenever `paymentId` changes. */
@@ -118,6 +120,31 @@ export function useCreatePayment(): UseCreatePaymentResult {
   return { mutate, data, status, loading: status === "loading", error };
 }
 
+// -- Issue #679: Subscription plan hooks ---------------------------------------
+
+/** Fetch a single subscription plan by ID. Re-fetches whenever `planId` changes. */
+export function useSubscriptionPlan(planId: string | undefined): AsyncState<SubscriptionPlan> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getSubscriptionPlan(planId as string) as unknown as Promise<SubscriptionPlan>,
+    [planId],
+    !!planId,
+  );
+}
+
+export interface UseCreateSubscriptionPlanParams {
+  merchant: string;
+  planId: string;
+  name: string;
+  description: string;
+  amount: bigint;
+  currency: string;
+  billingInterval: "Daily" | "Weekly" | "Monthly" | "Annually";
+}
+
+export interface UseCreateSubscriptionPlanResult {
+  mutate: (params: UseCreateSubscriptionPlanParams) => Promise<void>;
+  data: void;
 /** Fetch a single invoice by id. Re-fetches whenever `invoiceId` changes. */
 export function useInvoice(invoiceId: string | undefined): AsyncState<Invoice> {
   const client = useFluxapayClient();
@@ -146,6 +173,10 @@ export interface UseCreateInvoiceResult {
   error: Error | undefined;
 }
 
+/** Create a subscription plan. Returns a `mutate` function and current transaction status. */
+export function useCreateSubscriptionPlan(): UseCreateSubscriptionPlanResult {
+  const client = useFluxapayClient();
+  const [data, setData] = React.useState<void>(undefined);
 /** Create an invoice. Returns a `mutate` function and the current mutation status. */
 export function useCreateInvoice(): UseCreateInvoiceResult {
   const client = useFluxapayClient();
@@ -154,6 +185,13 @@ export function useCreateInvoice(): UseCreateInvoiceResult {
   const [error, setError] = React.useState<Error | undefined>(undefined);
 
   const mutate = React.useCallback(
+    async (params: UseCreateSubscriptionPlanParams) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        await client.createSubscriptionPlan(params);
+        setData(undefined);
+        setStatus("success");
     async (params: CreateInvoiceParams) => {
       setStatus("loading");
       setError(undefined);
@@ -175,6 +213,15 @@ export function useCreateInvoice(): UseCreateInvoiceResult {
   return { mutate, data, status, loading: status === "loading", error };
 }
 
+export interface UseSubscribeToPlanParams {
+  payer: string;
+  planId: string;
+  paymentId: string;
+}
+
+export interface UseSubscribeToPlanResult {
+  mutate: (params: UseSubscribeToPlanParams) => Promise<void>;
+  data: void;
 export interface UseMarkInvoicePaidResult {
   mutate: (invoiceId: string) => Promise<void>;
   status: MutationStatus;
@@ -182,6 +229,10 @@ export interface UseMarkInvoicePaidResult {
   error: Error | undefined;
 }
 
+/** Subscribe a payer to an existing subscription plan. */
+export function useSubscribeToPlan(): UseSubscribeToPlanResult {
+  const client = useFluxapayClient();
+  const [data, setData] = React.useState<void>(undefined);
 /** Mark an invoice as paid. Returns a `mutate` function and the current mutation status. */
 export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
   const client = useFluxapayClient();
@@ -189,6 +240,12 @@ export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
   const [error, setError] = React.useState<Error | undefined>(undefined);
 
   const mutate = React.useCallback(
+    async (params: UseSubscribeToPlanParams) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        await client.subscribeToPlan(params);
+        setData(undefined);
     async (invoiceId: string) => {
       setStatus("loading");
       setError(undefined);
@@ -205,5 +262,5 @@ export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
     [client],
   );
 
-  return { mutate, status, loading: status === "loading", error };
+  return { mutate, data, status, loading: status === "loading", error };
 }

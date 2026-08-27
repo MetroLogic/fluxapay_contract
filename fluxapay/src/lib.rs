@@ -1084,6 +1084,9 @@ pub enum DataKey {
     PaymentsByExpiry(u32),
     /// Issue #504: Sorted set of expiry buckets that currently contain payment IDs.
     PaymentExpiryBuckets,
+    /// Issue #678: Daily-bucketed payment ID index for O(days) analytics queries.
+    /// Key: (merchant_id, day_bucket = created_at / 86_400) → Vec<payment_id>.
+    DailyPaymentIndex(Address, u64),
     /// Issue #666: Paginated log of platform-fee collection events (newest-first,
     /// capped at `FEE_COLLECTION_HISTORY_CAP`), consumed by `get_platform_fee_report`.
     FeeCollectionHistory,
@@ -1134,6 +1137,18 @@ pub struct MerchantAnalytics {
     pub dispute_count: u32,
     pub refund_count: u32,
     pub net_settled_volume: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractHealth {
+    pub version: String,
+    pub is_paused: bool,
+    pub is_creation_paused: bool,
+    pub treasury_balance: i128,
+    pub active_payment_count: u32,
+    pub fx_oracle_configured: bool,
+    pub merchant_registry_configured: bool,
 }
 #[cfg_attr(
     any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
@@ -5632,6 +5647,46 @@ impl PaymentProcessor {
         Self::version(env)
     }
 
+    /// Issue #683: Return a summary of key contract metrics for dashboards
+    /// and monitoring. No authentication required — this is a public read.
+    pub fn get_contract_health(env: Env) -> ContractHealth {
+        let version = Self::version(env.clone());
+        let is_paused = Self::is_paused(env.clone());
+        let creation_paused: bool = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PauseState>(&DataKey::CreationPaused)
+            .map(|s| s.paused)
+            .unwrap_or(false);
+        let treasury_balance = Self::get_treasury_balance(env.clone());
+
+        let active_payment_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPaymentCount(env.current_contract_address()))
+            .unwrap_or(0u64) as u32;
+
+        let fx_oracle_configured = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::FxOracleAddress)
+            .is_some();
+
+        let merchant_registry_configured = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+            .is_some();
+
+        ContractHealth {
+            version,
+            is_paused,
+            is_creation_paused: creation_paused,
+            treasury_balance,
+            active_payment_count,
+            fx_oracle_configured,
+            merchant_registry_configured,
+        }
     /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
@@ -6735,6 +6790,25 @@ impl PaymentProcessor {
         }
     }
 
+    /// Issue #678: Append payment_id to the daily bucket index for the given merchant.
+    /// Bucket granularity is one day (86 400 seconds). The index allows analytics
+    /// queries to scan only the relevant day buckets rather than all payments.
+    fn index_payment_by_date(env: &Env, merchant_id: &Address, payment_id: &String, created_at: u64) {
+        const SECONDS_PER_DAY: u64 = 86_400;
+        let day_bucket = created_at / SECONDS_PER_DAY;
+        let key = DataKey::DailyPaymentIndex(merchant_id.clone(), day_bucket);
+        let mut ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        if !ids.contains(payment_id) {
+            ids.push_back(payment_id.clone());
+            env.storage().persistent().set(&key, &ids);
+            Self::bump_ttl(env, &key, LONG_LIVE_TTL);
+        }
+    }
+
     fn remove_payment_from_expiry_bucket(env: &Env, payment_id: &String, expires_at: u64) {
         let bucket = Self::expiry_bucket_for(expires_at);
         let key = DataKey::PaymentsByExpiry(bucket);
@@ -6986,6 +7060,7 @@ impl PaymentProcessor {
         Self::record_payment_status(&env, &payment);
         Self::bump_payment_ttl(&env, &args.payment_id, &payment.status);
         Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
+        Self::index_payment_by_date(&env, &args.merchant_id, &args.payment_id, payment.created_at);
 
         // Issue #489: Store reverse index for metadata_hash → payment_id lookup
         if let Some(ref hash) = args.metadata_hash {
@@ -8035,7 +8110,25 @@ impl PaymentProcessor {
 
         let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
 
-        let all_payment_ids = Self::get_merchant_payments_internal(&env, &merchant_id);
+        const SECONDS_PER_DAY: u64 = 86_400;
+        let start_bucket = from_ts / SECONDS_PER_DAY;
+        let end_bucket = to_ts / SECONDS_PER_DAY;
+
+        let mut candidate_ids: Vec<String> = vec![&env];
+        let mut bucket = start_bucket;
+        while bucket <= end_bucket {
+            let key = DataKey::DailyPaymentIndex(merchant_id.clone(), bucket);
+            if let Some(bucket_ids) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Vec<String>>(&key)
+            {
+                for id in bucket_ids.iter() {
+                    candidate_ids.push_back(id);
+                }
+            }
+            bucket = bucket.saturating_add(1);
+        }
 
         let mut payments_in_period = vec![&env];
         let mut total_gross: i128 = 0;
@@ -8068,7 +8161,7 @@ impl PaymentProcessor {
             default_fee_bps
         };
 
-        for payment_id in all_payment_ids.iter() {
+        for payment_id in candidate_ids.iter() {
             if let Ok(payment) = Self::get_payment_internal(&env, &payment_id) {
                 let payment_time = payment.confirmed_at.unwrap_or(payment.created_at);
                 
@@ -9697,9 +9790,35 @@ impl PaymentProcessor {
     /// Issue #487: Query aggregate analytics for a merchant over a time range.
     /// Returns total_payments, confirmed_payments, failed_payments, total_volume,
     /// avg_payment_amount, dispute_count, refund_count, net_settled_volume.
-    /// Aggregates are computed lazily from stored payment records (paginated internally, max 500).
+    /// Issue #678: When from_ts/to_ts are provided, uses the DailyPaymentIndex
+    /// to scan only the relevant day buckets (O(days) ledger reads).
     pub fn get_merchant_analytics(env: Env, merchant_id: Address, from_ts: u64, to_ts: u64) -> MerchantAnalytics {
-        let payments = Self::get_merchant_payments_internal(&env, &merchant_id);
+        const SECONDS_PER_DAY: u64 = 86_400;
+        let use_index = from_ts > 0 || to_ts < u64::MAX;
+
+        let candidate_ids: Vec<String> = if use_index {
+            let start_bucket = from_ts / SECONDS_PER_DAY;
+            let end_bucket = to_ts / SECONDS_PER_DAY;
+            let mut ids: Vec<String> = vec![&env];
+            let mut bucket = start_bucket;
+            while bucket <= end_bucket {
+                let key = DataKey::DailyPaymentIndex(merchant_id.clone(), bucket);
+                if let Some(bucket_ids) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Vec<String>>(&key)
+                {
+                    for id in bucket_ids.iter() {
+                        ids.push_back(id);
+                    }
+                }
+                bucket = bucket.saturating_add(1);
+            }
+            ids
+        } else {
+            Self::get_merchant_payments_internal(&env, &merchant_id)
+        };
+
         let mut total_payments = 0u32;
         let mut confirmed_payments = 0u32;
         let mut failed_payments = 0u32;
@@ -9709,7 +9828,7 @@ impl PaymentProcessor {
         let max_samples = 500usize;
         let mut sample_count = 0usize;
 
-        for payment_id in payments.iter() {
+        for payment_id in candidate_ids.iter() {
             if sample_count >= max_samples {
                 break;
             }
