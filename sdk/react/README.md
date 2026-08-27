@@ -99,6 +99,66 @@ the pattern used by React Query / SWR consumers.
 - `useMerchantPayments(merchantId, { offset?, limit? })` — fetch a merchant's paginated payments.
 - `useRefund(refundId)` — fetch a single refund.
 - `useCreatePayment()` — returns `{ mutate, data, status, loading, error }` for creating a payment.
+- `useSubscriptionPlan(planId)` — fetch a subscription plan by ID.
+- `useCreateSubscriptionPlan()` — returns `{ mutate, data, status, loading, error }` for creating a plan.
+- `useSubscribeToPlan()` — returns `{ mutate, data, status, loading, error }` for subscribing a payer to a plan.
+
+## Subscription Plan Example
+
+```tsx
+import {
+  useSubscriptionPlan,
+  useCreateSubscriptionPlan,
+  useSubscribeToPlan,
+  type SubscriptionPlan,
+} from "@fluxapay/react";
+
+function PlanDetails({ planId }: { planId: string }) {
+  const { data: plan, loading } = useSubscriptionPlan(planId);
+  if (loading) return <p>Loading plan...</p>;
+  return <p>{plan?.name}: {plan?.amount.toString()} {plan?.currency}/{plan?.billingInterval}</p>;
+}
+
+function CreatePlanForm({ merchantId }: { merchantId: string }) {
+  const { mutate, loading, error } = useCreateSubscriptionPlan();
+
+  const onSubmit = async () => {
+    await mutate({
+      merchant: merchantId,
+      planId: "plan_weekly",
+      name: "Weekly Pro",
+      description: "Unlimited weekly access",
+      amount: 1_000_000n,
+      currency: "USDC",
+      billingInterval: "Weekly",
+    });
+  };
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {loading ? "Creating..." : "Create plan"}
+    </button>
+  );
+}
+
+function SubscribeButton({ payer, planId }: { payer: string; planId: string }) {
+  const { mutate, loading } = useSubscribeToPlan();
+
+  const onSubscribe = async () => {
+    await mutate({
+      payer,
+      planId,
+      paymentId: `sub_${planId}_${payer.slice(0, 8)}`,
+    });
+  };
+
+  return (
+    <button onClick={onSubscribe} disabled={loading}>
+      {loading ? "Subscribing..." : "Subscribe"}
+    </button>
+  );
+}
+```
 
 ## License
 
