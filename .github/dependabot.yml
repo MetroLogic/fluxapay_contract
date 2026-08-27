@@ -12,6 +12,18 @@ updates:
     commit-message:
       prefix: chore(deps)
 
+  # Cargo dependencies (cargo-fuzz targets, Issue #674 — separate workspace)
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: chore(deps)
+
   # GitHub Actions dependencies
   - package-ecosystem: github-actions
     directory: /
@@ -34,5 +46,31 @@ updates:
       - dependencies
       - npm
       - sdk
+    commit-message:
+      prefix: chore(deps)
+
+  # npm dependencies (React SDK)
+  - package-ecosystem: npm
+    directory: /sdk/react
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - npm
+      - sdk
+    commit-message:
+      prefix: chore(deps)
+
+  # npm dependencies (indexer) — stellar-sdk, pg, dotenv, etc.
+  - package-ecosystem: npm
+    directory: /indexer
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - npm
+      - indexer
     commit-message:
       prefix: chore(deps)

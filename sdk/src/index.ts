@@ -1073,6 +1073,51 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #659: Merchant accepts a `PartiallyPaid` payment at the amount
+   * actually received, moving it to `Confirmed` without issuing a refund
+   * for the shortfall.
+   * Maps to `PaymentProcessor.accept_partial_payment` on-chain.
+   *
+   * @param authority - The merchant's Stellar address (must sign; must match
+   * `payment.merchant_id`).
+   * @param paymentId - The `PartiallyPaid` payment to accept.
+   */
+  async acceptPartialPayment(authority: string, paymentId: string): Promise<void> {
+    return withMappedContractError(async () => {
+      const tx = await (this.contract as any).accept_partial_payment({
+        merchant_id: authority,
+        payment_id: paymentId,
+      });
+      return tx.result;
+    });
+  }
+
+  /**
+   * Issue #659: Customer tops up a `PartiallyPaid` payment with additional
+   * funds, moving it back to `Pending` so a subsequent `verifyPayment` call
+   * can confirm it with the combined amount.
+   * Maps to `PaymentProcessor.complete_partial_payment` on-chain.
+   *
+   * @param operator - The payer's Stellar address (must sign).
+   * @param paymentId - The `PartiallyPaid` payment to top up.
+   * @param topUpAmount - Additional amount (in stroops) being sent, must be > 0.
+   */
+  async completePartialPayment(
+    operator: string,
+    paymentId: string,
+    topUpAmount: bigint,
+  ): Promise<void> {
+    return withMappedContractError(async () => {
+      const tx = await (this.contract as any).complete_partial_payment({
+        payer: operator,
+        payment_id: paymentId,
+        top_up_amount: topUpAmount,
+      });
+      return tx.result;
+    });
+  }
+
+  /**
    * Get payment details
    */
   async getPayment(paymentId: string) {

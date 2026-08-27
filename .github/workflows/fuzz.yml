@@ -1,0 +1,65 @@
+name: Fuzz (scheduled)
+
+# Issue #674: fuzz payment/dispute ID format validation.
+#
+# Runs weekly (not on every PR — cargo-fuzz needs a nightly toolchain and
+# each target runs for a fixed wall-clock budget, which doesn't fit a
+# per-PR gate) plus on-demand via workflow_dispatch.
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Wall-clock budget per fuzz target, in seconds.
+  FUZZ_SECONDS: 60
+
+jobs:
+  fuzz:
+    name: cargo fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_validate_payment_id
+          - fuzz_create_payment_id_parse
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run ${{ matrix.target }} for ${{ env.FUZZ_SECONDS }}s
+        run: |
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ env.FUZZ_SECONDS }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

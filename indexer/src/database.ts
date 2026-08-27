@@ -222,6 +222,49 @@ export class Database {
     return tableMap[eventType] || "contract_events";
   }
 
+  // ── Read queries (Issue #672: REST API backing queries) ─────────────────
+
+  async getPaymentsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    const { rows } = await this.pool.query(
+      `SELECT payment_id, merchant_id, amount, currency, status, created_at
+       FROM payments WHERE merchant_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [merchantId, limit]
+    );
+    return rows;
+  }
+
+  async getRefundsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    const { rows } = await this.pool.query(
+      `SELECT r.refund_id, r.payment_id, r.amount, r.status, r.created_at
+       FROM refunds r
+       JOIN payments p ON p.payment_id = r.payment_id
+       WHERE p.merchant_id = $1
+       ORDER BY r.created_at DESC LIMIT $2`,
+      [merchantId, limit]
+    );
+    return rows;
+  }
+
+  async getDisputesByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    const { rows } = await this.pool.query(
+      `SELECT d.dispute_id, d.payment_id, d.amount, d.status, d.created_at
+       FROM disputes d
+       JOIN payments p ON p.payment_id = d.payment_id
+       WHERE p.merchant_id = $1
+       ORDER BY d.created_at DESC LIMIT $2`,
+      [merchantId, limit]
+    );
+    return rows;
+  }
+
+  /** Admin-only: event counts by type, across all merchants. */
+  async getAdminStats(): Promise<Record<string, number>> {
+    const { rows } = await this.pool.query(
+      `SELECT event_type, COUNT(*)::int AS count FROM contract_events GROUP BY event_type`
+    );
+    return Object.fromEntries(rows.map((r: { event_type: string; count: number }) => [r.event_type, r.count]));
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

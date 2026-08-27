@@ -181,7 +181,9 @@ export type PaymentStatus =
   | { tag: "Confirmed"; values: void }
   | { tag: "Settled"; values: void }
   | { tag: "Expired"; values: void }
-  | { tag: "Failed"; values: void };
+  | { tag: "Failed"; values: void }
+  | { tag: "PartiallyPaid"; values: void }
+  | { tag: "Overpaid"; values: void };
 
 export interface RateData {
   decimals: u32;
