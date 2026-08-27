@@ -117,10 +117,6 @@ pub struct PaymentCharge {
     pub original_token: Option<Address>,
     /// Issue #173: Swap path used in swap_and_pay (for refund routing).
     pub swap_path: Option<Vec<Address>>,
-    /// Issue #304: FX rate snapshot captured during verify_payment.
-    pub fx_rate: Option<i128>,
-    /// Issue #304: Timestamp when the FX rate was captured.
-    pub fx_rate_at: Option<u64>,
     /// Arbitrary key-value metadata supplied by the merchant at creation time (max 20 keys, 256 chars per value).
     pub metadata: Option<Map<String, String>>,
     /// Optional per-payment fee waiver code set at `create_payment` time.
@@ -174,8 +170,6 @@ pub struct Refund {
     pub receipt_hash: Option<BytesN<32>>,
     /// Issue #168: Approved by operator, allowing customer to claim.
     pub approved: bool,
-    /// Cryptographic proof hash of return agreement for off-chain verification (Issue #176).
-    pub receipt_hash: Option<BytesN<32>>,
     /// Expiry timestamp for refund requests (Issue #170).
     pub expiry_at: u64,
 }
@@ -426,6 +420,8 @@ pub enum DisputeBatchItemResult {
 /// Hard cap for dispute batch size.
 pub const MAX_DISPUTE_BATCH: u32 = 20;
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwapAndPayArgs {
     pub payer: Address,
     pub payment_id: String,
@@ -1033,6 +1029,31 @@ pub const INITIAL_CONTRACT_VERSION: &str = "1.0.0";
 // tooling), all impls compile so that *Client types are available everywhere.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentSummary {
+    pub payment_id: String,
+    pub amount: i128,
+    pub fee: i128,
+    pub refund_amount: i128,
+    pub status: PaymentStatus,
+    pub settled_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub merchant_id: Address,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub payments: Vec<PaymentSummary>,
+    pub total_gross: i128,
+    pub total_fees: i128,
+    pub total_refunds: i128,
+    pub total_net_settled: i128,
+    pub dispute_adjustments: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MerchantAnalytics {
     pub total_payments: u32,
     pub confirmed_payments: u32,
@@ -1052,6 +1073,44 @@ impl RefundManager {
     pub fn version() -> u32 {
         1
     }
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
+        let pause_state: PauseState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Paused)
+            .unwrap_or(PauseState {
+                paused: false,
+                reason: String::from_str(env, ""),
+                admin: None,
+                timestamp: 0,
+            });
+        if pause_state.paused {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn get_refund_fee_bps_internal(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::RefundFeeBps)
+            .unwrap_or(REFUND_FEE_BPS)
+    }
+
+    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
+            .unwrap_or(REFUND_COOLDOWN_SECS)
+    }
+
+    pub fn get_dispute_bond_amount(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeBondAmount)
+            .unwrap_or(DISPUTE_BOND_AMOUNT)
+    }
+
 
     /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
     /// description, deployment notes, or audit commit hash. Stored in instance
@@ -1440,6 +1499,10 @@ impl RefundManager {
                 fx_rate_at: None,
                 original_token: Some(original_token),
                 swap_path: Some(swap_path),
+                metadata: None,
+                fee_waiver_code: None,
+                retry_of_payment_id: None,
+                payer_muxed_id: None,
                 payment_link_id: None,
             };
             env.storage()
@@ -1754,10 +1817,8 @@ impl RefundManager {
             created_at,
             processed_at: None,
             receipt_hash,
-            expiry_at: created_at.saturating_add(Self::get_refund_expiry_secs(env)),
             approved: false,
-            receipt_hash,
-            expiry_at,
+            expiry_at: created_at.saturating_add(Self::get_refund_expiry_secs(env)),
         };
 
         env.storage()
@@ -1977,7 +2038,7 @@ impl RefundManager {
             .ok_or(Error::PaymentNotFound)?;
 
         // Issue #167: Query merchant's KYC tier and apply tiered refund fee
-        let default_fee_bps = Self::get_refund_fee_bps_internal(env);
+        let default_fee_bps = Self::get_refund_fee_bps_internal(&env);
 
         let fee_bps = if let Some(registry_address) = env
             .storage()
@@ -2068,8 +2129,12 @@ impl RefundManager {
                 .persistent()
                 .get::<DataKey, Address>(&DataKey::DexRouterAddress)
             {
-                let mut reversed_path = swap_path.clone();
-                reversed_path.reverse();
+                let mut reversed_path = Vec::new(env);
+                for i in (0..swap_path.len()).rev() {
+                    if let Some(addr) = swap_path.get(i) {
+                        reversed_path.push_back(addr);
+                    }
+                }
                 if !reversed_path.is_empty() {
                     let dex_client = crate::dex_router::DexRouterClient::new(env, &dex_router);
                     let deadline = env.ledger().timestamp().saturating_add(3_600);
@@ -2428,7 +2493,7 @@ impl RefundManager {
     }
 
     pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, Error> {
-        let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
+        let refund_ids = RefundManager::get_payment_refunds_internal(&env, &payment_id);
         let mut refunds = vec![&env];
         for id in refund_ids.iter() {
             if let Ok(refund) = Self::get_refund_internal(&env, &id) {
@@ -3944,6 +4009,7 @@ impl RefundManager {
                     dispute.amount,
                     refund_reason,
                     dispute.disputer.clone(),
+                    None,
                 ) {
                     let _ = Self::process_refund_internal(env, &admin, refund_id);
                 }
@@ -4920,6 +4986,8 @@ impl RefundManager {
             fx_rate_at: None,
             metadata: None,
             fee_waiver_code: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
             payment_link_id: None,
         };
 
@@ -7052,10 +7120,9 @@ impl PaymentProcessor {
                 fx_rate: None,
                 fx_rate_at: None,
                 metadata: args.metadata.clone(),
-                fee_waiver_code: None,
-            retry_of_payment_id: None,
-            payer_muxed_id: None,
                 fee_waiver_code: args.fee_waiver_code.clone(),
+                retry_of_payment_id: None,
+                payer_muxed_id: None,
                 payment_link_id: None,
             };
 
@@ -7573,7 +7640,7 @@ impl PaymentProcessor {
                 let payment = Self::get_payment_internal(&env, &current_id)?;
                 payment.retry_of_payment_id.clone()
             } {
-                current_id = retry_of;
+                current_id = retry_of.clone();
                 depth = depth.saturating_add(1);
                 if depth > 3 {
                     return Err(Error::MaxRetriesExceeded);
@@ -7665,7 +7732,7 @@ impl PaymentProcessor {
             .persistent()
             .get::<DataKey, String>(&DataKey::MetadataHashPayment(metadata_hash.clone()))
             .ok_or(Error::PaymentNotFound)?;
-        Self::get_payment(&env, payment_id)
+        Self::get_payment(env, payment_id)
     }
 
     /// Issue #492: Get customer profile for merchant and customer pair.
@@ -7685,7 +7752,7 @@ impl PaymentProcessor {
             if let Ok(payment) = Self::get_payment_internal(&env, &payment_id) {
                 if payment.status == PaymentStatus::Confirmed || payment.status == PaymentStatus::Overpaid {
                     if let Some(payer) = payment.payer_address {
-                        if let Ok(profile) = Self::get_customer(&env, merchant_id.clone(), payer.clone()) {
+                        if let Ok(profile) = Self::get_customer(env.clone(), merchant_id.clone(), payer.clone()) {
                             customers.set(payer, profile);
                         }
                     }
@@ -7713,11 +7780,11 @@ impl PaymentProcessor {
             i += 1;
         }
 
-        let capped_limit = if limit == 0 { sorted.len() as u32 } else { (limit as usize).min(sorted.len()) as u32 };
+        let capped_limit = if limit == 0 { sorted.len() } else { limit.min(sorted.len()) };
         let mut result = vec![&env];
         let mut idx = 0;
         while idx < capped_limit {
-            if let Some(profile) = sorted.get(idx as usize) {
+            if let Some(profile) = sorted.get(idx) {
                 result.push_back(profile);
             }
             idx += 1;
@@ -7860,9 +7927,9 @@ impl PaymentProcessor {
                 if payment_time >= from_ts && payment_time <= to_ts {
                     let mut refund_amount: i128 = 0;
                     
-                    let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
+                    let refund_ids = RefundManager::get_payment_refunds_internal(&env, &payment_id);
                     for refund_id in refund_ids.iter() {
-                        if let Ok(refund) = Self::get_refund_internal(&env, &refund_id) {
+                        if let Ok(refund) = RefundManager::get_refund_internal(&env, &refund_id) {
                             if refund.status == RefundStatus::Completed {
                                 refund_amount += refund.amount;
                             }
@@ -9030,6 +9097,8 @@ impl PaymentProcessor {
             metadata_hash: None,
             metadata: None,
             fee_waiver_code: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -9131,6 +9200,8 @@ impl PaymentProcessor {
             metadata_hash: None,
             metadata: None,
             fee_waiver_code: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -9368,7 +9439,16 @@ impl PaymentProcessor {
     /// Issue #396: Returns the total number of payment IDs stored for a merchant.
     /// Used by pagination UIs alongside `get_merchant_payments_full`.
     /// Issue #396: Get merchant payment count for dashboard pagination (O(1) via counter).
-    pub fn get_merchant_payment_count_for_dashboard(env: Env, merchant_id: Address) -> u32 {
+    pub fn get_merchant_payment_count(env: Env, merchant_id: Address) -> u32 {
+        let count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPaymentCount(merchant_id))
+            .unwrap_or(0u64);
+        count as u32
+    }
+
+    pub fn get_merchant_payment_count_dash(env: Env, merchant_id: Address) -> u32 {
         let count: u64 = env
             .storage()
             .persistent()
@@ -9452,9 +9532,9 @@ impl PaymentProcessor {
                     }
                 }
                 
-                let refunds_for_payment = Self::get_payment_refunds_internal(&env, &payment_id);
+                let refunds_for_payment = RefundManager::get_payment_refunds_internal(&env, &payment_id);
                 for refund_id in refunds_for_payment.iter() {
-                    if let Ok(refund) = Self::get_refund_internal(&env, &refund_id) {
+                    if let Ok(refund) = RefundManager::get_refund_internal(&env, &refund_id) {
                         if refund.created_at >= from_ts && refund.created_at <= to_ts {
                             refund_count += 1;
                         }
@@ -9463,7 +9543,7 @@ impl PaymentProcessor {
             }
         }
 
-        let dispute_count = Self::get_merchant_dispute_count(&env, merchant_id) as u32;
+        let dispute_count = RefundManager::get_merchant_dispute_count(env.clone(), merchant_id.clone()) as u32;
         let avg_payment_amount = if total_payments > 0 {
             total_volume / (total_payments as i128)
         } else {
@@ -10058,7 +10138,7 @@ impl PaymentProcessor {
     /// Migration function: recompute all merchant payment counts from payment vector.
     /// Scans all merchants and rebuilds the persistent payment count index.
     /// Admin-only operation. Use this after upgrading from older contract versions.
-    pub fn recompute_merchant_payment_counts(env: Env, admin: Address) -> Result<u64, Error> {
+    pub fn recompute_merchant_counts(env: Env, admin: Address) -> Result<u64, Error> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -10076,7 +10156,7 @@ impl PaymentProcessor {
 
         Ok(merchants_processed)
     }
-}
+
     pub fn create_invoice(
         env: Env,
         merchant_id: Address,
@@ -10160,9 +10240,6 @@ impl PaymentProcessor {
 
     pub fn get_merchant_invoices(env: Env, merchant_id: Address) -> Vec<String> {
         Self::get_merchant_invoices_internal(&env, &merchant_id)
-            .iter()
-            .cloned()
-            .collect()
     }
 
     fn get_next_invoice_id(env: &Env) -> String {
@@ -10185,6 +10262,7 @@ impl PaymentProcessor {
             .get::<DataKey, Vec<String>>(&DataKey::MerchantInvoices(merchant_id.clone()))
             .unwrap_or_else(|| Vec::new(env))
     }
+}
 
 /// Bumps the version string by incrementing the number after the last '.'.
 /// Works with versions like "1.0.0" → "1.0.1", "1" → "2", "v1" → "v2".

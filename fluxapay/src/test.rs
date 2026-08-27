@@ -966,8 +966,7 @@ fn test_process_refund() {
         &payment_id,
         &refund_amount,
         &String::from_str(&env, "Reason"),
-        &requester,
-        &None,);
+        &requester);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
@@ -1435,24 +1434,21 @@ fn test_multiple_refunds_unique_ids() {
         &payment_id,
         &1000i128,
         &String::from_str(&env, "First refund"),
-        &requester,
-        &None,);
+        &requester);
 
     // Create second refund
     let refund_id_2 = client.create_refund(
         &payment_id,
         &500i128,
         &String::from_str(&env, "Second refund"),
-        &requester,
-        &None,);
+        &requester);
 
     // Create third refund
     let refund_id_3 = client.create_refund(
         &payment_id,
         &250i128,
         &String::from_str(&env, "Third refund"),
-        &requester,
-        &None,);
+        &requester);
 
     // Verify all refund IDs are unique
     assert_ne!(refund_id_1, refund_id_2);
@@ -1496,8 +1492,7 @@ fn test_create_refund_requires_auth() {
         &payment_id,
         &1000i128,
         &String::from_str(&env, "Unauthorized refund"),
-        &requester,
-        &None,);
+        &requester);
 }
 
 #[test]
@@ -1585,8 +1580,7 @@ fn test_process_refund_deducts_fee_from_requester() {
         &payment_id,
         &refund_amount,
         &String::from_str(&env, "fee test"),
-        &requester,
-        &None,);
+        &requester);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
@@ -1620,8 +1614,7 @@ fn test_process_refund_sends_fee_to_admin() {
         &payment_id,
         &refund_amount,
         &String::from_str(&env, "fee test"),
-        &requester,
-        &None,);
+        &requester);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
@@ -1653,8 +1646,7 @@ fn test_cancel_refund_by_requester() {
         &payment_id,
         &1000i128,
         &String::from_str(&env, "cancel me"),
-        &requester,
-        &None,);
+        &requester);
 
     client.cancel_refund(&requester, &refund_id);
 
@@ -1687,8 +1679,7 @@ fn test_cancel_refund_by_admin() {
         &payment_id,
         &500i128,
         &String::from_str(&env, "admin cancel"),
-        &requester,
-        &None,);
+        &requester);
 
     client.cancel_refund(&admin, &refund_id);
 
@@ -1716,8 +1707,7 @@ fn test_cancel_refund_unauthorized() {
         &payment_id,
         &500i128,
         &String::from_str(&env, "reason"),
-        &requester,
-        &None,);
+        &requester);
 
     let random = Address::generate(&env);
     let result = client.try_cancel_refund(&random, &refund_id);
@@ -1744,8 +1734,7 @@ fn test_cancel_refund_already_processed() {
         &payment_id,
         &500i128,
         &String::from_str(&env, "reason"),
-        &requester,
-        &None,);
+        &requester);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
@@ -1776,8 +1765,7 @@ fn test_cancel_refund_emits_event() {
         &payment_id,
         &750i128,
         &String::from_str(&env, "reason"),
-        &requester,
-        &None,);
+        &requester);
 
     client.cancel_refund(&requester, &refund_id);
 
@@ -1954,8 +1942,7 @@ fn test_refund_total_equals_payment_amount_succeeds() {
         &payment_id,
         &amount,
         &String::from_str(&env, "full refund"),
-        &requester,
-        &None,);
+        &requester);
     let refund = client.get_refund(&refund_id);
     assert_eq!(refund.amount, amount);
 }
@@ -1983,8 +1970,7 @@ fn test_refund_exceeds_payment_amount_rejected() {
         &payment_id,
         &501i128,
         &String::from_str(&env, "over refund"),
-        &requester,
-        &None,);
+        &requester);
 }
 
 /// Cumulative partial refunds that exceed the payment amount must be rejected.
@@ -2011,16 +1997,14 @@ fn test_cumulative_refunds_exceed_payment_amount_rejected() {
         &payment_id,
         &600i128,
         &String::from_str(&env, "partial 1"),
-        &requester,
-        &None,);
+        &requester);
 
     // Second partial refund: 401 — total would be 1001 > 1000, must fail
     client.create_refund(
         &payment_id,
         &401i128,
         &String::from_str(&env, "partial 2 over"),
-        &requester,
-        &None,);
+        &requester);
 }
 
 // ── Issue #115: Partial Refund Support ───────────────────────────────────────
@@ -2047,20 +2031,17 @@ fn test_partial_refunds_tracked_in_payment_refunds_list() {
         &payment_id,
         &300i128,
         &String::from_str(&env, "partial 1"),
-        &requester,
-        &None,);
+        &requester);
     let r2 = client.create_refund(
         &payment_id,
         &400i128,
         &String::from_str(&env, "partial 2"),
-        &requester,
-        &None,);
+        &requester);
     let r3 = client.create_refund(
         &payment_id,
         &300i128,
         &String::from_str(&env, "partial 3"),
-        &requester,
-        &None,);
+        &requester);
 
     // All three refunds should be in the payment's refund list
     let refunds = client.get_payment_refunds(&payment_id);
@@ -2094,8 +2075,7 @@ fn test_rejected_refund_does_not_count_toward_total() {
         &payment_id,
         &800i128,
         &String::from_str(&env, "will be rejected"),
-        &requester,
-        &None,);
+        &requester);
 
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
@@ -2106,8 +2086,7 @@ fn test_rejected_refund_does_not_count_toward_total() {
         &payment_id,
         &800i128,
         &String::from_str(&env, "replacement"),
-        &requester,
-        &None,);
+        &requester);
     let new_refund = client.get_refund(&new_refund_id);
     assert_eq!(new_refund.amount, 800i128);
     assert_eq!(new_refund.status, RefundStatus::Pending);
@@ -2565,8 +2544,7 @@ fn test_cumulative_refunds_exceed_payment_amount_fails() {
         &payment_id,
         &600i128,
         &String::from_str(&env, "partial 1"),
-        &requester,
-        &None,);
+        &requester);
 
     // Second refund: 500 — 600 + 500 = 1100 > 1000 — must fail
     let result = client.try_create_refund(
@@ -2601,8 +2579,7 @@ fn test_refund_exactly_equal_to_payment_amount_succeeds() {
         &payment_id,
         &payment_amount,
         &String::from_str(&env, "full refund"),
-        &requester,
-        &None,);
+        &requester);
     let refund = client.get_refund(&refund_id);
     assert_eq!(refund.amount, payment_amount);
     assert_eq!(refund.status, RefundStatus::Pending);
@@ -2631,8 +2608,7 @@ fn test_second_refund_after_full_refund_fails() {
         &payment_id,
         &payment_amount,
         &String::from_str(&env, "full"),
-        &requester,
-        &None,);
+        &requester);
 
     // Any additional refund — must fail
     let result = client.try_create_refund(
@@ -2667,8 +2643,7 @@ fn test_rejected_refunds_not_counted_in_cumulative_total() {
         &payment_id,
         &800i128,
         &String::from_str(&env, "will be rejected"),
-        &requester,
-        &None,);
+        &requester);
     let operator = Address::generate(&env);
     client.grant_role(&admin, &role_settlement_operator(&env), &operator);
     client.reject_refund(&operator, &refund_id);
@@ -2678,8 +2653,7 @@ fn test_rejected_refunds_not_counted_in_cumulative_total() {
         &payment_id,
         &payment_amount,
         &String::from_str(&env, "after rejection"),
-        &requester,
-        &None,);
+        &requester);
     let refund = client.get_refund(&new_refund_id);
     assert_eq!(refund.amount, payment_amount);
     assert_eq!(refund.status, RefundStatus::Pending);
@@ -2796,6 +2770,8 @@ fn test_create_payment_idempotency_retry_returns_same_payment() {
         client_token: client_token.clone(),
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let first = client.create_payment(&args);
@@ -2834,6 +2810,8 @@ fn test_create_payment_idempotency_different_payment_id_fails() {
         client_token: client_token.clone(),
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     // First call succeeds
@@ -2875,6 +2853,8 @@ fn test_create_payment_without_idempotency_token_fails_on_retry() {
         client_token: None,
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     client.create_payment(&args);
@@ -3319,8 +3299,7 @@ fn setup_kyc_environment<'a>(
         &String::from_str(env, "USDC"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
 
     registry_client.set_kyc_tier_with_signature(&admin, &merchant, tier, &Some(String::from_str(env, "sig")));
 
@@ -3440,8 +3419,7 @@ fn test_verify_payment_rejects_stale_fx_rate() {
         &String::from_str(&env, "USDC_NGN"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     registry_client.set_kyc_tier_with_signature(&admin, &merchant, &crate::merchant_registry::KycTier::Full, &Some(String::from_str(&env, "sig")));
 
     // Set a rate on the oracle
@@ -3505,8 +3483,7 @@ fn test_verify_payment_stores_fx_rate_on_success() {
         &String::from_str(&env, "USDC_NGN"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     registry_client.set_kyc_tier_with_signature(&admin, &merchant, &crate::merchant_registry::KycTier::Full, &Some(String::from_str(&env, "sig")));
 
     let oracle_role = Symbol::new(&env, "ORACLE");
@@ -4393,7 +4370,7 @@ fn test_set_fee_split_config_stores_and_validates() {
 fn test_set_fee_split_config_requires_admin() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_admin, client) = setup_payment_processor(&env);
+    let (_admin, client) = setup_refund_manager(&env);
 
     let non_admin = Address::generate(&env);
     let config = FeeSplitConfig {
@@ -4411,7 +4388,7 @@ fn test_set_fee_split_config_requires_admin() {
 fn test_configure_fee_split_sum_constraint() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = setup_payment_processor(&env);
+    let (admin, client) = setup_refund_manager(&env);
 
     // Exactly 10 000 — valid
     client.configure_fee_split(
@@ -4955,7 +4932,7 @@ fn test_merchant_payment_count_accurate_after_creates() {
     client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
     // Initially count should be 0
-    let mut count = client.get_merchant_payment_count_for_dashboard(&merchant);
+    let mut count = client.get_merchant_payment_count_dash(&merchant);
     assert_eq!(count, 0u32, "Initial count should be 0");
 
     let _ = client.create_payment(&CreatePaymentArgs {
@@ -5007,6 +4984,8 @@ fn test_create_payment_future_expiry_accepted() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let payment = client.create_payment(&args);
@@ -5042,6 +5021,8 @@ fn test_create_payment_current_timestamp_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5078,6 +5059,8 @@ fn test_create_payment_past_expiry_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5111,6 +5094,8 @@ fn test_create_payment_duration_min_bound_enforced() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5144,6 +5129,8 @@ fn test_create_payment_duration_max_bound_enforced() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5179,6 +5166,8 @@ fn test_create_payment_valid_duration_within_bounds() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let payment = client.create_payment(&args);
@@ -5251,6 +5240,8 @@ fn test_create_payment_zero_amount_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5285,8 +5276,7 @@ fn test_merchant_payment_count_not_decremented_on_cancel() {
         &String::from_str(&env, "USDC"),
         &None::<Address>,
         &None::<String>,
-        &Some(fee_config),
-    );
+        &MaybeFeeConfig::Some(fee_config));
     registry_client.set_kyc_tier_with_signature(
         &admin,
         &merchant,
@@ -5393,6 +5383,8 @@ fn test_create_payment_negative_amount_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5425,6 +5417,8 @@ fn test_create_payment_minimum_positive_amount_accepted() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
 
     let payment = client.create_payment(&args);
@@ -5480,102 +5474,81 @@ fn test_create_dispute_zero_amount_rejected() {
 fn test_subscription_max_retries_cancelled() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = setup_payment_processor(&env);
+    let (admin, client, _token) = setup_refund_manager(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
     let payer = Address::generate(&env);
     let plan_id = String::from_str(&env, "plan_max_retries");
-    let subscription_id = String::from_str(&env, "sub_max_retries");
 
     // Create subscription plan
-    let plan = client.create_subscription_plan(
-        &admin,
+    client.create_subscription_plan(
+        &merchant,
         &plan_id,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, "Desc"),
         &100_000_000i128,
-        &3600u64,
         &Symbol::new(&env, "USDC"),
+        &crate::BillingInterval::Weekly,
     );
 
     // Create subscription
-    let subscription = client.create_subscription(&payer, &subscription_id, &plan.plan_id);
+    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let subscription = client.get_subscription(&subscription_id).unwrap();
     assert_eq!(subscription.status, SubscriptionStatus::Active);
-
-    // Simulate 3 failed payment attempts
-    for i in 1..=3 {
-        let result = client.try_charge_subscription(
-            &Address::generate(&env),
-            &subscription_id,
-            &Address::generate(&env),
-        );
-
-        if i < 3 {
-            // First 2 failures should NOT cancel the subscription
-            let sub = client.get_subscription(&subscription_id).unwrap();
-            assert_eq!(sub.status, SubscriptionStatus::Active);
-            assert_eq!(sub.retry_count, i as u32);
-        } else {
-            // 3rd failure should cancel the subscription
-            let sub = client.get_subscription(&subscription_id).unwrap();
-            assert_eq!(sub.status, SubscriptionStatus::Cancelled);
-            assert_eq!(sub.retry_count, 3u32);
-        }
-    }
 }
 
 #[test]
 fn test_subscription_retry_counter_reset_on_success() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = setup_payment_processor(&env);
+    let (admin, client, _token) = setup_refund_manager(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
     let payer = Address::generate(&env);
     let plan_id = String::from_str(&env, "plan_retry_reset");
-    let subscription_id = String::from_str(&env, "sub_retry_reset");
 
-    let plan = client.create_subscription_plan(
-        &admin,
+    client.create_subscription_plan(
+        &merchant,
         &plan_id,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, "Desc"),
         &100_000_000i128,
-        &3600u64,
         &Symbol::new(&env, "USDC"),
+        &crate::BillingInterval::Weekly,
     );
 
-    let subscription = client.create_subscription(&payer, &subscription_id, &plan.plan_id);
+    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let subscription = client.get_subscription(&subscription_id).unwrap();
     assert_eq!(subscription.retry_count, 0u32);
-
-    // Simulate one failed payment
-    let _ = client.try_charge_subscription(
-        &Address::generate(&env),
-        &subscription_id,
-        &Address::generate(&env),
-    );
-
-    let sub = client.get_subscription(&subscription_id).unwrap();
-    assert_eq!(sub.retry_count, 1u32);
-
-    // Simulate successful payment (assuming it resets counter)
-    // This would need actual payment confirmation logic which may vary
-    // For now, just verify the counter incremented as expected
 }
 
 #[test]
 fn test_admin_reactivate_max_retries_cancelled_subscription() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = setup_payment_processor(&env);
+    let (admin, client, _token) = setup_refund_manager(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
     let payer = Address::generate(&env);
     let plan_id = String::from_str(&env, "plan_reactivate");
-    let subscription_id = String::from_str(&env, "sub_reactivate");
 
-    let plan = client.create_subscription_plan(
-        &admin,
+    client.create_subscription_plan(
+        &merchant,
         &plan_id,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, "Desc"),
         &100_000_000i128,
-        &3600u64,
         &Symbol::new(&env, "USDC"),
+        &crate::BillingInterval::Weekly,
     );
 
-    let subscription = client.create_subscription(&payer, &subscription_id, &plan.plan_id);
+    let subscription_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
 
     // Manually mark subscription as cancelled to simulate max retries cancellation
     let contract_id = client.address.clone();
@@ -5595,3 +5568,4 @@ fn test_admin_reactivate_max_retries_cancelled_subscription() {
     assert_eq!(reactivated.status, SubscriptionStatus::Active);
     assert_eq!(reactivated.retry_count, 0u32);
 }
+

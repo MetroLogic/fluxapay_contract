@@ -1,5 +1,5 @@
 use crate::{
-    merchant_registry::{MerchantRegistry, MerchantRegistryClient},
+    merchant_registry::{MaybeFeeConfig, MerchantRegistry, MerchantRegistryClient},
     DexRouter, DexRouterClient, PaymentProcessor, PaymentProcessorClient, SwapAndPayArgs,
 };
 use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
@@ -76,8 +76,7 @@ fn test_validate_path_returns_rejects_circular_path() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
@@ -120,8 +119,7 @@ fn test_validate_path_returns_rejects_insufficient_quote() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
@@ -165,8 +163,7 @@ fn test_swap_and_pay_accepts_valid_path_returns() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 

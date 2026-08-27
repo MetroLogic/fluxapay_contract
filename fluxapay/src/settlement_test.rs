@@ -61,19 +61,19 @@ fn register_merchant(
         &String::from_str(env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(admin, merchant);
 }
 
 fn create_and_settle(
     env: &Env,
+    admin: &Address,
     payment_client: &PaymentProcessorClient,
     merchant: &Address,
     payment_id: &str,
     amount: i128,
 ) {
-    payment_client.grant_role(env, &Symbol::new(env, "MERCHANT"), merchant);
+    payment_client.grant_role(admin, &Symbol::new(env, "MERCHANT"), merchant);
     let args = crate::CreatePaymentArgs {
         payment_id: String::from_str(env, payment_id),
         merchant_id: merchant.clone(),
@@ -90,22 +90,25 @@ fn create_and_settle(
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
     payment_client.create_payment(&args);
 
     let tx_hash = BytesN::<32>::random(env);
     let oracle = Address::generate(env);
-    payment_client.grant_role(env, &Symbol::new(env, "ORACLE"), &oracle);
+    payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
     payment_client.verify_payment(
         &oracle,
         &String::from_str(env, payment_id),
         &tx_hash,
         &Address::generate(env),
         &amount,
+        &None::<u64>,
     );
 
     let operator = Address::generate(env);
-    payment_client.grant_role(env, &Symbol::new(env, "SETTLEMENT_OPERATOR"), &operator);
+    payment_client.grant_role(admin, &Symbol::new(env, "SETTLEMENT_OPERATOR"), &operator);
     let splits = soroban_sdk::vec![
         env,
         crate::SettlementSplit {
@@ -159,7 +162,7 @@ fn test_pending_settlement_accumulates_on_settle() {
 
     register_merchant(&env, &admin, &merchant_client, &merchant);
 
-    create_and_settle(&env, &payment_client, &merchant, "PAY_SETTLE_001", 1000);
+    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_SETTLE_001", 1000);
 
     let pending = merchant_client.get_pending_settlement(&merchant);
     assert_eq!(pending, 1000);
@@ -173,8 +176,8 @@ fn test_pending_settlement_multiple_payments() {
 
     register_merchant(&env, &admin, &merchant_client, &merchant);
 
-    create_and_settle(&env, &payment_client, &merchant, "PAY_001", 500);
-    create_and_settle(&env, &payment_client, &merchant, "PAY_002", 300);
+    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_001", 500);
+    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_002", 300);
 
     let pending = merchant_client.get_pending_settlement(&merchant);
     assert_eq!(pending, 800);
@@ -197,14 +200,13 @@ fn test_trigger_settlement_manual_settles_immediately() {
         &String::from_str(&env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
 
-    create_and_settle(&env, &payment_client, &merchant, "PAY_TRIGGER", 2000000);
+    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_TRIGGER", 2000000);
 
     let operator = Address::generate(&env);
-    payment_client.grant_role(&env, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
 
     let swept = payment_client.trigger_settlement(&operator, &merchant);
     assert!(swept >= 2000000);
@@ -225,17 +227,16 @@ fn test_trigger_settlement_daily_enforces_interval() {
         &String::from_str(&env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
 
     // Set to daily schedule.
     merchant_client.set_settlement_schedule(&merchant, &SettlementSchedule::Daily);
 
-    create_and_settle(&env, &payment_client, &merchant, "PAY_DAILY", 2000000);
+    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_DAILY", 2000000);
 
     let operator = Address::generate(&env);
-    payment_client.grant_role(&env, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
 
     // First settlement succeeds.
     let swept = payment_client.trigger_settlement(&operator, &merchant);
@@ -258,15 +259,14 @@ fn test_trigger_settlement_below_min_rejected() {
         &String::from_str(&env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&admin, &merchant);
 
     // Settle a very small amount (below SETTLEMENT_MIN_AMOUNT = 1_000_000).
-    create_and_settle(&env, &payment_client, &merchant, "PAY_SMALL", 500);
+    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_SMALL", 500);
 
     let operator = Address::generate(&env);
-    payment_client.grant_role(&env, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
 
     let result = payment_client.try_trigger_settlement(&operator, &merchant);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));

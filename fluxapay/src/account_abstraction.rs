@@ -126,7 +126,7 @@ pub fn execute_with_session(
             Symbol::new(&env, "EXECUTED"),
             account,
         ),
-        (session_key, env.crypto().sha256(&payload)),
+        (session_key, env.crypto().sha256(&payload).to_bytes()),
     );
 
     Ok(Bytes::new(&env))
