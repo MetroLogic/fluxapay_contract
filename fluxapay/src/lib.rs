@@ -10619,3 +10619,5 @@ mod muxed_payer_test;
 mod router_allowlist_test;
 #[cfg(test)]
 mod batch_payment_test;
+#[cfg(test)]
+mod escalate_disputes_test;
