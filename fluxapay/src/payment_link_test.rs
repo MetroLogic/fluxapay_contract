@@ -1484,3 +1484,163 @@ fn test_set_payment_link_fee_bps_requires_admin() {
     client.set_payment_link_fee_bps(&not_admin, &None, &Some(100i128));
 }
 
+#[test]
+fn test_link_analytics_revenue_and_conversion_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer1 = Address::generate(&env);
+    let payer2 = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "revenue_link");
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Revenue Test"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Record 3 views
+    for _ in 0..3 {
+        client.record_link_view(&link_id);
+    }
+
+    // Record 2 uses at 100 and 200 USDC
+    client.use_link(&payer1, &link_id, &100i128, &None);
+    client.use_link(&payer2, &link_id, &200i128, &None);
+
+    let analytics = client.get_link_analytics(&link_id).unwrap();
+
+    // Check totals
+    assert_eq!(analytics.view_count, 3);
+    assert_eq!(analytics.use_count, 2);
+    assert_eq!(analytics.total_revenue, 300);
+
+    // Check conversion rate: 2 * 10000 / 3 = 6666 (with integer truncation)
+    assert_eq!(analytics.conversion_rate, 6666);
+
+    // Check average payment: 300 / 2 = 150
+    assert_eq!(analytics.average_payment, 150);
+
+    // Check last_used_at is set
+    assert!(analytics.last_used_at.is_some());
+}
+
+#[test]
+fn test_link_analytics_zero_views() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "zero_views_link");
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Zero Views"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Use the link without recording views
+    client.use_link(&payer, &link_id, &100i128, &None);
+
+    let analytics = client.get_link_analytics(&link_id).unwrap();
+
+    // Conversion rate should be 0 when view_count is 0 (no division by zero)
+    assert_eq!(analytics.view_count, 0);
+    assert_eq!(analytics.use_count, 1);
+    assert_eq!(analytics.total_revenue, 100);
+    assert_eq!(analytics.conversion_rate, 0);
+    assert_eq!(analytics.average_payment, 100);
+}
+
+#[test]
+fn test_link_analytics_zero_uses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+
+    let link_id = String::from_str(&env, "zero_uses_link");
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Zero Uses"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Record views but no uses
+    for _ in 0..5 {
+        client.record_link_view(&link_id);
+    }
+
+    let analytics = client.get_link_analytics(&link_id).unwrap();
+
+    // All should be zero/empty when no uses
+    assert_eq!(analytics.view_count, 5);
+    assert_eq!(analytics.use_count, 0);
+    assert_eq!(analytics.total_revenue, 0);
+    assert_eq!(analytics.conversion_rate, 0);
+    assert_eq!(analytics.average_payment, 0);
+    assert!(analytics.last_used_at.is_none());
+}
+
+#[test]
+fn test_link_analytics_last_used_at_tracking() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "timestamp_link");
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Timestamp Test"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Initially no last_used_at
+    let analytics_before = client.get_link_analytics(&link_id).unwrap();
+    assert!(analytics_before.last_used_at.is_none());
+
+    let initial_timestamp = env.ledger().timestamp();
+
+    // Use the link
+    client.use_link(&payer, &link_id, &100i128, &None);
+
+    let analytics_after = client.get_link_analytics(&link_id).unwrap();
+
+    // After using, last_used_at should be set to current or later timestamp
+    assert!(analytics_after.last_used_at.is_some());
+    assert!(analytics_after.last_used_at.unwrap() >= initial_timestamp);
+}
+
+

@@ -53,6 +53,10 @@ export interface LinkAnalytics {
   total_revenue: string;
   /** Conversion rate in basis points (bps). 100 bps = 1%. */
   conversion_rate: number;
+  /** Timestamp of the last successful use; undefined if the link has never been used */
+  last_used_at?: number;
+  /** Average payment amount per use (in stroops); 0 if the link has never been used */
+  average_payment: string;
 }
 
 /**
