@@ -135,6 +135,19 @@ export interface PaymentStream {
   milestonesApproved: boolean;
 }
 
+/** Mirrors the on-chain `SubscriptionPlan` struct in `fluxapay/src/lib.rs`. */
+export interface SubscriptionPlan {
+  planId: string;
+  merchantId: string;
+  name: string;
+  description: string;
+  amount: bigint;
+  currency: string;
+  intervalSecs: bigint;
+  billingInterval: "Daily" | "Weekly" | "Monthly" | "Annually";
+  active: boolean;
+}
+
 export interface CreateStreamParams {
   sender: string;
   receiver: string;
@@ -1092,6 +1105,102 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #683: Fetch a health summary of the PaymentProcessor contract.
+   * No authentication required — this is a public read endpoint.
+   * @returns ContractHealth with version, pause state, treasury balance, and config flags.
+   */
+  async getContractHealth(): Promise<{
+    version: string;
+    is_paused: boolean;
+    is_creation_paused: boolean;
+    treasury_balance: bigint;
+    active_payment_count: number;
+    fx_oracle_configured: boolean;
+    merchant_registry_configured: boolean;
+  }> {
+    const raw = await (this.contract as any).get_contract_health({});
+    return raw.result;
+  }
+
+  /**
+   * Issue #679: Create a subscription plan (merchant only).
+   * Maps to `PaymentProcessor.create_subscription_plan` on-chain.
+   */
+  async createSubscriptionPlan(params: {
+    merchant: string;
+    planId: string;
+    name: string;
+    description: string;
+    amount: bigint;
+    currency: string;
+    billingInterval: "Daily" | "Weekly" | "Monthly" | "Annually";
+  }): Promise<void> {
+    const billingIntervalMap: Record<string, number> = {
+      Daily: 0,
+      Weekly: 1,
+      Monthly: 2,
+      Annually: 3,
+    };
+    return withMappedContractError(() =>
+      (this.contract as any).create_subscription_plan({
+        merchant: params.merchant,
+        plan_id: params.planId,
+        name: params.name,
+        description: params.description,
+        amount: params.amount,
+        currency: params.currency,
+        billing_interval: billingIntervalMap[params.billingInterval] ?? 2,
+      }),
+    );
+  }
+
+  /**
+   * Issue #679: Fetch a subscription plan by ID.
+   * Maps to `PaymentProcessor.get_subscription_plan` on-chain.
+   */
+  async getSubscriptionPlan(planId: string): Promise<SubscriptionPlan> {
+    const raw = await withMappedContractError(() =>
+      (this.contract as any).get_subscription_plan({ plan_id: planId }),
+    );
+    const p = raw.result;
+    const billingIntervalLabels: Record<number, SubscriptionPlan["billingInterval"]> = {
+      0: "Daily",
+      1: "Weekly",
+      2: "Monthly",
+      3: "Annually",
+    };
+    return {
+      planId: p.plan_id,
+      merchantId: p.merchant_id,
+      name: p.name,
+      description: p.description,
+      amount: p.amount,
+      currency: p.currency,
+      intervalSecs: p.interval_secs,
+      billingInterval: billingIntervalLabels[p.billing_interval] ?? "Monthly",
+      active: p.active,
+    };
+  }
+
+  /**
+   * Issue #679: Subscribe a payer to a subscription plan.
+   * Maps to `PaymentProcessor.subscribe_to_plan` on-chain.
+   */
+  async subscribeToPlan(params: {
+    payer: string;
+    planId: string;
+    paymentId: string;
+  }): Promise<void> {
+    return withMappedContractError(() =>
+      (this.contract as any).subscribe_to_plan({
+        payer: params.payer,
+        plan_id: params.planId,
+        payment_id: params.paymentId,
+      }),
+    );
+  }
+
+  /**
    * Create a new payment stream. Tokens are pulled from `params.sender` into
    * the contract and streamed to `params.receiver` at `ratePerSecond`.
    * Maps to `PaymentProcessor.create_stream` on-chain.
@@ -1219,6 +1328,7 @@ export {
   FeeConfig,
   MaybeFeeConfig,
   CreatePaymentArgs,
+  SubscriptionPlan,
   FluxapayOfflineSigner,
   OfflineTransactionPayload,
   SubscriptionBillingClient,

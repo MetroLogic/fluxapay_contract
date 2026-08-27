@@ -10,9 +10,17 @@ export {
   useMerchantPayments,
   useRefund,
   useCreatePayment,
+  useSubscriptionPlan,
+  useCreateSubscriptionPlan,
+  useSubscribeToPlan,
 } from "./hooks.js";
 export type {
   UseMerchantPaymentsOptions,
   UseCreatePaymentResult,
   MutationStatus,
+  UseCreateSubscriptionPlanParams,
+  UseCreateSubscriptionPlanResult,
+  UseSubscribeToPlanParams,
+  UseSubscribeToPlanResult,
+  SubscriptionPlan,
 } from "./hooks.js";

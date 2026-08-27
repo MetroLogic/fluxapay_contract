@@ -736,9 +736,6 @@ fn test_vote_dispute_duplicate_vote_blocked() {
     let err = refund_client.try_vote_dispute(&arb1, &dispute_id, &ArbitratorVoteChoice::Approve);
     assert_eq!(err, Err(Ok(Error::AlreadyVoted)));
 }
-
-#[test]
-fn test_vote_dispute_non_arbitrator_blocked() {
 const VALID_CID_V0: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 const VALID_CID_V1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
@@ -1038,7 +1035,7 @@ fn test_batch_create_disputes_full_success() {
 
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..3u32 {
-        let pid = format!("batch_ok_{i}");
+        let pid = std::format!("batch_ok_{i}");
         let (merchant, customer, payment_id) = setup_confirmed_payment_for_dispute(
             &env,
             &payment_client,
@@ -1208,7 +1205,7 @@ fn test_batch_create_disputes_rejects_oversized() {
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..21u32 {
         batch.push_back(crate::CreateDisputeArgs {
-            payment_id: String::from_str(&env, &format!("p{i}")),
+            payment_id: String::from_str(&env, &std::format!("p{i}")),
             amount: 1i128,
             reason: String::from_str(&env, "r"),
             evidence: valid_evidence(&env),
