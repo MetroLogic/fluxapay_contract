@@ -883,7 +883,7 @@ stellar contract invoke \
 
 ### Deploy to Testnet
 
-Use `scripts/deploy_testnet.sh` to build the WASM and deploy all contracts to testnet. The script writes the resulting contract IDs to `.env.testnet`.
+Use `scripts/deploy-testnet.sh` to build the WASM and deploy all contracts to testnet. The script writes the resulting contract IDs to `.env.testnet`.
 
 #### Prerequisites
 
@@ -898,7 +898,7 @@ export STELLAR_SECRET_KEY=<YOUR_SECRET_KEY>
 export STELLAR_NETWORK=testnet          # or mainnet
 
 # 2. Run the deploy script
-bash scripts/deploy_testnet.sh
+bash scripts/deploy-testnet.sh
 
 # 3. Load the deployed contract IDs
 source .env.testnet

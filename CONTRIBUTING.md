@@ -46,6 +46,8 @@ See [scripts/README.md](scripts/README.md) for details on all operational script
 
 See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to invoke contract functions on Stellar testnet.
 
+To deploy the contracts to testnet, run `bash scripts/deploy-testnet.sh` from the repository root after setting `STELLAR_SECRET_KEY` and `STELLAR_NETWORK`.
+
 ---
 
 ## 2. Building the Contract
