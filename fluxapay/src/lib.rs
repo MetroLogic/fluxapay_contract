@@ -128,6 +128,53 @@ pub struct PaymentCharge {
     pub retry_of_payment_id: Option<String>,
     /// Issue #484: Muxed account ID from payer M-address; None for G-addresses or on-chain payments.
     pub payer_muxed_id: Option<u64>,
+    /// Issue #668: ID of the payment link that created this payment via `use_link`,
+    /// for tracing a payment back to its source link. `None` for payments created
+    /// directly via `create_payment`/`swap_and_pay`.
+    pub payment_link_id: Option<String>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentSummary {
+    pub payment_id: String,
+    pub amount: i128,
+    pub fee: i128,
+    pub refund_amount: i128,
+    pub status: PaymentStatus,
+    pub settled_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub merchant_id: Address,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub payments: Vec<PaymentSummary>,
+    pub total_gross: i128,
+    pub total_fees: i128,
+    pub total_refunds: i128,
+    pub total_net_settled: i128,
+    pub dispute_adjustments: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationPage {
+    pub items: Vec<PaymentSummary>,
+    pub total_confirmed: i128,
+    pub total_settled: i128,
+    pub page_total: i128,
+    pub has_more: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentStatusEvent {
+    pub status: PaymentStatus,
+    pub timestamp: u64,
+    pub tx_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -202,6 +249,20 @@ pub enum RefundStatus {
     Completed,
     Rejected,
     Cancelled,
+}
+
+/// Issue #676: consolidated read-only view of all refund configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefundPolicy {
+    /// Whether `process_refund` requires a `receipt_hash` (Issue #176).
+    pub require_receipt_hash: bool,
+    /// Refund request expiry window in seconds (Issue #170).
+    pub refund_expiry_secs: u64,
+    /// Refund processing fee in basis points.
+    pub refund_fee_bps: i128,
+    /// Cooldown period after payment confirmation before refunds can be requested, in seconds.
+    pub cooldown_secs: u64,
 }
 
 #[contracttype]
@@ -571,6 +632,38 @@ pub struct TreasuryWithdrawal {
 /// Maximum number of withdrawal records retained in `TreasuryWithdrawalHistory`.
 pub const TREASURY_WITHDRAWAL_HISTORY_CAP: u32 = 100;
 
+/// Issue #666: Record of a single settlement's platform-fee collection,
+/// appended to `DataKey::FeeCollectionHistory` from `settle_payment`.
+/// `get_platform_fee_report` sums the records whose `collected_at` falls
+/// within the queried `[from_ts, to_ts]` window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeCollectionRecord {
+    pub collected_at: u64,
+    /// Total protocol fee taken from this settlement (settlement fee + platform fee).
+    pub total_fee: i128,
+    /// Portion of `total_fee` retained by the treasury.
+    pub treasury_share: i128,
+    /// Portion of `total_fee` routed to the configured developer address (if any).
+    pub developer_share: i128,
+}
+
+/// Issue #666: Aggregated platform fee report for a queried time period,
+/// returned by `get_platform_fee_report`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformFeeReport {
+    pub total_fees_collected: i128,
+    pub treasury_share: i128,
+    pub developer_share: i128,
+    pub payment_count: u64,
+}
+
+/// Maximum number of fee-collection records retained in `FeeCollectionHistory`.
+/// Kept larger than `TREASURY_WITHDRAWAL_HISTORY_CAP` since fee reporting is
+/// meant to cover longer look-back windows (e.g. a full reporting month).
+pub const FEE_COLLECTION_HISTORY_CAP: u32 = 5_000;
+
 /// Issue #168: Fee split configuration for refund fees.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -622,6 +715,24 @@ pub struct CollaborativeSettlement {
     pub merchant_pubkey: BytesN<32>,
     /// Ledger timestamp when the settlement was recorded.
     pub settled_at: u64,
+}
+
+/// Issue #664: A single usage-metering record for a subscription, appended
+/// by `submit_usage_metrics` and queryable via `get_usage_metrics`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageMetrics {
+    /// The subscription this usage record belongs to.
+    pub subscription_id: String,
+    /// Number of usage units consumed in this billing cycle.
+    pub units_used: i128,
+    /// Price per unit (in the subscription token's smallest unit) at the
+    /// time this record was submitted.
+    pub unit_price: i128,
+    /// `units_used * unit_price` — the metered charge amount for this cycle.
+    pub amount: i128,
+    /// Ledger timestamp when this usage record was submitted.
+    pub recorded_at: u64,
 }
 
 /// Configuration for creating a payment.
@@ -828,6 +939,7 @@ pub const DISPUTE_GLOBAL_WINDOW_SECS: u64 = 3600;
 #[contracttype]
 pub enum DataKey {
     Payment(String),
+    PaymentStatusHistory(String),
     MerchantPayments(Address),
     MerchantRateLimit(Address),
     Refund(String),
@@ -892,6 +1004,9 @@ pub enum DataKey {
     MerchantPaymentCount(Address),
     /// Issue #185: Collaborative settlement record for a dispute.
     CollaborativeSettlement(String),
+    /// Issue #664: Append-only log of `UsageMetrics` records for a
+    /// subscription, keyed by subscription_id.
+    UsageMetricsLog(String),
     /// Issue #301: List of supported token addresses for enumeration.
     SupportedTokens,
     /// Issue #303: KYC tier limits configuration.
@@ -972,6 +1087,12 @@ pub enum DataKey {
     /// Issue #678: Daily-bucketed payment ID index for O(days) analytics queries.
     /// Key: (merchant_id, day_bucket = created_at / 86_400) → Vec<payment_id>.
     DailyPaymentIndex(Address, u64),
+    /// Issue #666: Paginated log of platform-fee collection events (newest-first,
+    /// capped at `FEE_COLLECTION_HISTORY_CAP`), consumed by `get_platform_fee_report`.
+    FeeCollectionHistory,
+    /// Issue #667: Arbitrary on-chain contract metadata (description, deployment notes,
+    /// audit commit hash, etc.), keyed by an admin-chosen Symbol.
+    ContractMetadata(Symbol),
 }
 
 /// Default initial contract version string.
@@ -980,6 +1101,31 @@ pub const INITIAL_CONTRACT_VERSION: &str = "1.0.0";
 // When building for WASM deployment, only the active contract's #[contractimpl]
 // is compiled to avoid duplicate exported symbols. On non-WASM targets (tests,
 // tooling), all impls compile so that *Client types are available everywhere.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentSummary {
+    pub payment_id: String,
+    pub amount: i128,
+    pub fee: i128,
+    pub refund_amount: i128,
+    pub status: PaymentStatus,
+    pub settled_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub merchant_id: Address,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub payments: Vec<PaymentSummary>,
+    pub total_gross: i128,
+    pub total_fees: i128,
+    pub total_refunds: i128,
+    pub total_net_settled: i128,
+    pub dispute_adjustments: i128,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MerchantAnalytics {
@@ -1012,6 +1158,96 @@ pub struct ContractHealth {
 impl RefundManager {
     pub fn version() -> u32 {
         1
+    }
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
+        let pause_state: PauseState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Paused)
+            .unwrap_or(PauseState {
+                paused: false,
+                reason: String::from_str(env, ""),
+                admin: None,
+                timestamp: 0,
+            });
+        if pause_state.paused {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn get_refund_fee_bps_internal(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::RefundFeeBps)
+            .unwrap_or(REFUND_FEE_BPS)
+    }
+
+    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
+            .unwrap_or(REFUND_COOLDOWN_SECS)
+    }
+
+    pub fn get_dispute_bond_amount(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeBondAmount)
+            .unwrap_or(DISPUTE_BOND_AMOUNT)
+    }
+
+
+    /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
+    /// description, deployment notes, or audit commit hash. Stored in instance
+    /// storage under a caller-chosen key, with the instance TTL bumped to
+    /// `LONG_LIVE_TTL` so metadata survives archival.
+    pub fn set_contract_metadata(
+        env: Env,
+        admin: Address,
+        key: Symbol,
+        value: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractMetadata(key), &value);
+
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().instance().extend_ttl(threshold, LONG_LIVE_TTL);
+
+        Ok(())
+    }
+
+    /// Public read of an on-chain metadata entry set via `set_contract_metadata`
+    /// (issue #667). Returns `None` if the key was never set.
+    pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractMetadata(key))
+    }
+
+    /// Formats a u64 as a decimal `String` without relying on `alloc`/`format!`
+    /// (this crate is `#![no_std]`). Used to store `deployed_at` as metadata
+    /// text so it round-trips through `get_contract_metadata`'s `String` type.
+    fn u64_to_string(env: &Env, mut n: u64) -> String {
+        if n == 0 {
+            return String::from_str(env, "0");
+        }
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        while n > 0 {
+            i -= 1;
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        let s = core::str::from_utf8(&buf[i..]).unwrap_or("0");
+        String::from_str(env, s)
     }
 
     fn validate_init_address(env: &Env, address: Address) -> Result<(), Error> {
@@ -1047,6 +1283,24 @@ impl RefundManager {
         env.storage()
             .instance()
             .set(&DataKey::RefundFeeBps, &REFUND_FEE_BPS);
+
+        // Issue #667: pre-populate on-chain metadata with description, version, and
+        // deployment timestamp so explorers/integrators can identify the contract.
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "description")),
+            &String::from_str(&env, "FluxaPay RefundManager contract"),
+        );
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &String::from_str(&env, "1"),
+        );
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "deployed_at")),
+            &Self::u64_to_string(&env, env.ledger().timestamp()),
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().instance().extend_ttl(threshold, LONG_LIVE_TTL);
+
         Ok(())
     }
 
@@ -1129,6 +1383,26 @@ impl RefundManager {
             .persistent()
             .set(&DataKey::RequireReceiptHash, &require_receipt_hash);
         Ok(())
+    }
+
+    /// Issue #676: read-only view of all refund configuration in one call —
+    /// `require_receipt_hash` (Issue #176), `refund_expiry_secs` (Issue #170),
+    /// `refund_fee_bps`, and `cooldown_secs`. Lets integrators check policy
+    /// before submitting a refund without having to know every individual
+    /// storage key / setter.
+    pub fn get_refund_policy(env: Env) -> RefundPolicy {
+        let require_receipt_hash: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RequireReceiptHash)
+            .unwrap_or(false);
+
+        RefundPolicy {
+            require_receipt_hash,
+            refund_expiry_secs: Self::get_refund_expiry_secs(&env),
+            refund_fee_bps: Self::get_refund_fee_bps_internal(&env),
+            cooldown_secs: Self::get_refund_cooldown_secs(&env),
+        }
     }
 
     pub fn grant_role(
@@ -1344,6 +1618,7 @@ impl RefundManager {
                 fee_waiver_code: None,
                 retry_of_payment_id: None,
                 payer_muxed_id: None,
+                payment_link_id: None,
             };
             env.storage()
                 .persistent()
@@ -1508,6 +1783,7 @@ impl RefundManager {
                 fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
+            payment_link_id: None,
             };
             env.storage()
                 .persistent()
@@ -1656,8 +1932,8 @@ impl RefundManager {
             created_at,
             processed_at: None,
             receipt_hash,
-            expiry_at: created_at.saturating_add(Self::get_refund_expiry_secs(env)),
             approved: false,
+            expiry_at: created_at.saturating_add(Self::get_refund_expiry_secs(env)),
         };
 
         env.storage()
@@ -1877,7 +2153,7 @@ impl RefundManager {
             .ok_or(Error::PaymentNotFound)?;
 
         // Issue #167: Query merchant's KYC tier and apply tiered refund fee
-        let default_fee_bps = Self::get_refund_fee_bps_internal(env);
+        let default_fee_bps = Self::get_refund_fee_bps_internal(&env);
 
         let fee_bps = if let Some(registry_address) = env
             .storage()
@@ -2332,7 +2608,7 @@ impl RefundManager {
     }
 
     pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, Error> {
-        let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
+        let refund_ids = RefundManager::get_payment_refunds_internal(&env, &payment_id);
         let mut refunds = vec![&env];
         for id in refund_ids.iter() {
             if let Ok(refund) = Self::get_refund_internal(&env, &id) {
@@ -3194,9 +3470,13 @@ impl RefundManager {
             return Err(Error::Unauthorized);
         }
 
-        env.events().publish(
-            (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "BOND_RETURNED")),
-            (dispute.disputer.clone(), bond_amount),
+        // Issue #677: bond is released back to the disputer (winner) after
+        // the dispute is resolved with a refund in their favor.
+        events::emit_dispute_bond_returned(
+            &env,
+            dispute_id.clone(),
+            dispute.disputer.clone(),
+            bond_amount,
         );
 
         // Emit DISPUTE_RESOLVED event
@@ -3279,10 +3559,17 @@ impl RefundManager {
             return Err(Error::Unauthorized);
         }
 
-        env.events().publish(
-            (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "BOND_FORFEITED")),
-            (dispute.disputer.clone(), dispute.merchant_id.clone(), bond_amount),
+        // Issue #677: merchant's counter-bond is released back to them since
+        // the dispute was rejected in their favor.
+        events::emit_dispute_bond_returned(
+            &env,
+            dispute_id.clone(),
+            dispute.merchant_id.clone(),
+            bond_amount,
         );
+        // Issue #677: disputer's bond is forfeited to the treasury/collector
+        // when the dispute is rejected.
+        events::emit_dispute_bond_forfeited(&env, dispute_id.clone(), collector.clone(), bond_amount);
 
         // Emit DISPUTE_REJECTED event
         env.events().publish(
@@ -4816,6 +5103,7 @@ impl RefundManager {
             fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
+            payment_link_id: None,
         };
 
         env.storage()
@@ -4944,6 +5232,16 @@ impl RefundManager {
 
         let mut subscription = Self::get_subscription_internal(&env, &subscription_id)?;
 
+        // Issue #664: Usage metrics can only be submitted for a subscription
+        // that is still billable (Active, or Paused-but-auto-resuming via
+        // `charge_subscription` below). A Cancelled/Expired subscription
+        // cannot be metered.
+        if subscription.status == SubscriptionStatus::Cancelled
+            || subscription.status == SubscriptionStatus::Expired
+        {
+            return Err(Error::InvalidStatusTransition);
+        }
+
         // Override the subscription amount with the metered charge for this cycle.
         let metered_amount = units_used.saturating_mul(unit_price);
         subscription.amount = metered_amount;
@@ -4959,8 +5257,56 @@ impl RefundManager {
             (subscription_id.clone(), units_used, unit_price, metered_amount),
         );
 
+        // Issue #664: Append this usage record to the subscription's metrics
+        // log so `get_usage_metrics` can return usage history over a range.
+        let mut usage_log: Vec<UsageMetrics> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsageMetricsLog(subscription_id.clone()))
+            .unwrap_or_else(|| vec![&env]);
+        usage_log.push_back(UsageMetrics {
+            subscription_id: subscription_id.clone(),
+            units_used,
+            unit_price,
+            amount: metered_amount,
+            recorded_at: env.ledger().timestamp(),
+        });
+        env.storage()
+            .persistent()
+            .set(&DataKey::UsageMetricsLog(subscription_id.clone()), &usage_log);
+        Self::bump_ttl(
+            &env,
+            &DataKey::UsageMetricsLog(subscription_id.clone()),
+            LONG_LIVE_TTL,
+        );
+
         // Trigger the charge at the updated metered amount.
         Self::charge_subscription(env, operator, subscription_id, token)
+    }
+
+    /// Issue #664: Return usage-metric records for `subscription_id`
+    /// recorded within `[from_timestamp, to_timestamp]` (inclusive),
+    /// oldest first. Returns an empty vector if none were recorded, or if
+    /// the subscription itself doesn't exist.
+    pub fn get_usage_metrics(
+        env: Env,
+        subscription_id: String,
+        from_timestamp: u64,
+        to_timestamp: u64,
+    ) -> Vec<UsageMetrics> {
+        let log: Vec<UsageMetrics> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsageMetricsLog(subscription_id))
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut result = vec![&env];
+        for record in log.iter() {
+            if record.recorded_at >= from_timestamp && record.recorded_at <= to_timestamp {
+                result.push_back(record.clone());
+            }
+        }
+        result
     }
 
     /// Issue #302: Track subscription in the ActiveSubscriptions index
@@ -5083,8 +5429,9 @@ impl RefundManager {
                 fx_rate_at: None,
                 metadata: None,
                 fee_waiver_code: None,
-                retry_of_payment_id: None,
-                payer_muxed_id: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
+            payment_link_id: None,
             };
 
             env.storage()
@@ -5224,6 +5571,22 @@ impl RefundManager {
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
+    fn record_payment_status(env: &Env, payment: &PaymentCharge) {
+        let key = DataKey::PaymentStatusHistory(payment.payment_id.clone());
+        let mut history: Vec<PaymentStatusEvent> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        history.push_back(PaymentStatusEvent {
+            status: payment.status.clone(),
+            timestamp: env.ledger().timestamp(),
+            tx_hash: payment.transaction_hash.clone(),
+        });
+        env.storage().persistent().set(&key, &history);
+        Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
+    }
+
     fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
@@ -5324,6 +5687,38 @@ impl PaymentProcessor {
             fx_oracle_configured,
             merchant_registry_configured,
         }
+    /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
+    /// description, deployment notes, or audit commit hash. Stored in instance
+    /// storage under a caller-chosen key, with the instance TTL bumped to
+    /// `LONG_LIVE_TTL` so metadata survives archival.
+    pub fn set_contract_metadata(
+        env: Env,
+        admin: Address,
+        key: Symbol,
+        value: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractMetadata(key), &value);
+
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().instance().extend_ttl(threshold, LONG_LIVE_TTL);
+
+        Ok(())
+    }
+
+    /// Public read of an on-chain metadata entry set via `set_contract_metadata`
+    /// (issue #667). Returns `None` if the key was never set.
+    pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractMetadata(key))
     }
 
     fn validate_init_admin(env: &Env, admin: Address) -> Result<(), Error> {
@@ -5332,6 +5727,24 @@ impl PaymentProcessor {
             return Err(Error::InvalidAddress);
         }
         Ok(())
+    }
+
+    /// Formats a u64 as a decimal `String` without relying on `alloc`/`format!`
+    /// (this crate is `#![no_std]`). Used to store `deployed_at` as metadata
+    /// text so it round-trips through `get_contract_metadata`'s `String` type.
+    fn u64_to_string(env: &Env, mut n: u64) -> String {
+        if n == 0 {
+            return String::from_str(env, "0");
+        }
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        while n > 0 {
+            i -= 1;
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        let s = core::str::from_utf8(&buf[i..]).unwrap_or("0");
+        String::from_str(env, s)
     }
 
     pub fn initialize_payment_processor(env: Env, admin: Address) -> Result<(), Error> {
@@ -5358,6 +5771,23 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::ContractVersion, &initial_version);
+
+        // Issue #667: pre-populate on-chain metadata with description, version, and
+        // deployment timestamp so explorers/integrators can identify the contract.
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "description")),
+            &String::from_str(&env, "FluxaPay PaymentProcessor contract"),
+        );
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &initial_version,
+        );
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "deployed_at")),
+            &Self::u64_to_string(&env, env.ledger().timestamp()),
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().instance().extend_ttl(threshold, LONG_LIVE_TTL);
 
         Ok(())
     }
@@ -5524,6 +5954,73 @@ impl PaymentProcessor {
             i = i.saturating_add(1);
         }
         page
+    }
+
+    /// Issue #666: Append a fee-collection record from `settle_payment`,
+    /// retaining only the newest `FEE_COLLECTION_HISTORY_CAP` entries
+    /// (newest-first), mirroring `record_treasury_withdrawal`.
+    fn record_fee_collection(
+        env: &Env,
+        total_fee: i128,
+        treasury_share: i128,
+        developer_share: i128,
+    ) {
+        if total_fee <= 0 {
+            return;
+        }
+        let key = DataKey::FeeCollectionHistory;
+        let mut history: Vec<FeeCollectionRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        history.push_front(FeeCollectionRecord {
+            collected_at: env.ledger().timestamp(),
+            total_fee,
+            treasury_share,
+            developer_share,
+        });
+        while history.len() > FEE_COLLECTION_HISTORY_CAP {
+            history.pop_back();
+        }
+        env.storage().persistent().set(&key, &history);
+    }
+
+    /// Issue #666: Aggregate platform fee collection over `[from_ts, to_ts]`
+    /// (inclusive), for treasury reporting. Reads from the `FeeCollectionHistory`
+    /// log that `settle_payment` appends to on every fee-bearing settlement.
+    ///
+    /// NOTE: `FeeCollectionHistory` is capped at `FEE_COLLECTION_HISTORY_CAP`
+    /// entries; queries for periods older than the retained window will
+    /// undercount. A follow-up should move this to time-bucketed storage
+    /// (e.g. per-day accumulator keys) if long-horizon reporting is needed.
+    pub fn get_platform_fee_report(env: Env, from_ts: u64, to_ts: u64) -> PlatformFeeReport {
+        let history: Vec<FeeCollectionRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeCollectionHistory)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut total_fees_collected: i128 = 0;
+        let mut treasury_share: i128 = 0;
+        let mut developer_share: i128 = 0;
+        let mut payment_count: u64 = 0;
+
+        for record in history.iter() {
+            if record.collected_at >= from_ts && record.collected_at <= to_ts {
+                total_fees_collected = total_fees_collected.saturating_add(record.total_fee);
+                treasury_share = treasury_share.saturating_add(record.treasury_share);
+                developer_share = developer_share.saturating_add(record.developer_share);
+                payment_count = payment_count.saturating_add(1);
+            }
+        }
+
+        PlatformFeeReport {
+            total_fees_collected,
+            treasury_share,
+            developer_share,
+            payment_count,
+        }
     }
 
     /// Admin withdrawal of accumulated treasury fees. Emits `TREASURY/WITHDRAWN`
@@ -5730,7 +6227,14 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Set the creation paused state (admin only). When paused, only create_payment is blocked.
+    /// Set the creation-only paused state (admin only, issue #670).
+    ///
+    /// When `paused` is true, only payment-creation entry points (`create_payment`,
+    /// `create_payments_batch`, `swap_and_pay`, `swap_and_pay_multi_route`, and the
+    /// creation path of `retry_payment`) are blocked with `Error::ContractPaused`.
+    /// Settlement, verification, cancellation, and refund operations continue to work
+    /// normally. This is narrower than `set_global_pause`, which halts all operations.
+    /// Query the current state with `get_creation_pause_info`.
     pub fn set_creation_pause(
         env: Env,
         admin: Address,
@@ -5772,6 +6276,28 @@ impl PaymentProcessor {
             String::from_str(&env, "Legacy unpause")
         };
         Self::set_global_pause(env, admin, paused, reason)
+    }
+
+    /// Get the current creation-only pause state (issue #670).
+    ///
+    /// Distinct from `get_pause_info`, which returns the consolidated global + creation
+    /// state. `set_creation_pause` blocks only `create_payment`, `create_payments_batch`,
+    /// `swap_and_pay`, `swap_and_pay_multi_route`, and the creation path of `retry_payment`.
+    /// It does NOT block `verify_payment`, `settle_payment`, `cancel_payment`,
+    /// `process_refund`, `claim_refund`, or dispute resolution, so operators can halt new
+    /// payment intake (e.g. during a maintenance window) while still allowing in-flight
+    /// payments to be confirmed, settled, and refunded. Use `set_global_pause` instead when
+    /// all operations need to be halted.
+    pub fn get_creation_pause_info(env: Env) -> PauseState {
+        env.storage()
+            .persistent()
+            .get::<DataKey, PauseState>(&DataKey::CreationPaused)
+            .unwrap_or(PauseState {
+                paused: false,
+                reason: String::from_str(&env, ""),
+                admin: None,
+                timestamp: 0,
+            })
     }
 
     /// Get the current consolidated pause info.
@@ -6525,11 +7051,13 @@ impl PaymentProcessor {
             fee_waiver_code: args.fee_waiver_code.clone(),
             retry_of_payment_id: None,
             payer_muxed_id: None,
+            payment_link_id: None,
         };
 
         env.storage()
             .persistent()
             .set(&DataKey::Payment(args.payment_id.clone()), &payment);
+        Self::record_payment_status(&env, &payment);
         Self::bump_payment_ttl(&env, &args.payment_id, &payment.status);
         Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
         Self::index_payment_by_date(&env, &args.merchant_id, &args.payment_id, payment.created_at);
@@ -6803,6 +7331,7 @@ impl PaymentProcessor {
                 fee_waiver_code: args.fee_waiver_code.clone(),
                 retry_of_payment_id: None,
                 payer_muxed_id: None,
+                payment_link_id: None,
             };
 
             env.storage()
@@ -7115,6 +7644,7 @@ impl PaymentProcessor {
 
         // Issue #505: Validate status transition through state machine
         payment.status = payment_state_machine::transition_status(&payment.status, new_status.clone())?;
+        Self::record_payment_status(&env, &payment);
 
         if let Some(refund_amount) = overpaid_refund_amount {
             if Self::get_auto_refund_overpayment(&env) {
@@ -7225,6 +7755,7 @@ impl PaymentProcessor {
         }
 
         payment.status = PaymentStatus::Confirmed;
+        Self::record_payment_status(&env, &payment);
         let amount_received = payment.amount_received.unwrap_or(payment.amount);
         payment.amount = amount_received;
 
@@ -7267,6 +7798,7 @@ impl PaymentProcessor {
         }
 
         payment.status = PaymentStatus::Pending;
+        Self::record_payment_status(&env, &payment);
         payment.amount = payment.amount.saturating_add(top_up_amount);
 
         env.storage()
@@ -7364,6 +7896,7 @@ impl PaymentProcessor {
             fee_waiver_code: original.fee_waiver_code.clone(),
             retry_of_payment_id: Some(original_payment_id.clone()),
             payer_muxed_id: None,
+            payment_link_id: original.payment_link_id.clone(),
         };
 
         // Store new payment
@@ -7401,6 +7934,18 @@ impl PaymentProcessor {
         let payment = Self::get_payment_internal(&env, &payment_id)?;
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
         Ok(payment)
+    }
+
+    pub fn get_payment_status_history(
+        env: Env,
+        payment_id: String,
+    ) -> Result<Vec<PaymentStatusEvent>, Error> {
+        Self::get_payment_internal(&env, &payment_id)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::PaymentStatusHistory(payment_id))
+            .unwrap_or_else(|| vec![&env]))
     }
 
     /// Issue #489: Reverse lookup payment by metadata_hash for order reconciliation.
@@ -7623,9 +8168,9 @@ impl PaymentProcessor {
                 if payment_time >= from_ts && payment_time <= to_ts {
                     let mut refund_amount: i128 = 0;
                     
-                    let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
+                    let refund_ids = RefundManager::get_payment_refunds_internal(&env, &payment_id);
                     for refund_id in refund_ids.iter() {
-                        if let Ok(refund) = Self::get_refund_internal(&env, &refund_id) {
+                        if let Ok(refund) = RefundManager::get_refund_internal(&env, &refund_id) {
                             if refund.status == RefundStatus::Completed {
                                 refund_amount += refund.amount;
                             }
@@ -7682,6 +8227,32 @@ impl PaymentProcessor {
         })
     }
 
+    pub fn generate_reconciliation_report_paginated(
+        env: Env,
+        merchant_id: Address,
+        from_ts: u64,
+        to_ts: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ReconciliationPage, Error> {
+        let report = Self::generate_reconciliation_report(
+            env.clone(), merchant_id, from_ts, to_ts, offset, limit,
+        )?;
+        let mut page_total = 0i128;
+        for item in report.payments.iter() {
+            page_total = page_total.saturating_add(item.amount);
+        }
+        let page_size = if limit == 0 { 100 } else { limit.min(100) };
+        let has_more = page_size > 0 && page_size == report.payments.len() as u32;
+        Ok(ReconciliationPage {
+            items: report.payments,
+            total_confirmed: report.total_gross,
+            total_settled: report.total_net_settled,
+            page_total,
+            has_more,
+        })
+    }
+
     #[allow(deprecated)]
     pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
@@ -7695,6 +8266,7 @@ impl PaymentProcessor {
         // Ensure the current time is less than the expiry time; if not, mark as expired and return.
         if env.ledger().timestamp() >= payment.expires_at {
             payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Expired)?;
+            Self::record_payment_status(&env, &payment);
 
             env.storage()
                 .persistent()
@@ -7724,6 +8296,7 @@ impl PaymentProcessor {
         }
 
         payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Failed)?;
+        Self::record_payment_status(&env, &payment);
 
         env.storage()
             .persistent()
@@ -7759,6 +8332,7 @@ impl PaymentProcessor {
         }
 
         payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Expired)?;
+        Self::record_payment_status(&env, &payment);
 
         env.storage()
             .persistent()
@@ -7997,6 +8571,10 @@ impl PaymentProcessor {
                     ),
                     (payment_id.clone(), treasury_total, dev_amount),
                 );
+
+                // Issue #666: record this settlement's fee split for
+                // get_platform_fee_report.
+                Self::record_fee_collection(&env, settlement_fee, treasury_total, dev_amount);
             } else {
                 // No FeeSplitConfig — accumulate entire fee in TreasuryBalance (legacy path).
                 let current_treasury: i128 = env
@@ -8016,6 +8594,10 @@ impl PaymentProcessor {
                     ),
                     (payment_id.clone(), payment.merchant_id.clone(), settlement_fee),
                 );
+
+                // Issue #666: record this settlement's fee for get_platform_fee_report
+                // (legacy path: entire fee accrues to treasury, no developer split).
+                Self::record_fee_collection(&env, settlement_fee, settlement_fee, 0);
             }
         }
 
@@ -8125,6 +8707,17 @@ impl PaymentProcessor {
                         env.current_contract_address()
                     };
 
+                    // Issue #666: record this settlement's merchant-level fee for
+                    // get_platform_fee_report. Only counted as treasury_share when
+                    // it actually accrued to DataKey::TreasuryBalance above (i.e.
+                    // no custom fee_recipient); no developer split on this path.
+                    let treasury_share_for_report = if fee_recipient == env.current_contract_address() {
+                        actual_fee
+                    } else {
+                        0
+                    };
+                    Self::record_fee_collection(&env, actual_fee, treasury_share_for_report, 0);
+
                     // Emit FEE_COLLECTED event (merchant-level fee)
                     env.events().publish(
                         (
@@ -8143,6 +8736,7 @@ impl PaymentProcessor {
                     );
 
                     payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
+                    Self::record_payment_status(&env, &payment);
                     env.storage()
                         .persistent()
                         .set(&DataKey::Payment(payment_id.clone()), &payment);
@@ -8256,9 +8850,21 @@ impl PaymentProcessor {
                 let from = env.current_contract_address();
                 let _ = token_client.try_transfer(&from, &fee_recipient, &platform_fee);
             }
+
+            // Issue #666: record this settlement's platform fee for
+            // get_platform_fee_report. Only counted as treasury_share when it
+            // accrued to DataKey::TreasuryBalance above; no developer split
+            // on this path.
+            let treasury_share_for_report = if fee_recipient == contract_addr {
+                platform_fee
+            } else {
+                0
+            };
+            Self::record_fee_collection(&env, platform_fee, treasury_share_for_report, 0);
         }
 
         payment.status = payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
+        Self::record_payment_status(&env, &payment);
 
         // Issue #480: Accumulate net merchant amount to pending settlement.
         let net_merchant_amount: i128 = splits
@@ -9135,6 +9741,15 @@ impl PaymentProcessor {
         count as u32
     }
 
+    pub fn get_merchant_payment_count_dash(env: Env, merchant_id: Address) -> u32 {
+        let count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPaymentCount(merchant_id))
+            .unwrap_or(0u64);
+        count as u32
+    }
+
     /// Issue #396: Returns paginated full `PaymentCharge` structs for merchant dashboards.
     /// `limit` is capped at 50 to avoid ledger compute limits.
     /// Returns an empty vec (not an error) when `offset` exceeds the total count.
@@ -9235,10 +9850,10 @@ impl PaymentProcessor {
                         _ => {}
                     }
                 }
-
-                let refunds_for_payment = Self::get_payment_refunds_internal(&env, &payment_id);
+                
+                let refunds_for_payment = RefundManager::get_payment_refunds_internal(&env, &payment_id);
                 for refund_id in refunds_for_payment.iter() {
-                    if let Ok(refund) = Self::get_refund_internal(&env, &refund_id) {
+                    if let Ok(refund) = RefundManager::get_refund_internal(&env, &refund_id) {
                         if refund.created_at >= from_ts && refund.created_at <= to_ts {
                             refund_count += 1;
                         }
@@ -9247,7 +9862,7 @@ impl PaymentProcessor {
             }
         }
 
-        let dispute_count = Self::get_merchant_dispute_count(env, merchant_id) as u32;
+        let dispute_count = RefundManager::get_merchant_dispute_count(env.clone(), merchant_id.clone()) as u32;
         let avg_payment_amount = if total_payments > 0 {
             total_volume / (total_payments as i128)
         } else {
@@ -9949,6 +10564,7 @@ impl PaymentProcessor {
             result.push_back(s);
         }
         result
+        Self::get_merchant_invoices_internal(&env, &merchant_id)
     }
 
     fn get_next_invoice_id(env: &Env) -> String {

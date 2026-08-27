@@ -244,6 +244,47 @@ export class MerchantRegistryClient {
   }
 
   /**
+   * Issue #669: Set (or replace) a merchant's SEP-6/SEP-24 anchor
+   * configuration. Thin wrapper around `set_anchor_config`, which requires
+   * the merchant to be KYC-verified (Basic tier or above) and always sets
+   * (never clears) the config — use `setMerchantAnchor(..., null)` to clear.
+   *
+   * Requires the merchant's own signature.
+   */
+  async setAnchorConfig(params: { merchantId: string; config: AnchorConfig }): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().set_anchor_config({
+        merchant_id: params.merchantId,
+        config: {
+          anchor_domain: params.config.anchorDomain,
+          sep6_endpoint: params.config.sep6Endpoint,
+          sep24_endpoint: params.config.sep24Endpoint,
+          supported_currencies: params.config.supportedCurrencies,
+        },
+      }),
+    );
+  }
+
+  /**
+   * Issue #669: Read-only lookup of a merchant's SEP-6/SEP-24 anchor
+   * configuration. Returns `null` if the merchant has no anchor configured.
+   */
+  async getAnchorConfig(merchantId: string): Promise<AnchorConfig | null> {
+    const result = await withMappedContractError(() =>
+      this.getContract().get_anchor_config({
+        merchant_id: merchantId,
+      }),
+    );
+    if (!result) return null;
+    return {
+      anchorDomain: result.anchor_domain,
+      sep6Endpoint: result.sep6_endpoint,
+      sep24Endpoint: result.sep24_endpoint,
+      supportedCurrencies: result.supported_currencies,
+    };
+  }
+
+  /**
    * Admin-only: apply or clear a time-based platform fee waiver for a
    * merchant (onboarding / promotional campaigns).
    *

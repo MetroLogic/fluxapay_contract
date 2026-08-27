@@ -166,6 +166,10 @@ export interface PaymentCharge {
   deposit_address: string;
   expires_at: u64;
   merchant_id: string;
+  /** ID of the payment link that created this payment via `use_link`, for tracing
+   *  a payment back to its source link. `undefined`/`None` for payments created
+   *  directly via `create_payment`/`swap_and_pay` (issue #668). */
+  payment_link_id: Option<string>;
   payer_address: Option<string>;
   payment_id: string;
   status: PaymentStatus;
@@ -177,7 +181,9 @@ export type PaymentStatus =
   | { tag: "Confirmed"; values: void }
   | { tag: "Settled"; values: void }
   | { tag: "Expired"; values: void }
-  | { tag: "Failed"; values: void };
+  | { tag: "Failed"; values: void }
+  | { tag: "PartiallyPaid"; values: void }
+  | { tag: "Overpaid"; values: void };
 
 export interface RateData {
   decimals: u32;

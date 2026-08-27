@@ -147,6 +147,34 @@ Emitted when a refund is rejected.
 
 ---
 
+### DISPUTE / BOND_RETURNED
+
+Issue #677. Emitted when a dispute bond is released back to its owner —
+either the disputer (when `resolve_dispute_with_refund` rules in their
+favor) or the merchant (when `reject_dispute` rules in their favor).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dispute_id` | `String` | Dispute |
+| `recipient` | `Address` | Address the bond was returned to |
+| `amount` | `i128` | Bond amount returned |
+
+---
+
+### DISPUTE / BOND_FORFEITED
+
+Issue #677. Emitted when a dispute bond is forfeited to the treasury /
+fee collector. Currently emitted from `reject_dispute` for the disputer's
+bond.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dispute_id` | `String` | Dispute |
+| `recipient` | `Address` | Treasury / collector address the bond was forfeited to |
+| `amount` | `i128` | Bond amount forfeited |
+
+---
+
 ## MERCHANT
 
 ### MERCHANT / REGISTERED

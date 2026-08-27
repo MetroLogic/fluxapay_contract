@@ -2,7 +2,7 @@
 
 use crate::{access_control::role_merchant, CreatePaymentArgs, PaymentProcessor, PaymentProcessorClient};
 use soroban_sdk::{
-    testutils::Address as _, testutils::Events as _, Address, Env, Map, String, Symbol,
+    testutils::Address as _, testutils::Events, Address, Env, Map, String, Symbol,
 };
 
 fn setup(env: &Env) -> (Address, Address, PaymentProcessorClient<'_>) {
@@ -36,6 +36,8 @@ fn payment_args(
         metadata_hash: None,
         metadata,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     }
 }
 

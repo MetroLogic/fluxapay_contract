@@ -44,8 +44,8 @@ export class Database {
       }
 
       // Determine table based on event topic
-      const [eventType] = event.topic;
-      const table = this.getTableName(eventType);
+      const [eventType, eventSubtype] = event.topic;
+      const table = this.getTableName(eventType, eventSubtype);
 
       // Store in contract_events (dedup table)
       await client.query(
@@ -169,6 +169,23 @@ export class Database {
         );
         break;
 
+      case "dispute_bonds":
+        // Issue #677: bond lifecycle events (BOND_RETURNED / BOND_FORFEITED)
+        // carry a recipient + amount, not a payment_id/status update, so
+        // they're tracked separately from the `disputes` table.
+        await client.query(
+          `INSERT INTO dispute_bonds (dispute_id, recipient, amount, status, created_at)
+           VALUES ($1, $2, $3, $4, to_timestamp($5))`,
+          [
+            value.dispute_id,
+            value.recipient,
+            value.amount,
+            event.topic[1],
+            event.timestamp,
+          ]
+        );
+        break;
+
       case "invoices":
         await client.query(
           `INSERT INTO invoices (invoice_id, merchant_id, total_amount, status, created_at)
@@ -186,7 +203,13 @@ export class Database {
     }
   }
 
-  private getTableName(eventType: string): string {
+  private getTableName(eventType: string, eventSubtype?: string): string {
+    // Issue #677: dispute bond events route to a dedicated table since
+    // their shape (recipient + amount) doesn't fit the `disputes` row.
+    if (eventType === "DISPUTE" && (eventSubtype === "BOND_RETURNED" || eventSubtype === "BOND_FORFEITED")) {
+      return "dispute_bonds";
+    }
+
     const tableMap: Record<string, string> = {
       PAYMENT: "payments",
       REFUND: "refunds",
@@ -197,6 +220,49 @@ export class Database {
       INVOICE: "invoices",
     };
     return tableMap[eventType] || "contract_events";
+  }
+
+  // ── Read queries (Issue #672: REST API backing queries) ─────────────────
+
+  async getPaymentsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    const { rows } = await this.pool.query(
+      `SELECT payment_id, merchant_id, amount, currency, status, created_at
+       FROM payments WHERE merchant_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [merchantId, limit]
+    );
+    return rows;
+  }
+
+  async getRefundsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    const { rows } = await this.pool.query(
+      `SELECT r.refund_id, r.payment_id, r.amount, r.status, r.created_at
+       FROM refunds r
+       JOIN payments p ON p.payment_id = r.payment_id
+       WHERE p.merchant_id = $1
+       ORDER BY r.created_at DESC LIMIT $2`,
+      [merchantId, limit]
+    );
+    return rows;
+  }
+
+  async getDisputesByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    const { rows } = await this.pool.query(
+      `SELECT d.dispute_id, d.payment_id, d.amount, d.status, d.created_at
+       FROM disputes d
+       JOIN payments p ON p.payment_id = d.payment_id
+       WHERE p.merchant_id = $1
+       ORDER BY d.created_at DESC LIMIT $2`,
+      [merchantId, limit]
+    );
+    return rows;
+  }
+
+  /** Admin-only: event counts by type, across all merchants. */
+  async getAdminStats(): Promise<Record<string, number>> {
+    const { rows } = await this.pool.query(
+      `SELECT event_type, COUNT(*)::int AS count FROM contract_events GROUP BY event_type`
+    );
+    return Object.fromEntries(rows.map((r: { event_type: string; count: number }) => [r.event_type, r.count]));
   }
 
   async close(): Promise<void> {

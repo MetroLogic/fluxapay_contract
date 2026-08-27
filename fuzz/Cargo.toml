@@ -1,0 +1,39 @@
+[package]
+name = "fluxapay-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+soroban-sdk = { version = "26", features = ["testutils"] }
+
+[dependencies.fluxapay]
+path = ".."
+
+# Prevent this from being suddenly a member of the parent workspace, and
+# prevent unintended interaction between the parent and this crate's
+# dependency graph. See https://rust-fuzz.github.io/book/cargo-fuzz/setup.html
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_validate_payment_id"
+path = "fuzz_targets/fuzz_validate_payment_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_create_payment_id_parse"
+path = "fuzz_targets/fuzz_create_payment_id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

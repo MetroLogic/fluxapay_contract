@@ -49,7 +49,8 @@ export class SEP10Authenticator {
 
     const serverKeypair = Keypair.random();
     const now = Math.floor(Date.now() / 1000);
-    const timeout = 15 * 60; // 15 minutes
+    // Issue #675: challenge transactions expire in 5 minutes.
+    const timeout = 5 * 60;
 
     const transaction = new TransactionBuilder(clientKeypair, {
       fee: "100",
@@ -121,15 +122,22 @@ export class SEP10Authenticator {
   /**
    * Generate a JWT token after successful SEP-10 authentication.
    * In production, this should be done server-side with proper key management.
+   *
+   * Issue #675: `merchantId` is included as a `merchant_id` claim so the
+   * FluxaPay backend can identify the calling merchant on subsequent API
+   * calls. Falls back to `clientPublicKey` when no separate merchant id is
+   * available.
    */
   generateJWT(
     clientPublicKey: string,
     expiresInSeconds: number = 86400, // 24 hours
+    merchantId?: string,
   ): string {
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.serverPublicKey,
       sub: clientPublicKey,
+      merchant_id: merchantId ?? clientPublicKey,
       iat: now,
       exp: now + expiresInSeconds,
     };
@@ -153,17 +161,22 @@ export class SEP10Authenticator {
 
   /**
    * Complete SEP-10 authentication flow: verify challenge and return JWT.
+   *
+   * Issue #675: `merchantId` (when known, e.g. from a merchant registry
+   * lookup keyed by `clientPublicKey`) is embedded in the JWT's
+   * `merchant_id` claim.
    */
   authenticate(
     challengeXdr: string,
     signedXdr: string,
     clientPublicKey: string,
+    merchantId?: string,
   ): SEP10AuthenticatedResponse {
     if (!this.verifyChallengeSignature(challengeXdr, signedXdr, clientPublicKey)) {
       throw new Error("Invalid SEP-10 challenge signature");
     }
 
-    const jwt = this.generateJWT(clientPublicKey);
+    const jwt = this.generateJWT(clientPublicKey, undefined, merchantId);
     return {
       jwt,
       challenge: challengeXdr,

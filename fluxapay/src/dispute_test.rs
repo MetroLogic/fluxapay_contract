@@ -109,7 +109,7 @@ fn setup_open_dispute<'a>(
 
 fn has_dispute_event(env: &Env, event_name: &str) -> bool {
     use soroban_sdk::xdr::{ContractEventBody, ScVal};
-    env.events().all().events().iter().any(|event| {
+    env.events().all().iter().any(|event| {
         let ContractEventBody::V0(v0) = &event.body;
         let topics = &v0.topics;
         if topics.len() != 2 {
@@ -335,22 +335,22 @@ fn test_check_dispute_deadline_escalates_once() {
     let now = env.ledger().timestamp();
     refund_client.set_dispute_deadline(&operator, &dispute_id, &(now + 10));
 
-    let events_after_deadline = env.events().all().events().len();
+    let events_after_deadline = env.events().all().len();
 
     refund_client.check_dispute_deadline(&dispute_id);
     let dispute = refund_client.get_dispute(&dispute_id);
     assert!(!dispute.escalated);
-    assert_eq!(env.events().all().events().len(), events_after_deadline);
+    assert_eq!(env.events().all().len(), events_after_deadline);
 
     env.ledger().set_timestamp(now + 11);
     refund_client.check_dispute_deadline(&dispute_id);
 
     let escalated = refund_client.get_dispute(&dispute_id);
     assert!(escalated.escalated);
-    assert_eq!(env.events().all().events().len(), events_after_deadline + 1);
+    assert_eq!(env.events().all().len(), events_after_deadline + 1);
 
     refund_client.check_dispute_deadline(&dispute_id);
-    assert_eq!(env.events().all().events().len(), events_after_deadline + 1);
+    assert_eq!(env.events().all().len(), events_after_deadline + 1);
 }
 
 #[test]
@@ -741,7 +741,25 @@ fn test_vote_dispute_duplicate_vote_blocked() {
 fn test_vote_dispute_non_arbitrator_blocked() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, payment_client, refund_client) = setup_contracts(&env);
+    let (admin, payment_client, refund_client) = setup(&env);
+
+    let payment_id = String::from_str(&env, "payment_vote_non_arb");
+    let dispute_id = setup_dispute_under_review(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        &payment_id,
+        400i128,
+    );
+
+    let stranger = Address::generate(&env);
+    let err = refund_client.try_vote_dispute(&stranger, &dispute_id, &ArbitratorVoteChoice::Approve);
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+}
+
+const VALID_CID_V0: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+const VALID_CID_V1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
     let payment_id = String::from_str(&env, "payment_vote_non_arb");
     let dispute_id = setup_confirmed_payment_for_dispute(
@@ -761,6 +779,15 @@ fn test_vote_dispute_non_arbitrator_blocked() {
     );
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
+fn setup_confirmed_payment_for_dispute<'a>(
+    env: &'a Env,
+    payment_id_text: &str,
+    amount: i128,
+) -> (Address, Address, Address, PaymentProcessorClient<'a>, RefundManagerClient<'a>, String) {
+    let (admin, payment_client, refund_client) = setup(env);
+    let merchant = Address::generate(env);
+    let customer = Address::generate(env);
+    let payment_id = String::from_str(env, payment_id_text);
 
 #[test]
 fn test_vote_dispute_non_arbitrator_blocked() {
@@ -1039,7 +1066,7 @@ fn test_batch_create_disputes_full_success() {
 
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..3u32 {
-        let pid = format!("batch_ok_{i}");
+        let pid = crate::utils::format_id(&env, "batch_ok_", i as u64);
         let (merchant, customer, payment_id) = setup_confirmed_payment_for_dispute(
             &env,
             &payment_client,
@@ -1209,7 +1236,7 @@ fn test_batch_create_disputes_rejects_oversized() {
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..21u32 {
         batch.push_back(crate::CreateDisputeArgs {
-            payment_id: String::from_str(&env, &format!("p{i}")),
+            payment_id: crate::utils::format_id(&env, "p", i as u64),
             amount: 1i128,
             reason: String::from_str(&env, "r"),
             evidence: valid_evidence(&env),

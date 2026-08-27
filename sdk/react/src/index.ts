@@ -13,14 +13,23 @@ export {
   useSubscriptionPlan,
   useCreateSubscriptionPlan,
   useSubscribeToPlan,
+  useInvoice,
+  useMerchantInvoices,
+  useCreateInvoice,
+  useMarkInvoicePaid,
 } from "./hooks.js";
 export type {
   UseMerchantPaymentsOptions,
   UseCreatePaymentResult,
+  UseCreateInvoiceResult,
+  UseMarkInvoicePaidResult,
   MutationStatus,
   UseCreateSubscriptionPlanParams,
   UseCreateSubscriptionPlanResult,
   UseSubscribeToPlanParams,
   UseSubscribeToPlanResult,
   SubscriptionPlan,
+  Invoice,
+  LineItem,
+  InvoiceStatus,
 } from "./hooks.js";

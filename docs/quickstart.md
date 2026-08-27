@@ -9,13 +9,36 @@ This guide takes you from zero to receiving your first confirmed USDC payment on
 - Testnet XLM funded via [Friendbot](https://laboratory.stellar.org/#account-creator?network=test) (click "Get test network lumens")
 - The FluxaPay `PaymentProcessor` and `MerchantRegistry` contract IDs for testnet (see [DEPLOYMENT.md](../DEPLOYMENT.md) or your `.env.testnet` if you deployed your own instance)
 
-## 1. Install the SDK
+## 1. Authenticate with SEP-10 (Issue #675)
+
+Before calling the FluxaPay API, exchange your Stellar keypair for a JWT
+using the backend's SEP-10 endpoints (see [backend/README.md](../backend/README.md)
+for the full reference):
+
+```bash
+# 1. Request a challenge transaction for your merchant account
+curl "https://api.fluxapay.example/auth/challenge?account=GABC...YOUR_ACCOUNT"
+
+# 2. Sign the returned transaction XDR with your Stellar keypair (client-side),
+#    then exchange it for a JWT
+curl -X POST https://api.fluxapay.example/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"transaction": "<signed XDR>", "account": "GABC...YOUR_ACCOUNT"}'
+```
+
+The response is a JWT containing `merchant_id`, `iat`, and `exp` claims,
+valid for 24 hours. Include it as `Authorization: Bearer <token>` on
+subsequent API calls. The SDK's `SEP10Authenticator` (`sdk/src/sep10.ts`)
+implements the client-side signing/verification flow if you'd rather not
+call the REST endpoints directly.
+
+## 2. Install the SDK
 
 ```bash
 npm install @fluxapay/sdk
 ```
 
-## 2. Initialize the client
+## 3. Initialize the client
 
 ```typescript
 import { FluxapayClient } from "@fluxapay/sdk";
@@ -27,7 +50,7 @@ const client = new FluxapayClient({
 });
 ```
 
-## 3. Register your merchant
+## 4. Register your merchant
 
 ```typescript
 await client.registerMerchant({
@@ -45,7 +68,7 @@ const merchant = await client.getMerchant("merchant_acme_001");
 console.log(merchant);
 ```
 
-## 4. Create a payment charge
+## 5. Create a payment charge
 
 ```typescript
 const payment = await client.createPayment({
@@ -58,7 +81,7 @@ const payment = await client.createPayment({
 });
 ```
 
-## 5. Share the payment link with your customer
+## 6. Share the payment link with your customer
 
 If you have a `PaymentLinkManager` contract ID configured, generate a shareable checkout link and QR payload:
 
@@ -74,7 +97,7 @@ console.log(`Send this link to your customer: ${shareableUrl}`);
 
 Your customer opens the link, connects a Stellar wallet, and pays in USDC. To simulate a payment manually on testnet, use [Stellar Laboratory — Build Transaction](https://laboratory.stellar.org/#txbuilder?network=test) to submit a token transfer to your `depositAddress`.
 
-## 6. Listen for the `payment.confirmed` webhook
+## 7. Listen for the `payment.confirmed` webhook
 
 Configure a webhook endpoint and verify FluxaPay's HMAC signature (see [docs/webhooks.md](webhooks.md) for the full reference):
 
@@ -113,7 +136,7 @@ const status = await client.getPayment("payment_abc123");
 console.log(status.status); // "Confirmed" once the oracle verifies the transfer
 ```
 
-## 7. Verify settlement
+## 8. Verify settlement
 
 Once confirmed, FluxaPay converts and settles the payment to your configured `settlementCurrency`. Verify the payout amount using the FX Oracle:
 

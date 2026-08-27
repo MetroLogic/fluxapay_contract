@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #671**: Added `docs/sdk-migration-guide.md` covering breaking-change migration steps between major `@fluxapay/sdk` versions, linked from `sdk/README.md` and `sdk/CHANGELOG.md`.
+- **Issue #670**: `PaymentProcessor::get_creation_pause_info() -> PauseState` — read-only getter for the creation-only pause state, distinct from `get_pause_info()`'s consolidated global+creation view; clarified `set_creation_pause`/`set_global_pause` scope docs (creation pause never blocks `verify_payment`, `settle_payment`, `cancel_payment`, or refund/dispute flows).
+- **Issue #668**: `PaymentCharge.payment_link_id: Option<String>` — populated by `use_link` with the source link's ID so payments can be traced back to the link that created them; `None` for payments created via `create_payment`/`swap_and_pay`. Updated the generated SDK `PaymentCharge` TypeScript type.
+- **Issue #667**: `set_contract_metadata(admin, key: Symbol, value: String)` / `get_contract_metadata(key: Symbol) -> Option<String>` on `PaymentProcessor`, `RefundManager`, and `MerchantRegistry` — admin-gated on-chain metadata storage (instance storage, `LONG_LIVE_TTL`) for on-chain version/description tagging. `description`, `version`, and `deployed_at` are pre-populated on `initialize`.
 - **Issue #378**: `cancel_refund` entry point — adds `RefundStatus::Cancelled`, transitions pending refunds to cancelled (requester or admin only), emits `REFUND/CANCELLED`, and excludes cancelled refunds from payment refund totals.
 - **Issue #379**: Admin-configurable refund fee — `RefundFeeBps` stored in instance storage (default 100 bps at init); new `set_refund_fee_bps(admin, bps)` setter (0–1000 bps) and `get_refund_fee_bps()` getter; `process_refund` reads fee from storage.
 
@@ -36,9 +40,9 @@
 - `allow_token` unauthorized non-admin test for token allowlist enforcement (closes #328)
 - `settle_payment` tests for unauthorized operators, pending/expired rejection, and `PAYMENT/SETTLED` event emission (closes #326)
 - `get_merchant_payments_paginated` optional `status_filter` parameter to paginate merchant payments by `PaymentStatus` (closes #280)
-- `scripts/deploy_testnet.sh`: builds all contract WASMs and deploys them to the configured Stellar network; writes resulting contract IDs to `.env.testnet`; fails fast if `STELLAR_SECRET_KEY` or `STELLAR_NETWORK` are unset (closes #294)
+- `scripts/deploy-testnet.sh`: builds all contract WASMs and deploys them to the configured Stellar network; writes resulting contract IDs to `.env.testnet`; fails fast if `STELLAR_SECRET_KEY` or `STELLAR_NETWORK` are unset (closes #294)
 - `docs/local-invoke.md`: CLI recipe sections for `create_refund`, `process_refund`, `create_dispute`, `set_dispute_deadline`, `resolve_dispute_with_refund`, `verify_payment`, `settle_payment`, `set_paused`, `set_rate`, `create_link`, and `use_link` — each with full command, expected output, and error scenarios (closes #299)
-- `docs/local-invoke.md`: Deployment section documenting how to run `scripts/deploy_testnet.sh` and load `.env.testnet`
+- `docs/local-invoke.md`: Deployment section documenting how to run `scripts/deploy-testnet.sh` and load `.env.testnet`
 
 - `check_dispute_deadline(dispute_id)`: public callable to trigger escalation when a dispute review deadline has elapsed; emits `DISPUTE/ESCALATED` and is a no-op if not passed/already escalated/resolved (closes #306)
 - `top_up_stream(stream_id, amount)`: allows a sender to top up a single stream via direct token transfer; credits the stream deposit and emits `STREAM/TOPPED_UP` (closes #305)

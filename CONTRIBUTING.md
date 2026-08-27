@@ -42,7 +42,11 @@ cp .env.example .env
 # Edit .env — do NOT commit this file
 ```
 
+See [scripts/README.md](scripts/README.md) for details on all operational scripts and their required environment variables.
+
 See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to invoke contract functions on Stellar testnet.
+
+To deploy the contracts to testnet, run `bash scripts/deploy-testnet.sh` from the repository root after setting `STELLAR_SECRET_KEY` and `STELLAR_NETWORK`.
 
 ---
 
