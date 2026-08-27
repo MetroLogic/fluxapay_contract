@@ -42,6 +42,8 @@ cp .env.example .env
 # Edit .env — do NOT commit this file
 ```
 
+See [scripts/README.md](scripts/README.md) for details on all operational scripts and their required environment variables.
+
 See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to invoke contract functions on Stellar testnet.
 
 ---
