@@ -10,9 +10,18 @@ export {
   useMerchantPayments,
   useRefund,
   useCreatePayment,
+  useInvoice,
+  useMerchantInvoices,
+  useCreateInvoice,
+  useMarkInvoicePaid,
 } from "./hooks.js";
 export type {
   UseMerchantPaymentsOptions,
   UseCreatePaymentResult,
+  UseCreateInvoiceResult,
+  UseMarkInvoicePaidResult,
   MutationStatus,
+  Invoice,
+  LineItem,
+  InvoiceStatus,
 } from "./hooks.js";

@@ -94,7 +94,7 @@ impl FXOracle {
             return Err(FXOracleError::Unauthorized);
         }
 
-        Self::store_rate(&env, pair.clone(), rate, decimals);
+        Self::store_rate(&env, pair.clone(), rate, decimals)?;
 
         // Emit event: (RATE, UPDATED), pair
         env.events().publish(
@@ -125,7 +125,7 @@ impl FXOracle {
 
         let count = rates.len();
         for (pair, rate, decimals) in rates.iter() {
-            Self::store_rate(&env, pair, rate, decimals);
+            Self::store_rate(&env, pair, rate, decimals)?;
         }
 
         env.events().publish(

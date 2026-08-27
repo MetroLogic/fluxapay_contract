@@ -89,6 +89,64 @@ function CreatePaymentForm() {
 }
 ```
 
+### Invoices
+
+`useInvoice`, `useMerchantInvoices`, `useCreateInvoice`, and `useMarkInvoicePaid`
+manage merchant invoices through the FluxaPay backend (requires `apiUrl` to be
+set in `FluxapayConfig`):
+
+```tsx
+import {
+  useInvoice,
+  useMerchantInvoices,
+  useCreateInvoice,
+  useMarkInvoicePaid,
+} from "@fluxapay/react";
+
+function InvoiceDetails({ invoiceId }: { invoiceId: string }) {
+  const { data: invoice, loading } = useInvoice(invoiceId);
+  return loading ? <p>Loading...</p> : <p>Status: {invoice?.status}</p>;
+}
+
+function MerchantInvoiceList({ merchantId }: { merchantId: string }) {
+  const { data: invoiceIds, loading } = useMerchantInvoices(merchantId);
+  if (loading) return <p>Loading...</p>;
+  return (
+    <ul>
+      {invoiceIds?.map((id) => (
+        <li key={id}>{id}</li>
+      ))}
+    </ul>
+  );
+}
+
+function CreateInvoiceForm({ merchantId }: { merchantId: string }) {
+  const { mutate, loading } = useCreateInvoice();
+
+  const onSubmit = () =>
+    mutate({
+      merchantId,
+      currency: "USDC",
+      lineItems: [{ description: "Consulting", quantity: 1, unitAmount: 100_0000000n }],
+    });
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {loading ? "Creating..." : "Create invoice"}
+    </button>
+  );
+}
+
+function MarkInvoicePaidButton({ invoiceId }: { invoiceId: string }) {
+  const { mutate, loading } = useMarkInvoicePaid();
+  return (
+    <button onClick={() => mutate(invoiceId)} disabled={loading}>
+      {loading ? "Saving..." : "Mark as paid"}
+    </button>
+  );
+}
+```
+
 ## Hooks
 
 All query hooks return a `{ data, loading, error, refetch }` shape, matching
@@ -99,6 +157,10 @@ the pattern used by React Query / SWR consumers.
 - `useMerchantPayments(merchantId, { offset?, limit? })` — fetch a merchant's paginated payments.
 - `useRefund(refundId)` — fetch a single refund.
 - `useCreatePayment()` — returns `{ mutate, data, status, loading, error }` for creating a payment.
+- `useInvoice(invoiceId)` — fetch a single invoice.
+- `useMerchantInvoices(merchantId)` — fetch a merchant's invoice ids.
+- `useCreateInvoice()` — returns `{ mutate, data, status, loading, error }` for creating an invoice.
+- `useMarkInvoicePaid()` — returns `{ mutate, status, loading, error }` for marking an invoice as paid.
 
 ## License
 

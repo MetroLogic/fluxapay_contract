@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #671**: Added `docs/sdk-migration-guide.md` covering breaking-change migration steps between major `@fluxapay/sdk` versions, linked from `sdk/README.md` and `sdk/CHANGELOG.md`.
+- **Issue #670**: `PaymentProcessor::get_creation_pause_info() -> PauseState` — read-only getter for the creation-only pause state, distinct from `get_pause_info()`'s consolidated global+creation view; clarified `set_creation_pause`/`set_global_pause` scope docs (creation pause never blocks `verify_payment`, `settle_payment`, `cancel_payment`, or refund/dispute flows).
+- **Issue #668**: `PaymentCharge.payment_link_id: Option<String>` — populated by `use_link` with the source link's ID so payments can be traced back to the link that created them; `None` for payments created via `create_payment`/`swap_and_pay`. Updated the generated SDK `PaymentCharge` TypeScript type.
+- **Issue #667**: `set_contract_metadata(admin, key: Symbol, value: String)` / `get_contract_metadata(key: Symbol) -> Option<String>` on `PaymentProcessor`, `RefundManager`, and `MerchantRegistry` — admin-gated on-chain metadata storage (instance storage, `LONG_LIVE_TTL`) for on-chain version/description tagging. `description`, `version`, and `deployed_at` are pre-populated on `initialize`.
 - **Issue #378**: `cancel_refund` entry point — adds `RefundStatus::Cancelled`, transitions pending refunds to cancelled (requester or admin only), emits `REFUND/CANCELLED`, and excludes cancelled refunds from payment refund totals.
 - **Issue #379**: Admin-configurable refund fee — `RefundFeeBps` stored in instance storage (default 100 bps at init); new `set_refund_fee_bps(admin, bps)` setter (0–1000 bps) and `get_refund_fee_bps()` getter; `process_refund` reads fee from storage.
 

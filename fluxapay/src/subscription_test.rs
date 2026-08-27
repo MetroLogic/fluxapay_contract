@@ -287,7 +287,7 @@ fn test_deactivate_subscription_plan_by_merchant_marks_inactive() {
 fn test_cancel_subscription_mid_period_with_proration() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, _merchant, plan_id) = setup_with_plan(&env);
+    let (client, admin, _merchant, plan_id, _) = setup_with_plan(&env);
 
     client.set_allow_prorated_refunds(&admin, &true);
 
@@ -328,7 +328,7 @@ fn test_cancel_subscription_mid_period_with_proration() {
 fn test_cancel_subscription_mid_period_without_proration() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, _merchant, plan_id) = setup_with_plan(&env);
+    let (client, admin, _merchant, plan_id, _) = setup_with_plan(&env);
 
     client.set_allow_prorated_refunds(&admin, &true);
 
@@ -359,7 +359,7 @@ fn test_cancel_subscription_mid_period_without_proration() {
 fn test_cancel_subscription_end_of_period_no_refund() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, _merchant, plan_id) = setup_with_plan(&env);
+    let (client, admin, _merchant, plan_id, _) = setup_with_plan(&env);
 
     client.set_allow_prorated_refunds(&admin, &true);
 

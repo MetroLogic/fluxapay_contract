@@ -68,6 +68,11 @@ pub struct PaymentLink {
     pub fiat: MaybeFiatConfig,
     /// Canonical shareable checkout URL: `{base_url}/pay/{link_id}`.
     pub shareable_url: Option<String>,
+    /// Issue #663: Optional per-link fee override (basis points, 0-10_000).
+    /// When `None`, `use_link` falls back to the contract-wide default set
+    /// via `set_payment_link_fee_bps(admin, None, bps)`. Only settable by
+    /// the admin via `set_payment_link_fee_bps`.
+    pub fee_bps: Option<i128>,
 }
 
 /// Analytics summary for a payment link.
@@ -95,6 +100,9 @@ pub enum LinkDataKey {
     LinkPayment(String),
     /// Admin-configured default base URL for shareable payment links.
     PaymentBaseUrl,
+    /// Issue #663: Contract-wide default fee (basis points) applied by
+    /// `use_link` to links that don't have their own `fee_bps` override.
+    GlobalFeeBps,
 }
 
 #[contract]
@@ -175,6 +183,88 @@ impl PaymentLinkManager {
             .get(&LinkDataKey::PaymentBaseUrl)
     }
 
+    /// Issue #663: Set a per-link or contract-wide default fee override
+    /// (basis points) for payment links, following the admin-gated
+    /// setter pattern used by `set_fee_rate`/`set_refund_fee_bps`.
+    ///
+    /// * `link_id = Some(id)` — sets (or clears, when `fee_bps` is `None`)
+    ///   a fee override on that specific link. Only the admin may call
+    ///   this, so custom per-link fees cannot be self-assigned by a
+    ///   merchant at link-creation time.
+    /// * `link_id = None` — sets (or clears) the contract-wide default fee
+    ///   applied by `use_link` to any link without its own override.
+    ///
+    /// `fee_bps`, when `Some`, must be in `0..=10_000` (0-100%).
+    pub fn set_payment_link_fee_bps(
+        env: Env,
+        admin: Address,
+        link_id: Option<String>,
+        fee_bps: Option<i128>,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+
+        if let Some(bps) = fee_bps {
+            if !(0..=10_000).contains(&bps) {
+                return Err(crate::Error::InvalidAmount);
+            }
+        }
+
+        match link_id {
+            Some(id) => {
+                let mut link = Self::get_link_internal(&env, &id)?;
+                link.fee_bps = fee_bps;
+                env.storage()
+                    .persistent()
+                    .set(&LinkDataKey::Link(id.clone()), &link);
+
+                env.events().publish(
+                    (Symbol::new(&env, "LINK"), Symbol::new(&env, "FEE_BPS_SET")),
+                    (id, fee_bps),
+                );
+            }
+            None => {
+                env.storage()
+                    .persistent()
+                    .set(&LinkDataKey::GlobalFeeBps, &fee_bps);
+
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "LINK"),
+                        Symbol::new(&env, "GLOBAL_FEE_BPS_SET"),
+                    ),
+                    fee_bps,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Issue #663: Returns the fee (basis points) that `use_link` would
+    /// apply to `link_id` right now: the link's own override if set,
+    /// otherwise the contract-wide default, otherwise `None` (no fee).
+    pub fn get_effective_fee_bps(env: Env, link_id: String) -> Result<Option<i128>, crate::Error> {
+        let link = Self::get_link_internal(&env, &link_id)?;
+        if link.fee_bps.is_some() {
+            return Ok(link.fee_bps);
+        }
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::GlobalFeeBps)
+            .unwrap_or(None))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_link(
         env: Env,
@@ -232,6 +322,7 @@ impl PaymentLinkManager {
             metadata,
             fiat,
             shareable_url,
+            fee_bps: None,
         };
 
         env.storage()
@@ -377,13 +468,45 @@ impl PaymentLinkManager {
             );
         }
 
+        // Issue #663: Resolve the effective fee (link override, else the
+        // contract-wide default, else no fee) and compute the fee amount.
+        let effective_fee_bps: Option<i128> = if link.fee_bps.is_some() {
+            link.fee_bps
+        } else {
+            env.storage()
+                .persistent()
+                .get(&LinkDataKey::GlobalFeeBps)
+                .unwrap_or(None)
+        };
+        let fee_amount: i128 = match effective_fee_bps {
+            Some(bps) if bps > 0 => resolved_amount.saturating_mul(bps) / 10_000,
+            _ => 0,
+        };
+
         // Issue #111: If direct_transfer is true, transfer funds directly to the merchant,
-        // bypassing the escrow/platform wallet.
+        // bypassing the escrow/platform wallet. Issue #663: the configured link fee (if
+        // any) is deducted here and routed to the link admin.
         if link.direct_transfer {
             let token_address = usdc_token.clone().ok_or(crate::Error::Unauthorized)?;
             let token_client = token::TokenClient::new(&env, &token_address);
             let merchant_muxed: MuxedAddress = (&link.merchant_id).into();
-            token_client.transfer(&payer, &merchant_muxed, &resolved_amount);
+            let net_amount = resolved_amount.saturating_sub(fee_amount);
+            token_client.transfer(&payer, &merchant_muxed, &net_amount);
+
+            if fee_amount > 0 {
+                if let Some(fee_admin) = env
+                    .storage()
+                    .persistent()
+                    .get::<LinkDataKey, Address>(&LinkDataKey::LinkAdmin)
+                {
+                    token_client.transfer(&payer, &fee_admin, &fee_amount);
+                }
+
+                env.events().publish(
+                    (Symbol::new(&env, "LINK"), Symbol::new(&env, "FEE_APPLIED")),
+                    (link_id.clone(), fee_amount, effective_fee_bps),
+                );
+            }
         }
         // Emit LINK/DIRECT_TRANSFER_USED event for audit trail when direct transfer is used
         if link.direct_transfer {
@@ -428,6 +551,8 @@ impl PaymentLinkManager {
             fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
+            // Issue #668: trace this payment back to the link that created it.
+            payment_link_id: Some(link_id.clone()),
         };
 
         // Store the payment charge

@@ -22,6 +22,10 @@
     "generate": "bash ../scripts/generate-sdk.sh",
     "generate:build": "npm run generate && npm run build",
     "test": "node --input-type=module -e \"import { FluxapayClient, RefundManagerClient, MerchantRegistryClient } from './dist/index.js'; if (typeof FluxapayClient !== 'function' || typeof RefundManagerClient !== 'function' || typeof MerchantRegistryClient !== 'function') { throw new Error('Missing SDK exports'); }\"",
+    "test:integration": "tsx --test test/integration/*.test.ts",
+    "test": "npm run test:exports && npm run test:unit",
+    "test:exports": "node --input-type=module -e \"import { FluxapayClient, RefundManagerClient, MerchantRegistryClient } from './dist/index.js'; if (typeof FluxapayClient !== 'function' || typeof RefundManagerClient !== 'function' || typeof MerchantRegistryClient !== 'function') { throw new Error('Missing SDK exports'); }\"",
+    "test:unit": "tsx --test test/error-mapping.test.ts",
     "check-error-map-sync": "tsx ../scripts/check-error-map-sync.ts",
     "prepublishOnly": "npm run build"
   },

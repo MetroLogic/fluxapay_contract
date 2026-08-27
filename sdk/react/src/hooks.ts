@@ -4,9 +4,15 @@ import type {
   Merchant,
   Refund,
   CreatePaymentParams,
+  Invoice,
+  LineItem,
+  InvoiceStatus,
+  CreateInvoiceParams,
 } from "@fluxapay/sdk";
 import { useFluxapayClient } from "./FluxapayProvider.js";
 import { useAsync, type AsyncState } from "./useAsync.js";
+
+export type { Invoice, LineItem, InvoiceStatus };
 
 /** Fetch a single payment by id. Re-fetches whenever `paymentId` changes. */
 export function usePayment(paymentId: string | undefined): AsyncState<PaymentCharge> {
@@ -110,4 +116,94 @@ export function useCreatePayment(): UseCreatePaymentResult {
   );
 
   return { mutate, data, status, loading: status === "loading", error };
+}
+
+/** Fetch a single invoice by id. Re-fetches whenever `invoiceId` changes. */
+export function useInvoice(invoiceId: string | undefined): AsyncState<Invoice> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getInvoice(invoiceId as string),
+    [invoiceId],
+    !!invoiceId,
+  );
+}
+
+/** Fetch the list of invoice ids for a merchant. Re-fetches whenever `merchantId` changes. */
+export function useMerchantInvoices(merchantId: string | undefined): AsyncState<string[]> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getMerchantInvoices(merchantId as string),
+    [merchantId],
+    !!merchantId,
+  );
+}
+
+export interface UseCreateInvoiceResult {
+  mutate: (params: CreateInvoiceParams) => Promise<Invoice>;
+  data: Invoice | undefined;
+  status: MutationStatus;
+  loading: boolean;
+  error: Error | undefined;
+}
+
+/** Create an invoice. Returns a `mutate` function and the current mutation status. */
+export function useCreateInvoice(): UseCreateInvoiceResult {
+  const client = useFluxapayClient();
+  const [data, setData] = React.useState<Invoice | undefined>(undefined);
+  const [status, setStatus] = React.useState<MutationStatus>("idle");
+  const [error, setError] = React.useState<Error | undefined>(undefined);
+
+  const mutate = React.useCallback(
+    async (params: CreateInvoiceParams) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        const invoice = await client.createInvoice(params);
+        setData(invoice);
+        setStatus("success");
+        return invoice;
+      } catch (err) {
+        const normalized = err instanceof Error ? err : new Error(String(err));
+        setError(normalized);
+        setStatus("error");
+        throw normalized;
+      }
+    },
+    [client],
+  );
+
+  return { mutate, data, status, loading: status === "loading", error };
+}
+
+export interface UseMarkInvoicePaidResult {
+  mutate: (invoiceId: string) => Promise<void>;
+  status: MutationStatus;
+  loading: boolean;
+  error: Error | undefined;
+}
+
+/** Mark an invoice as paid. Returns a `mutate` function and the current mutation status. */
+export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
+  const client = useFluxapayClient();
+  const [status, setStatus] = React.useState<MutationStatus>("idle");
+  const [error, setError] = React.useState<Error | undefined>(undefined);
+
+  const mutate = React.useCallback(
+    async (invoiceId: string) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        await client.markInvoicePaid(invoiceId);
+        setStatus("success");
+      } catch (err) {
+        const normalized = err instanceof Error ? err : new Error(String(err));
+        setError(normalized);
+        setStatus("error");
+        throw normalized;
+      }
+    },
+    [client],
+  );
+
+  return { mutate, status, loading: status === "loading", error };
 }
