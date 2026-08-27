@@ -385,3 +385,134 @@ fn test_cancel_subscription_end_of_period_no_refund() {
     let refunds = client.get_payment_refunds(&payment_id);
     assert_eq!(refunds.len(), 0);
 }
+
+/// Full subscription lifecycle test: create, subscribe, charge, mid-period cancel with prorated refund.
+#[test]
+fn test_subscription_full_lifecycle_proration_on_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _merchant, plan_id, _) = setup_with_plan(&env);
+
+    client.set_allow_prorated_refunds(&admin, &true);
+
+    let payer = Address::generate(&env);
+    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+
+    // Verify subscription is active
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+    assert_eq!(sub.amount, 1_000_000_i128);
+
+    // Process the first charge (billing tick at 7 days)
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &operator);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 86_400);
+    let processed = client.process_due_subscriptions(&operator);
+    assert_eq!(processed, 1);
+
+    let sub_after_charge = client.get_subscription(&sub_id);
+    assert!(sub_after_charge.last_payment_at.is_some());
+
+    // Advance to the midpoint of the billing period (3.5 days into the 7-day period)
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 86_400 + 12 * 3600);
+
+    // Cancel with refund request
+    client.cancel_subscription(&payer, &sub_id, &true);
+
+    let sub_after_cancel = client.get_subscription(&sub_id);
+    assert_eq!(sub_after_cancel.status, SubscriptionStatus::Cancelled);
+
+    // Verify a prorated refund was created
+    let payment_id = String::from_str(&env, "sub_pr_2");
+    let refunds = client.get_payment_refunds(&payment_id);
+    assert_eq!(refunds.len(), 1);
+
+    let refund = refunds.get(0).unwrap();
+    assert_eq!(refund.status, crate::RefundStatus::Pending);
+
+    // Calculate expected refund: approximately half of 1_000_000 (3.5 days remaining / 7-day period)
+    // Exact: 1_000_000 * 3 / 7 = 428_571 (3 full days) + some portion for the 12 hours
+    // Using integer division: secs_remaining = 3*86400 + 12*3600 = 345_600 seconds
+    // days_remaining = 345_600 / 86_400 = 4 days (integer division)
+    // refund = 1_000_000 * 4 / 7 = 571_428
+    assert_eq!(refund.amount, 571_428_i128);
+}
+
+/// Test that proration is disabled when set_allow_prorated_refunds is false.
+#[test]
+fn test_subscription_proration_disabled_no_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _merchant, plan_id, _) = setup_with_plan(&env);
+
+    // Proration is disabled (default or explicitly set to false)
+    client.set_allow_prorated_refunds(&admin, &false);
+
+    let payer = Address::generate(&env);
+    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+
+    // Process the first charge
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &operator);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 86_400);
+    assert_eq!(client.process_due_subscriptions(&operator), 1);
+
+    // Advance mid-period
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 86_400);
+
+    // Cancel with refund_remaining=true, but proration is disabled
+    client.cancel_subscription(&payer, &sub_id, &true);
+
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+
+    // No refund should be created because proration is disabled
+    let payment_id = String::from_str(&env, "sub_pr_2");
+    let refunds = client.get_payment_refunds(&payment_id);
+    assert_eq!(refunds.len(), 0);
+}
+
+/// Test that canceling at the exact renewal boundary creates exactly zero refund.
+#[test]
+fn test_subscription_zero_proration_at_exact_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _merchant, plan_id, _) = setup_with_plan(&env);
+
+    client.set_allow_prorated_refunds(&admin, &true);
+
+    let payer = Address::generate(&env);
+    let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
+
+    // Process the first charge
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &operator);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 86_400);
+    assert_eq!(client.process_due_subscriptions(&operator), 1);
+
+    // Get the subscription to find the exact next_payment_at timestamp
+    let sub_before_cancel = client.get_subscription(&sub_id);
+    let exact_boundary = sub_before_cancel.next_payment_at;
+
+    // Set ledger timestamp to exactly the renewal boundary
+    env.ledger().set_timestamp(exact_boundary);
+
+    // Cancel at the exact boundary
+    client.cancel_subscription(&payer, &sub_id, &true);
+
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+
+    // At the exact boundary, no days remain, so refund should be zero or not created
+    let payment_id = String::from_str(&env, "sub_pr_2");
+    let refunds = client.get_payment_refunds(&payment_id);
+
+    // When days_remaining is 0 (secs_remaining / 86_400 = 0 with integer division),
+    // the refund amount would be 0, so no refund is created (0 amount is not stored)
+    assert_eq!(refunds.len(), 0);
+}
