@@ -5593,3 +5593,110 @@ fn test_admin_reactivate_max_retries_cancelled_subscription() {
     assert_eq!(reactivated.retry_count, 0u32);
 }
 
+#[test]
+fn test_get_merchant_payments_full_with_token_filter() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let usdc_token = Address::generate(&env);
+    let eurc_token = Address::generate(&env);
+
+    // Create 3 USDC payments
+    for i in 0..3 {
+        let payment_id = String::from_str(&env, &format!("usdc_payment_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.token_address = Some(usdc_token.clone());
+        client.create_payment(&args);
+    }
+
+    // Create 2 EURC payments
+    for i in 0..2 {
+        let payment_id = String::from_str(&env, &format!("eurc_payment_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 50_000_000i128);
+        args.token_address = Some(eurc_token.clone());
+        client.create_payment(&args);
+    }
+
+    // Test filtering by EURC token - should return exactly 2 results
+    let eurc_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &Some(eurc_token.clone()));
+    assert_eq!(eurc_payments.len(), 2);
+
+    // Test filtering by USDC token - should return exactly 3 results
+    let usdc_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &Some(usdc_token.clone()));
+    assert_eq!(usdc_payments.len(), 3);
+
+    // Test with no filter - should return all 5 payments
+    let all_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &None);
+    assert_eq!(all_payments.len(), 5);
+}
+
+#[test]
+fn test_get_merchant_payments_full_token_filter_backward_compatible() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    // Create 3 payments with no token_address (None)
+    for i in 0..3 {
+        let payment_id = String::from_str(&env, &format!("payment_{}", i));
+        let args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        client.create_payment(&args);
+    }
+
+    // Test with no filter - should return all 3 payments
+    let all_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &None);
+    assert_eq!(all_payments.len(), 3);
+
+    // Test with a filter - should return 0 since all payments have token_address = None
+    let specific_token = Address::generate(&env);
+    let filtered_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &Some(specific_token));
+    assert_eq!(filtered_payments.len(), 0);
+}
+
+#[test]
+fn test_get_merchant_payments_full_token_filter_with_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token_a = Address::generate(&env);
+
+    // Create 8 payments with token_a
+    for i in 0..8 {
+        let payment_id = String::from_str(&env, &format!("token_a_payment_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.token_address = Some(token_a.clone());
+        client.create_payment(&args);
+    }
+
+    // First page with limit 3
+    let page1 = client.get_merchant_payments_full(&merchant_id, &0, &3, &Some(token_a.clone()));
+    assert_eq!(page1.len(), 3);
+
+    // Second page with limit 3
+    let page2 = client.get_merchant_payments_full(&merchant_id, &3, &3, &Some(token_a.clone()));
+    assert_eq!(page2.len(), 3);
+
+    // Third page with limit 3
+    let page3 = client.get_merchant_payments_full(&merchant_id, &6, &3, &Some(token_a.clone()));
+    assert_eq!(page3.len(), 2);
+
+    // All different IDs
+    let all_ids: Vec<String> = page1.iter()
+        .chain(page2.iter())
+        .chain(page3.iter())
+        .map(|p| p.payment_id.clone())
+        .collect();
+    assert_eq!(all_ids.len(), 8);
+}
+
