@@ -14,6 +14,8 @@ This document records the deployed contract addresses, network configurations, a
 - [On-Chain Verification](#-on-chain-verification)
 - [Emergency Procedures](#-emergency-procedures)
 
+> **Mainnet deployment?** See [docs/mainnet-deployment-checklist.md](docs/mainnet-deployment-checklist.md) for the full production readiness checklist.
+
 ## 🚀 Contract Registry
 
 | Contract Name    | Network | Contract ID              | Deploy Date  | Deployer Address     |
