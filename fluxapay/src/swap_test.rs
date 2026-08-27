@@ -5,7 +5,7 @@ use crate::{
     ZERO_CONTRACT_STRKEY,
 };
 use soroban_sdk::{
-    testutils::Address as _, testutils::Events as _, token, vec, Address, Env, String, Symbol,
+    testutils::Address as _, testutils::Events, token, vec, Address, Env, String, Symbol,
     Vec,
 };
 
@@ -59,8 +59,7 @@ fn register_verified_merchant(
         &String::from_str(env, "USD"),
         &None,
         &None,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(admin, &merchant);
     payment_client.grant_role(admin, &Symbol::new(env, "MERCHANT"), &merchant);
     merchant
@@ -395,4 +394,11 @@ fn test_swap_and_pay_multi_route_aggregation() {
     let payment = payment_client.swap_and_pay_multi_route(&args, &routes, &9_900);
     assert_eq!(payment.payment_id, String::from_str(&env, "MULTI_ROUTE_PAYMENT"));
     assert_eq!(payment.amount, 9_900);
+}
+
+#[test]
+fn test_dummy_events() {
+    let env = Env::default();
+    let ev = env.events().all();
+    ev.dummy_method();
 }

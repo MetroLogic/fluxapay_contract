@@ -162,7 +162,6 @@ fn test_verify_merchant_called_by_non_admin() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &None,
-    );
+        &MaybeFeeConfig::None);
     merchant_client.verify_merchant(&non_admin, &merchant);
 }

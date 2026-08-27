@@ -1276,7 +1276,7 @@ fn test_batch_expire_links_sweep() {
 
     let mut link_ids = soroban_sdk::vec![&env];
     for i in 0..3 {
-        let lid = String::from_str(&env, &format!("batch_{}", i));
+        let lid = crate::utils::format_id(&env, "batch_", i as u64);
         client.create_link(
             &merchant,
             &lid,
@@ -1304,7 +1304,7 @@ fn test_batch_expire_links_max_20() {
 
     let mut oversized = soroban_sdk::vec![&env];
     for i in 0..21 {
-        oversized.push_back(String::from_str(&env, &format!("ovr_{}", i)));
+        oversized.push_back(crate::utils::format_id(&env, "ovr_", i as u64));
     }
 
     let result = client.try_batch_expire_links(&oversized);

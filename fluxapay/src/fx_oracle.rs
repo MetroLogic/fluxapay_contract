@@ -35,7 +35,7 @@ pub enum FXOracleError {
     /// Batch rate update exceeds the maximum of 20 pairs.
     BatchTooLarge = 4,
     /// Issue #478: Rate deviation exceeds configured limit
-    RateDeviationExceeded = 4,
+    RateDeviationExceeded = 5,
 }
 
 #[contracttype]
@@ -94,7 +94,7 @@ impl FXOracle {
             return Err(FXOracleError::Unauthorized);
         }
 
-        Self::store_rate(&env, pair.clone(), rate, decimals);
+        Self::store_rate(&env, pair.clone(), rate, decimals)?;
 
         // Emit event: (RATE, UPDATED), pair
         env.events().publish(
@@ -125,7 +125,7 @@ impl FXOracle {
 
         let count = rates.len();
         for (pair, rate, decimals) in rates.iter() {
-            Self::store_rate(&env, pair, rate, decimals);
+            Self::store_rate(&env, pair, rate, decimals)?;
         }
 
         env.events().publish(
@@ -136,7 +136,7 @@ impl FXOracle {
         Ok(count)
     }
 
-    fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) {
+    fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
         // Issue #478: Check rate deviation against configured limit
         let max_deviation_bps = env
             .storage()
@@ -186,6 +186,7 @@ impl FXOracle {
         env.storage()
             .persistent()
             .set(&OracleDataKey::Rate(pair), &rate_data);
+        Ok(())
     }
 
     pub fn get_rate(env: Env, pair: Symbol) -> Result<RateData, FXOracleError> {

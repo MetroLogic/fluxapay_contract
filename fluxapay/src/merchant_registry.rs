@@ -175,7 +175,8 @@ pub struct Merchant {
     /// Issue #481: Total dispute count for this merchant (incremented on dispute creation).
     pub dispute_count: u32,
     /// Issue #481: Count of disputes resolved against this merchant (incremented on unfavorable resolution).
-    pub resolved_against_merchant_count: u32,
+    pub resolved_against_count: u32,
+    pub payment_tolerance: Option<i128>,
 }
 
 #[contracttype]
@@ -215,6 +216,7 @@ pub enum MerchantDataKey {
     /// Issue #667: Arbitrary on-chain contract metadata (description, deployment
     /// notes, audit commit hash, etc.), keyed by an admin-chosen Symbol.
     ContractMetadata(Symbol),
+    GlobalPaymentTolerance,
 }
 
 /// ~3 years at 5s/ledger — mirrors `LONG_LIVE_TTL` in lib.rs (issue #667).
@@ -422,7 +424,7 @@ impl MerchantRegistry {
         settlement_currency: String,
         payout_address: Option<Address>,
         bank_account: Option<String>,
-        fee_config: Option<FeeConfig>,
+        fee_config: MaybeFeeConfig,
     ) -> Result<(), MerchantError> {
         merchant_id.require_auth();
 
@@ -449,7 +451,7 @@ impl MerchantRegistry {
             suspension_expires_at: None,
             oracle_signature: None,
             last_payout_change_at: None,
-            fee_config: MaybeFeeConfig::from(fee_config),
+            fee_config,
             metadata_hash: None,
             currency_payout_addresses: map![&env],
             payout_whitelist: vec![&env],
@@ -459,7 +461,8 @@ impl MerchantRegistry {
             last_settlement_at: None,
             whitelist_mode: false,
             dispute_count: 0,
-            resolved_against_merchant_count: 0,
+            resolved_against_count: 0,
+            payment_tolerance: None,
         };
 
         env.storage()
@@ -480,7 +483,7 @@ impl MerchantRegistry {
         active: Option<bool>,
         payout_address: Option<Address>,
         bank_account: Option<String>,
-        fee_config: Option<FeeConfig>,
+        fee_config: Option<MaybeFeeConfig>,
     ) -> Result<(), MerchantError> {
         merchant_id.require_auth();
 
@@ -552,7 +555,7 @@ impl MerchantRegistry {
             merchant.bank_account = Some(acct);
         }
         if let Some(config) = fee_config {
-            merchant.fee_config = MaybeFeeConfig::Some(config);
+            merchant.fee_config = config;
         }
 
         env.storage()
@@ -2052,17 +2055,17 @@ impl MerchantRegistry {
 
     /// Issue #481: Increment the resolved-against count for a merchant and check auto-suspension.
     /// Returns the new resolved_against_merchant_count.
-    pub fn increment_resolved_against_merchant_count(
+    pub fn increment_resolved_against_count(
         env: Env,
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
-        merchant.resolved_against_merchant_count = merchant.resolved_against_merchant_count.saturating_add(1);
+        merchant.resolved_against_count = merchant.resolved_against_count.saturating_add(1);
         
         let threshold = Self::get_dispute_threshold(env.clone());
         
         // Auto-suspend if threshold reached
-        if merchant.resolved_against_merchant_count >= threshold && merchant.suspension_reason.is_none() {
+        if merchant.resolved_against_count >= threshold && merchant.suspension_reason.is_none() {
             merchant.active = false;
             merchant.suspension_reason = Some(String::from_str(&env, "Auto-suspended due to dispute threshold"));
             merchant.suspended_at = Some(env.ledger().timestamp());
@@ -2074,7 +2077,7 @@ impl MerchantRegistry {
                 ),
                 (
                     merchant_id.clone(),
-                    merchant.resolved_against_merchant_count,
+                    merchant.resolved_against_count,
                     threshold,
                 ),
             );
@@ -2084,7 +2087,7 @@ impl MerchantRegistry {
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id), &merchant);
 
-        Ok(merchant.resolved_against_merchant_count)
+        Ok(merchant.resolved_against_count)
     }
 
     /// Issue #481: Appeal a merchant suspension. Creates a review record requiring operator approval.
