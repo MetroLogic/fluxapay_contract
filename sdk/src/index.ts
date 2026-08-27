@@ -1126,6 +1126,51 @@ export class FluxapayClient {
     );
   }
 
+  async getPaymentStatusHistory(paymentId: string) {
+    return withMappedContractError(() =>
+      (this.contract as any).get_payment_status_history({ payment_id: paymentId }),
+    );
+  }
+
+  async generateReconciliationReportPaginated(params: {
+    merchantId: string;
+    fromTs: bigint;
+    toTs: bigint;
+    offset: number;
+    limit: number;
+  }) {
+    return withMappedContractError(() =>
+      (this.contract as any).generate_reconciliation_report_paginated({
+        merchant_id: params.merchantId,
+        from_ts: params.fromTs,
+        to_ts: params.toTs,
+        offset: params.offset,
+        limit: params.limit,
+      }),
+    );
+  }
+
+  async getAllReconciliationPages(params: {
+    merchantId: string;
+    fromTs: bigint;
+    toTs: bigint;
+    pageSize?: number;
+  }) {
+    const items: unknown[] = [];
+    let offset = 0;
+    const limit = params.pageSize ?? 100;
+    for (;;) {
+      const page = await this.generateReconciliationReportPaginated({
+        ...params,
+        offset,
+        limit,
+      }) as any;
+      items.push(...page.items);
+      if (!page.has_more) return { ...page, items };
+      offset += limit;
+    }
+  }
+
   /**
    * Issue #489: Get payment by metadata_hash for order reconciliation.
    * Performs reverse lookup using the merchant-supplied metadata hash.

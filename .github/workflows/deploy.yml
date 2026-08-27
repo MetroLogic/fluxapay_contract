@@ -127,7 +127,7 @@ jobs:
           STELLAR_NETWORK: ${{ inputs.stellar_network }}
           STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
         run: |
-          bash scripts/deploy_testnet.sh
+          bash scripts/deploy-testnet.sh
           # Expose contract IDs to subsequent steps
           source .env.testnet
           echo "payment_processor_id=$PAYMENT_PROCESSOR_ID" >> $GITHUB_OUTPUT

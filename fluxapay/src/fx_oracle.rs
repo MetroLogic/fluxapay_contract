@@ -26,6 +26,14 @@ pub struct RateData {
     pub updated_sequence: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmission {
+    pub operator: Address,
+    pub rate: i128,
+    pub decimals: u32,
+}
+
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FXOracleError {
@@ -44,6 +52,8 @@ pub enum OracleDataKey {
     StalenessThreshold,
     /// Issue #478: Maximum allowed rate deviation per pair in basis points
     MaxDeviation(Symbol),
+    Quorum,
+    Submissions(Symbol),
 }
 
 #[cfg_attr(
@@ -94,7 +104,23 @@ impl FXOracle {
             return Err(FXOracleError::Unauthorized);
         }
 
-        Self::store_rate(&env, pair.clone(), rate, decimals);
+        let quorum = env.storage().instance().get::<OracleDataKey, u32>(&OracleDataKey::Quorum).unwrap_or(1);
+        if quorum > 1 {
+            let key = OracleDataKey::Submissions(pair.clone());
+            let mut submissions: Vec<OracleSubmission> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(&env));
+            submissions.push_back(OracleSubmission { operator: operator.clone(), rate, decimals });
+            let mut matches = 0u32;
+            for submission in submissions.iter() {
+                if submission.rate == rate && submission.decimals == decimals { matches += 1; }
+            }
+            if matches < quorum { env.storage().persistent().set(&key, &submissions); return Ok(()); }
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (Symbol::new(&env, "ORACLE"), Symbol::new(&env, "RATE_QUORUM_REACHED")),
+                (pair.clone(), rate, quorum),
+            );
+        }
+        Self::store_rate(&env, pair.clone(), rate, decimals)?;
 
         // Emit event: (RATE, UPDATED), pair
         env.events().publish(
@@ -103,6 +129,19 @@ impl FXOracle {
         );
 
         Ok(())
+    }
+
+    pub fn set_oracle_quorum(env: Env, admin: Address, quorum: u32) -> Result<(), FXOracleError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) || quorum == 0 {
+            return Err(FXOracleError::Unauthorized);
+        }
+        env.storage().instance().set(&OracleDataKey::Quorum, &quorum);
+        Ok(())
+    }
+
+    pub fn get_oracle_submissions(env: Env, pair: Symbol) -> Vec<OracleSubmission> {
+        env.storage().persistent().get(&OracleDataKey::Submissions(pair)).unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Atomically update up to 20 currency pairs. Requires the ORACLE role.
@@ -125,7 +164,7 @@ impl FXOracle {
 
         let count = rates.len();
         for (pair, rate, decimals) in rates.iter() {
-            Self::store_rate(&env, pair, rate, decimals);
+            Self::store_rate(&env, pair, rate, decimals)?;
         }
 
         env.events().publish(
@@ -136,7 +175,7 @@ impl FXOracle {
         Ok(count)
     }
 
-    fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) {
+    fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
         // Issue #478: Check rate deviation against configured limit
         let max_deviation_bps = env
             .storage()
@@ -186,6 +225,7 @@ impl FXOracle {
         env.storage()
             .persistent()
             .set(&OracleDataKey::Rate(pair), &rate_data);
+        Ok(())
     }
 
     pub fn get_rate(env: Env, pair: Symbol) -> Result<RateData, FXOracleError> {
