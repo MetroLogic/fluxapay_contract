@@ -37,7 +37,13 @@ import {
 export { FLUXAPAY_CONTRACT_IDS, UNSET_CONTRACT_ID } from "./network-profiles.js";
 export type { FluxapayContractIds } from "./network-profiles.js";
 import { FxOracleClient } from "./contracts/fx-oracle.js";
-import { MerchantRegistryClient } from "./contracts/merchant-registry.js";
+import {
+  MerchantRegistryClient,
+  type MerchantRegistryConfig,
+  type AddCurrencyPayoutParams,
+  type CurrencyPayout,
+  type BankAccount,
+} from "./contracts/merchant-registry.js";
 import {
   PaymentLinkManagerClient,
   type PaymentLinkManagerConfig,
@@ -1241,7 +1247,13 @@ export {
 };
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
-export { MerchantRegistryClient, type MerchantRegistryConfig } from "./contracts/merchant-registry.js";
+export {
+  MerchantRegistryClient,
+  type MerchantRegistryConfig,
+  type AddCurrencyPayoutParams,
+  type CurrencyPayout,
+  type BankAccount,
+} from "./contracts/merchant-registry.js";
 export {
   FxOracleClient,
   FxOracleError,

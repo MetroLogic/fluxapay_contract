@@ -114,6 +114,8 @@ fn create_payment_args(
         client_token: None,
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     }
 }
 
@@ -248,6 +250,27 @@ fn test_create_payments_batch_is_atomic_on_validation_error() {
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
     assert!(!env.storage().persistent().has(&DataKey::Payment(payment_id_1)));
     assert!(!env.storage().persistent().has(&DataKey::Payment(payment_id_2)));
+}
+
+/// Issue #682: Batch with duplicate payment_ids returns BatchContainsDuplicates.
+#[test]
+fn test_create_payments_batch_rejects_duplicate_payment_ids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let payment_id = String::from_str(&env, "dup_payment_id");
+    let batch = vec![
+        &env,
+        create_payment_args(&env, &payment_id, &merchant_id, 100i128),
+        create_payment_args(&env, &payment_id, &merchant_id, 200i128),
+    ];
+
+    let result = client.try_create_payments_batch(&batch);
+    assert_eq!(result, Err(Ok(Error::BatchContainsDuplicates)));
 }
 
 #[test]
@@ -533,6 +556,7 @@ fn test_verify_payment_success() {
         &transaction_hash,
         &payer_address,
         &amount,
+        &None,
     );
 
     assert_eq!(status, PaymentStatus::Confirmed);
@@ -2796,6 +2820,8 @@ fn test_create_payment_idempotency_retry_returns_same_payment() {
         client_token: client_token.clone(),
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let first = client.create_payment(&args);
@@ -2834,6 +2860,8 @@ fn test_create_payment_idempotency_different_payment_id_fails() {
         client_token: client_token.clone(),
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     // First call succeeds
@@ -2875,6 +2903,8 @@ fn test_create_payment_without_idempotency_token_fails_on_retry() {
         client_token: None,
         metadata_hash: None, metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     client.create_payment(&args);
@@ -4043,7 +4073,7 @@ fn test_get_merchant_payments_full_limit_capped_at_50() {
 }
 
 #[test]
-fn test_get_merchant_payment_count_for_dashboard() {
+fn test_get_merchant_payment_count() {
     let env = Env::default();
     env.mock_all_auths();
     let (admin, client) = setup_payment_processor(&env);
@@ -4955,7 +4985,7 @@ fn test_merchant_payment_count_accurate_after_creates() {
     client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
     // Initially count should be 0
-    let mut count = client.get_merchant_payment_count_for_dashboard(&merchant);
+    let mut count = client.get_merchant_payment_count(&merchant);
     assert_eq!(count, 0u32, "Initial count should be 0");
 
     let _ = client.create_payment(&CreatePaymentArgs {
@@ -5007,6 +5037,8 @@ fn test_create_payment_future_expiry_accepted() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let payment = client.create_payment(&args);
@@ -5042,6 +5074,8 @@ fn test_create_payment_current_timestamp_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5078,6 +5112,8 @@ fn test_create_payment_past_expiry_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5111,6 +5147,8 @@ fn test_create_payment_duration_min_bound_enforced() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5144,6 +5182,8 @@ fn test_create_payment_duration_max_bound_enforced() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5179,6 +5219,8 @@ fn test_create_payment_valid_duration_within_bounds() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let payment = client.create_payment(&args);
@@ -5251,6 +5293,8 @@ fn test_create_payment_zero_amount_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5393,6 +5437,8 @@ fn test_create_payment_negative_amount_rejected() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let result = client.try_create_payment(&args);
@@ -5425,6 +5471,8 @@ fn test_create_payment_minimum_positive_amount_accepted() {
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+    retry_of_payment_id: None,
+    payer_muxed_id: None,
     };
 
     let payment = client.create_payment(&args);
