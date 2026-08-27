@@ -10615,3 +10615,5 @@ mod swap_test;
 mod settlement_test;
 #[cfg(test)]
 mod muxed_payer_test;
+#[cfg(test)]
+mod router_allowlist_test;
