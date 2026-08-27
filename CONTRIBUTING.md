@@ -133,6 +133,35 @@ actionlint
 
 
 
+## 4a. Pre-commit Hooks
+
+We use [lefthook](https://github.com/evilmartians/lefthook) to run `cargo fmt`, `cargo clippy`, and TypeScript type checks before each commit.
+
+### Installation
+
+```bash
+# Install lefthook (macOS / Linux)
+brew install lefthook
+# or via Go:
+go install github.com/evilmartians/lefthook@latest
+
+# Install hooks for this repo
+lefthook install
+```
+
+### What the hooks do
+
+- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on staged `.rs` files
+- **pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+
+### Skipping hooks
+
+For emergency commits, you can bypass all hooks:
+
+```bash
+SKIP_HOOKS=1 git commit -m "emergency fix"
+```
+
 ## 5. Branch Naming Conventions
 
 | Prefix | Use case |

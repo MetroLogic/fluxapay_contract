@@ -761,10 +761,24 @@ fn test_vote_dispute_non_arbitrator_blocked() {
 const VALID_CID_V0: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 const VALID_CID_V1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
-fn valid_evidence(env: &Env) -> String {
-    String::from_str(env, "f000000000000000000000000000000000")
-}
+    let payment_id = String::from_str(&env, "payment_vote_non_arb");
+    let dispute_id = setup_confirmed_payment_for_dispute(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        &payment_id,
+        400i128,
+    );
 
+    let non_arbitrator = Address::generate(&env);
+    let result = refund_client.try_vote_dispute(
+        &non_arbitrator,
+        &dispute_id,
+        &ArbitratorVoteChoice::Approve,
+    );
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
 fn setup_confirmed_payment_for_dispute<'a>(
     env: &'a Env,
     payment_id_text: &str,
@@ -775,32 +789,29 @@ fn setup_confirmed_payment_for_dispute<'a>(
     let customer = Address::generate(env);
     let payment_id = String::from_str(env, payment_id_text);
 
-    payment_client.grant_role(&admin, &Symbol::new(env, "MERCHANT"), &merchant);
-    payment_client.create_payment(&create_payment_args(env, &payment_id, &merchant, amount));
+#[test]
+fn test_vote_dispute_non_arbitrator_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, refund_client) = setup_contracts(&env);
 
-    let oracle = Address::generate(env);
-    payment_client.grant_role(&admin, &Symbol::new(env, "ORACLE"), &oracle);
-    payment_client.verify_payment(
-        &oracle,
+    let payment_id = String::from_str(&env, "payment_vote_non_arb");
+    let dispute_id = setup_confirmed_payment_for_dispute(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
         &payment_id,
-        &BytesN::from_array(env, &[7u8; 32]),
-        &customer,
-        &amount,
+        400i128,
     );
 
-    let token_address = env.as_contract(&refund_client.address, || {
-        env.storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::UsdcToken)
-            .unwrap()
-    });
-    let token_admin_client = token::StellarAssetClient::new(env, &token_address);
-    token_admin_client.mint(&customer, &10_000_000);
-    token_admin_client.mint(&merchant, &10_000_000);
-
-    refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
-
-    (admin, merchant, customer, payment_client, refund_client, payment_id)
+    let non_arbitrator = Address::generate(&env);
+    let result = refund_client.try_vote_dispute(
+        &non_arbitrator,
+        &dispute_id,
+        &ArbitratorVoteChoice::Approve,
+    );
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]

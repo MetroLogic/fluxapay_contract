@@ -1,0 +1,26 @@
+pre-commit:
+  commands:
+    cargo-fmt:
+      glob: "*.rs"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping cargo fmt"
+          exit 0
+        fi
+        cd fluxapay && cargo fmt --check
+    cargo-clippy:
+      glob: "*.rs"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping cargo clippy"
+          exit 0
+        fi
+        cd fluxapay && cargo clippy --all-targets -- -D warnings
+    typescript-typecheck:
+      glob: "*.ts"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping TypeScript typecheck"
+          exit 0
+        fi
+        cd sdk && npx tsc --noEmit
