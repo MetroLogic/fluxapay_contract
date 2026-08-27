@@ -10617,3 +10617,5 @@ mod settlement_test;
 mod muxed_payer_test;
 #[cfg(test)]
 mod router_allowlist_test;
+#[cfg(test)]
+mod batch_payment_test;
