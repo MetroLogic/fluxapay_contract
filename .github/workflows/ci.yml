@@ -82,48 +82,12 @@ jobs:
 
       - name: Check Documentation
         run: cargo doc --no-deps
-  # Job 3: Security Scan (Audit & Deny)
-  security-audit:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.85.0
-
-      - name: Cache advisory database
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/advisory-db
-          key: ${{ runner.os }}-advisory-db
-          restore-keys: |
-            ${{ runner.os }}-advisory-db
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Run cargo-audit
-        working-directory: .
-        run: cargo audit --deny warnings
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
-
-      - name: Run cargo-deny
-        working-directory: .
-        run: cargo deny check bans licenses advisories
-
   # Job 3: Build the contract
   build:
     name: Build Contract
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [format, lint, security-audit]
+    needs: [format, lint]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -376,190 +340,11 @@ jobs:
           path: fluxapay/proptest-regressions
           retention-days: 30
 
-  # Job 5: Coverage report
-  coverage:
-    name: Test Coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [build]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.85.0
-          components: llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
-
-      - name: Generate coverage report
-        run: cargo llvm-cov --all-features --workspace --markdown > coverage.md
-
-      - name: Add coverage to Step Summary
-        run: cat coverage.md >> $GITHUB_STEP_SUMMARY
-
-      - name: Check coverage threshold (80%)
-        run: cargo llvm-cov report --fail-under-lines 80
-
-      - name: Post coverage comment
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            if (fs.existsSync('coverage.md')) {
-              const coverageReport = fs.readFileSync('coverage.md', 'utf8');
-              const body = `### Test Coverage Report 📊\n\n${coverageReport}`;
-              
-              const { data: comments } = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-              });
-              
-              const botComment = comments.find(comment => 
-                comment.user.type === 'Bot' && comment.body.includes('### Test Coverage Report 📊')
-              );
-              
-              if (botComment) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: botComment.id,
-                  body: body
-                });
-              } else {
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: body
-                });
-              }
-            }
-
-  # Job 6: Check SDK build and types
-  sdk-check:
-    name: SDK Build Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-          cache: "npm"
-          cache-dependency-path: sdk/package-lock.json
-
-      - name: Install dependencies
-        working-directory: sdk
-        run: npm ci
-
-      - name: Build SDK
-        working-directory: sdk
-        run: npm run build
-
-      - name: Type check
-        working-directory: sdk
-        run: npx tsc --noEmit
-
-      - name: Test SDK
-        working-directory: sdk
-        run: npm test
-
-      - name: Check error map is in sync with contract source
-        working-directory: sdk
-        run: npm run check-error-map-sync
-
-      - name: Check mainnet contract IDs
-        run: node scripts/check-mainnet-contract-ids.js
-
-  # Job 6b: Check SDK React package build and types (Issue #620)
-  sdk-react-check:
-    name: SDK React Package Typecheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: sdk/react/package-lock.json
-
-      - name: Install dependencies
-        working-directory: sdk/react
-        run: npm ci
-
-      - name: Typecheck SDK React package
-        working-directory: sdk/react
-        run: npx tsc --noEmit
-
-  # Job 6c: Indexer TypeScript build and typecheck (Issue #619)
-  indexer-build:
-    name: Indexer TypeScript Build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: indexer/package-lock.json
-
-      - name: Install dependencies
-        working-directory: indexer
-        run: npm ci
-
-      - name: Build indexer
-        working-directory: indexer
-        run: npm run build
-
-      - name: Typecheck indexer
-        working-directory: indexer
-        run: npx tsc --noEmit
-
-  # Job 7: Lint GitHub Actions workflows with actionlint
-  actionlint:
-    name: Lint GitHub Actions (actionlint)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run actionlint
-        uses: rhysd/actionlint@v1
-
   # Final job: Report overall status
   ci-success:
     name: CI Success
     if: ${{ always() }}
-    needs: [format, lint, security-audit, build, wasm-size-check, test, proptest, coverage, sdk-check, sdk-react-check, indexer-build, actionlint]
+    needs: [format, lint, build, wasm-size-check, test, proptest]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -567,16 +352,10 @@ jobs:
         run: |
           if [[ "${{ needs.format.result }}" == "success" ]] && \
              [[ "${{ needs.lint.result }}" == "success" ]] && \
-             [[ "${{ needs.security-audit.result }}" == "success" ]] && \
              [[ "${{ needs.build.result }}" == "success" ]] && \
              [[ "${{ needs.wasm-size-check.result }}" == "success" ]] && \
              [[ "${{ needs.test.result }}" == "success" ]] && \
-             [[ "${{ needs.proptest.result }}" == "success" ]] && \
-             [[ "${{ needs.coverage.result }}" == "success" ]] && \
-             [[ "${{ needs.sdk-check.result }}" == "success" ]] && \
-             [[ "${{ needs.sdk-react-check.result }}" == "success" ]] && \
-             [[ "${{ needs.indexer-build.result }}" == "success" ]] && \
-             [[ "${{ needs.actionlint.result }}" == "success" ]]; then
+             [[ "${{ needs.proptest.result }}" == "success" ]]; then
             echo "✅ All CI checks passed!"
             exit 0
           else

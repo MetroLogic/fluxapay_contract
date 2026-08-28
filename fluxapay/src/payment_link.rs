@@ -434,7 +434,7 @@ impl PaymentLinkManager {
             .persistent()
             .get(&merchant_links_key)
             .unwrap_or_else(|| vec![&env]);
-        merchant_links.push_back(link_id.clone());
+        merchant_links.push_back(args.link_id.clone());
         env.storage()
             .persistent()
             .set(&merchant_links_key, &merchant_links);

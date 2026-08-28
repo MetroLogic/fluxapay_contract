@@ -144,6 +144,31 @@ pub struct PaymentCharge {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentSummary {
+    pub payment_id: String,
+    pub amount: i128,
+    pub fee: i128,
+    pub refund_amount: i128,
+    pub status: PaymentStatus,
+    pub settled_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub merchant_id: Address,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub payments: Vec<PaymentSummary>,
+    pub total_gross: i128,
+    pub total_fees: i128,
+    pub total_refunds: i128,
+    pub total_net_settled: i128,
+    pub dispute_adjustments: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationPage {
     pub items: Vec<PaymentSummary>,
     pub total_confirmed: i128,
@@ -5772,7 +5797,7 @@ impl RefundManager {
             return Err(Error::Unauthorized);
         }
 
-        Self::enqueue_timelocked_action(&env, admin, TimelockActionKind::UpgradeContract(new_wasm_hash))
+        PaymentProcessor::enqueue_timelocked_action(&env, admin, TimelockActionKind::UpgradeContract(new_wasm_hash))
     }
 }
 
@@ -8478,7 +8503,6 @@ impl PaymentProcessor {
         })
     }
 
-    pub fn generate_reconciliation_page(
     pub fn reconciliation_report_page(
         env: Env,
         merchant_id: Address,

@@ -762,24 +762,6 @@ fn test_vote_dispute_non_arbitrator_blocked() {
 const VALID_CID_V0: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 const VALID_CID_V1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
-    let payment_id = String::from_str(&env, "payment_vote_non_arb");
-    let dispute_id = setup_confirmed_payment_for_dispute(
-        &env,
-        &admin,
-        &payment_client,
-        &refund_client,
-        &payment_id,
-        400i128,
-    );
-
-    let non_arbitrator = Address::generate(&env);
-    let result = refund_client.try_vote_dispute(
-        &non_arbitrator,
-        &dispute_id,
-        &ArbitratorVoteChoice::Approve,
-    );
-    assert_eq!(result, Err(Ok(Error::Unauthorized)));
-}
 fn setup_confirmed_payment_for_dispute<'a>(
     env: &'a Env,
     payment_id_text: &str,
