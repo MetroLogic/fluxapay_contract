@@ -1,5 +1,5 @@
 // Updated DexRouter with pre-execution checks, path validation, price impact guard, and fallback logic.
-use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Vec, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol, Vec};
 
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,7 +92,8 @@ impl DexRouter {
             return Err(DexRouterError::InsufficientLiquidity);
         }
 
-        let primary_result = Self::execute_swap(&env, amount_in, amount_out_min, &path, to.clone(), deadline);
+        let primary_result =
+            Self::execute_swap(&env, amount_in, amount_out_min, &path, to.clone(), deadline);
         if primary_result.is_ok() {
             return primary_result;
         }
@@ -105,6 +106,7 @@ impl DexRouter {
         Err(DexRouterError::SwapFailed)
     }
 
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
     fn execute_swap(
         env: &Env,
         amount_in: i128,
@@ -127,15 +129,16 @@ impl DexRouter {
         }
         Self::price_impact_guard(amount_in, final_output)?;
         env.events().publish(
-            (Symbol::new(&env, "SWAP"), Symbol::new(&env, "EXECUTED")),
+            (Symbol::new(env, "SWAP"), Symbol::new(env, "EXECUTED")),
             (amount_in, final_output, to, deadline),
         );
         Ok(amounts)
     }
 
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
     fn refund_caller(env: &Env, recipient: Address, amount: i128) -> Result<(), DexRouterError> {
         env.events().publish(
-            (Symbol::new(&env, "REFUND"), Symbol::new(&env, "CALLER")),
+            (Symbol::new(env, "REFUND"), Symbol::new(env, "CALLER")),
             (recipient, amount),
         );
         Ok(())

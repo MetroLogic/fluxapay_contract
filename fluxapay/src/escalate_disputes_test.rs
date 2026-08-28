@@ -1,6 +1,4 @@
-use crate::{
-    PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient,
-};
+use crate::{PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, Address, Env, String,
@@ -41,7 +39,8 @@ fn test_escalate_expired_disputes_past_deadline() {
         &soroban_sdk::vec![&env],
     );
 
-    env.ledger().with_timestamp(env.ledger().timestamp() + 10_000_000);
+    env.ledger()
+        .with_timestamp(env.ledger().timestamp() + 10_000_000);
 
     let dispute_ids = soroban_sdk::vec![&env, dispute_id];
     let count = payment_client.escalate_expired_disputes(&dispute_ids);
@@ -125,7 +124,8 @@ fn test_escalate_already_escalated_not_double_counted() {
         &soroban_sdk::vec![&env],
     );
 
-    env.ledger().with_timestamp(env.ledger().timestamp() + 10_000_000);
+    env.ledger()
+        .with_timestamp(env.ledger().timestamp() + 10_000_000);
 
     let dispute_ids = soroban_sdk::vec![&env, dispute_id.clone()];
     let count = payment_client.escalate_expired_disputes(&dispute_ids);
@@ -193,7 +193,8 @@ fn test_escalate_mixed_batch() {
         &soroban_sdk::vec![&env],
     );
 
-    env.ledger().with_timestamp(env.ledger().timestamp() + 10_000_000);
+    env.ledger()
+        .with_timestamp(env.ledger().timestamp() + 10_000_000);
 
     let dispute_ids_1 = soroban_sdk::vec![&env, dispute_id_1];
     let count_1 = payment_client.escalate_expired_disputes(&dispute_ids_1);
@@ -246,7 +247,8 @@ fn test_escalate_nonexistent_id_silently_skipped() {
         &soroban_sdk::vec![&env],
     );
 
-    env.ledger().with_timestamp(env.ledger().timestamp() + 10_000_000);
+    env.ledger()
+        .with_timestamp(env.ledger().timestamp() + 10_000_000);
 
     let dispute_ids = soroban_sdk::vec![&env, dispute_id_1, dispute_id_nonexistent];
     let count = payment_client.escalate_expired_disputes(&dispute_ids);

@@ -17,9 +17,9 @@
 //!   refund one payment before any request is approved or rejected.
 
 extern crate alloc;
-use alloc::format;
 use crate::format_id;
 use crate::utils::validate_id;
+use alloc::format;
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
@@ -60,7 +60,17 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
     (admin, client)
 }
 
-fn setup_subscription_env(env: &Env, mint_payer: bool) -> (Address, RefundManagerClient<'_>, Address, Address, Address, Address) {
+fn setup_subscription_env(
+    env: &Env,
+    mint_payer: bool,
+) -> (
+    Address,
+    RefundManagerClient<'_>,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
     let contract_id = env.register(RefundManager, ());
     let client = RefundManagerClient::new(env, &contract_id);
     let admin = Address::generate(env);

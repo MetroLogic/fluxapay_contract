@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+- **CI**: Added missing `contract-dex-router` feature to `fluxapay/Cargo.toml` — resolves `unexpected_cfg` Clippy error for the `#[cfg(feature = "contract-dex-router")]` attribute in `dex_router.rs`.
+- **CI**: Removed unused `String` import from `access_control.rs` and unused `Vec` import from `events.rs` — resolves `unused_imports` Clippy errors promoted to errors by `-D warnings`.
+- **CI**: Fixed empty line between doc comment and `fn expiry_bucket_for` in `lib.rs:6933` — resolves `clippy::empty_line_after_outer_attr` error.
+- **CI**: Added `#![allow(deprecated)]` and `#![allow(dead_code)]` to `access_control.rs`; per-function `#[allow(deprecated)]` on `register_session_key`, `revoke_session_key`, `execute_with_session` in `account_abstraction.rs`; `execute_swap` and `refund_caller` in `dex_router.rs`; and the four legacy-emit functions in `events.rs` — suppresses `env.events().publish` deprecation warnings pending migration to `#[contractevent]`.
+- **CI**: Applied `cargo clippy --fix` automatic corrections across `lib.rs`, `payment_link.rs`, `fx_oracle.rs`, `utils.rs`, and other files: needless borrows, redundant `u32` casts, `map_or`/`len == 0` simplifications, and `!RangeInclusive::contains` rewrites.
+- **CI**: Refactored manual loop patterns in `lib.rs` — `for i in 0..read_len` → iterator `.take()`, `loop { if let Some }` → `while let`, explicit counter loop → `.enumerate()`, manual slice copy → `copy_from_slice`, manual index loop → `.iter().take()`.
+- **CI**: Added `#[allow(dead_code)]` to the duplicate `get_refund_internal`, `get_payment_refunds_internal`, and `get_refund_cooldown_secs` private helpers in the `PaymentProcessor` impl block that shadow the canonical `RefundManager` versions.
+- **CI**: Added `#[allow(clippy::type_complexity)]` to `settle_payment` for the local `anchor_info` tuple type, and `#[allow(clippy::nonminimal_bool)]` applied via `cargo clippy --fix` to the refund authorisation guard.
+
 ### Added
 - **Issue #625**: `Error::InputTooLong = 67` — new error variant returned when user-supplied string fields exceed their maximum allowed lengths: `reason` in refund creation (≤ 256 chars), `evidence` in dispute creation (≤ 512 chars), `resolution_notes` in dispute rejection (≤ 512 chars). Constants `MAX_REASON_LEN`, `MAX_EVIDENCE_LEN`, and `MAX_NOTES_LEN` defined in `lib.rs`. Error code documented in `docs/error-codes.md`.
 - **Issue #619**: New CI job `indexer-build` in `.github/workflows/ci.yml` — installs dependencies, runs `npm run build`, and runs `npx tsc --noEmit` in `indexer/` to catch TypeScript errors before deployment. Added to the `ci-success` gate.

@@ -16,7 +16,7 @@
 //! env.events().publish_event(&EventStruct { ... });
 //! ```
 
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 
 // ============================================================================
 // Payment Events
@@ -274,9 +274,13 @@ pub struct DisputeBondForfeited {
 
 /// Issue #677: Emit a `DISPUTE/BOND_RETURNED` event when a dispute bond is
 /// released back to `recipient` after a dispute is resolved in their favor.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn emit_dispute_bond_returned(env: &Env, dispute_id: String, recipient: Address, amount: i128) {
     env.events().publish(
-        (Symbol::new(env, "DISPUTE"), Symbol::new(env, "BOND_RETURNED")),
+        (
+            Symbol::new(env, "DISPUTE"),
+            Symbol::new(env, "BOND_RETURNED"),
+        ),
         (dispute_id, recipient, amount),
     );
 }
@@ -284,6 +288,7 @@ pub fn emit_dispute_bond_returned(env: &Env, dispute_id: String, recipient: Addr
 /// Issue #677: Emit a `DISPUTE/BOND_FORFEITED` event when a dispute bond is
 /// forfeited to `recipient` (the treasury/collector) after a dispute is
 /// rejected.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn emit_dispute_bond_forfeited(
     env: &Env,
     dispute_id: String,
@@ -291,7 +296,10 @@ pub fn emit_dispute_bond_forfeited(
     amount: i128,
 ) {
     env.events().publish(
-        (Symbol::new(env, "DISPUTE"), Symbol::new(env, "BOND_FORFEITED")),
+        (
+            Symbol::new(env, "DISPUTE"),
+            Symbol::new(env, "BOND_FORFEITED"),
+        ),
         (dispute_id, recipient, amount),
     );
 }
@@ -337,6 +345,7 @@ pub struct SubscriptionPaymentCreated {
 /// Issue #635: Emit a `SUBSCRIPTION/PLAN_CREATED` event when a merchant creates
 /// a new subscription/billing plan. Topics: `(SUBSCRIPTION, PLAN_CREATED)`,
 /// data: `(plan_id, merchant_id, amount, interval_secs)`.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn emit_subscription_plan_created(
     env: &Env,
     plan_id: &String,
@@ -356,11 +365,8 @@ pub fn emit_subscription_plan_created(
 /// Issue #635: Emit a `SUBSCRIPTION/PLAN_DEACTIVATED` event when a merchant
 /// deactivates a subscription/billing plan. Topics:
 /// `(SUBSCRIPTION, PLAN_DEACTIVATED)`, data: `(plan_id, merchant_id)`.
-pub fn emit_subscription_plan_deactivated(
-    env: &Env,
-    plan_id: &String,
-    merchant_id: &Address,
-) {
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_plan_deactivated(env: &Env, plan_id: &String, merchant_id: &Address) {
     env.events().publish(
         (
             Symbol::new(env, "SUBSCRIPTION"),

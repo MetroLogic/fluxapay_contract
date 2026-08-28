@@ -118,19 +118,39 @@ impl FXOracle {
             return Err(FXOracleError::Unauthorized);
         }
 
-        let quorum = env.storage().instance().get::<OracleDataKey, u32>(&OracleDataKey::Quorum).unwrap_or(1);
+        let quorum = env
+            .storage()
+            .instance()
+            .get::<OracleDataKey, u32>(&OracleDataKey::Quorum)
+            .unwrap_or(1);
         if quorum > 1 {
             let key = OracleDataKey::Submissions(pair.clone());
-            let mut submissions: Vec<OracleSubmission> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(&env));
-            submissions.push_back(OracleSubmission { operator: operator.clone(), rate, decimals });
+            let mut submissions: Vec<OracleSubmission> = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or_else(|| Vec::new(&env));
+            submissions.push_back(OracleSubmission {
+                operator: operator.clone(),
+                rate,
+                decimals,
+            });
             let mut matches = 0u32;
             for submission in submissions.iter() {
-                if submission.rate == rate && submission.decimals == decimals { matches += 1; }
+                if submission.rate == rate && submission.decimals == decimals {
+                    matches += 1;
+                }
             }
-            if matches < quorum { env.storage().persistent().set(&key, &submissions); return Ok(()); }
+            if matches < quorum {
+                env.storage().persistent().set(&key, &submissions);
+                return Ok(());
+            }
             env.storage().persistent().remove(&key);
             env.events().publish(
-                (Symbol::new(&env, "ORACLE"), Symbol::new(&env, "RATE_QUORUM_REACHED")),
+                (
+                    Symbol::new(&env, "ORACLE"),
+                    Symbol::new(&env, "RATE_QUORUM_REACHED"),
+                ),
                 (pair.clone(), rate, quorum),
             );
         }
@@ -150,12 +170,17 @@ impl FXOracle {
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) || quorum == 0 {
             return Err(FXOracleError::Unauthorized);
         }
-        env.storage().instance().set(&OracleDataKey::Quorum, &quorum);
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::Quorum, &quorum);
         Ok(())
     }
 
     pub fn get_oracle_submissions(env: Env, pair: Symbol) -> Vec<OracleSubmission> {
-        env.storage().persistent().get(&OracleDataKey::Submissions(pair)).unwrap_or_else(|| Vec::new(&env))
+        env.storage()
+            .persistent()
+            .get(&OracleDataKey::Submissions(pair))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Atomically update up to 20 currency pairs. Requires the ORACLE role.
@@ -182,7 +207,10 @@ impl FXOracle {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "RATE"), Symbol::new(&env, "BATCH_UPDATED")),
+            (
+                Symbol::new(&env, "RATE"),
+                Symbol::new(&env, "BATCH_UPDATED"),
+            ),
             count,
         );
 
@@ -220,7 +248,10 @@ impl FXOracle {
                 // Emit warning if deviation is within 50% of limit
                 if deviation_bps * 2 >= max_deviation_bps {
                     env.events().publish(
-                        (Symbol::new(&env, "RATE"), Symbol::new(&env, "DEVIATION_WARNING")),
+                        (
+                            Symbol::new(env, "RATE"),
+                            Symbol::new(env, "DEVIATION_WARNING"),
+                        ),
                         (pair.clone(), last_rate, rate, deviation_bps),
                     );
                 }
@@ -369,8 +400,7 @@ impl FXOracle {
             Err(other) => return Err(other),
         }
 
-        let inverse_pair =
-            Self::invert_pair(&env, &pair).ok_or(FXOracleError::PairNotFound)?;
+        let inverse_pair = Self::invert_pair(&env, &pair).ok_or(FXOracleError::PairNotFound)?;
 
         let inverse = match Self::get_rate(env.clone(), inverse_pair) {
             Ok(data) => data,
@@ -513,7 +543,11 @@ impl FXOracle {
     ///
     /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event with the
     /// old and new version strings on success.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), FXOracleError> {
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), FXOracleError> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -562,13 +596,17 @@ impl FXOracle {
             return Err(FXOracleError::Unauthorized);
         }
 
-        env.storage()
-            .persistent()
-            .set(&OracleDataKey::MaxDeviation(pair.clone()), &max_deviation_bps);
+        env.storage().persistent().set(
+            &OracleDataKey::MaxDeviation(pair.clone()),
+            &max_deviation_bps,
+        );
 
         // Emit event: (RATE, DEVIATION_LIMIT_SET), pair
         env.events().publish(
-            (Symbol::new(&env, "RATE"), Symbol::new(&env, "DEVIATION_LIMIT_SET")),
+            (
+                Symbol::new(&env, "RATE"),
+                Symbol::new(&env, "DEVIATION_LIMIT_SET"),
+            ),
             (pair, max_deviation_bps),
         );
 

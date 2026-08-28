@@ -77,7 +77,8 @@ fn test_oracle_sanitization_rejects_deviating_dex_quote() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 
@@ -128,7 +129,8 @@ fn test_oracle_sanitization_accepts_aligned_dex_quote() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
 

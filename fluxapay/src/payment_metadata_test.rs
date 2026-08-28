@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use crate::{access_control::role_merchant, CreatePaymentArgs, PaymentProcessor, PaymentProcessorClient};
-use soroban_sdk::{
-    testutils::Address as _, testutils::Events, Address, Env, Map, String, Symbol,
+use crate::{
+    access_control::role_merchant, CreatePaymentArgs, PaymentProcessor, PaymentProcessorClient,
 };
+use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Env, Map, String, Symbol};
 
 fn setup(env: &Env) -> (Address, Address, PaymentProcessorClient<'_>) {
     let contract_id = env.register(PaymentProcessor, ());
@@ -94,8 +94,8 @@ fn test_create_payment_metadata_at_max_keys() {
     let (_, merchant, client) = setup(&env);
 
     let keys = [
-        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9",
-        "k10", "k11", "k12", "k13", "k14", "k15", "k16", "k17", "k18", "k19",
+        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13",
+        "k14", "k15", "k16", "k17", "k18", "k19",
     ];
     let mut meta: Map<String, String> = Map::new(&env);
     for k in keys.iter() {
@@ -115,8 +115,8 @@ fn test_create_payment_metadata_too_many_keys() {
     let (_, merchant, client) = setup(&env);
 
     let keys = [
-        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9",
-        "k10", "k11", "k12", "k13", "k14", "k15", "k16", "k17", "k18", "k19", "k20",
+        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13",
+        "k14", "k15", "k16", "k17", "k18", "k19", "k20",
     ];
     let mut meta: Map<String, String> = Map::new(&env);
     for k in keys.iter() {
@@ -212,7 +212,11 @@ fn test_payment_created_event_is_two_tuple() {
             payment_created_found = true;
         }
         // No 3-tuple topics should exist in our new events.
-        assert!(topics.len() <= 2, "All events must use at most a 2-tuple topic; got {} elements", topics.len());
+        assert!(
+            topics.len() <= 2,
+            "All events must use at most a 2-tuple topic; got {} elements",
+            topics.len()
+        );
     }
     assert!(payment_created_found, "Expected at least one 2-tuple event");
 }

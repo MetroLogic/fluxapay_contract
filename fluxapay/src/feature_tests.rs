@@ -24,7 +24,9 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
     let client = RefundManagerClient::new(env, &contract_id);
     let admin = Address::generate(env);
     let token_admin = Address::generate(env);
-    let usdc_token = env.register_stellar_asset_contract_v2(token_admin).address();
+    let usdc_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     client.initialize_refund_manager(&admin, &usdc_token);
     (admin, client)
 }
@@ -35,7 +37,8 @@ fn refundable_payment(env: &Env, client: &RefundManagerClient, payment_id: &Stri
     let merchant = Address::generate(env);
     client.register_payment(payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
     // cooldown default is 300s; jump well past it.
-    env.ledger().set_timestamp(env.ledger().timestamp() + 30 * 24 * 60 * 60);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 30 * 24 * 60 * 60);
 }
 
 fn events_contain(env: &Env, topic0: &str, topic1: &str) -> bool {
@@ -227,7 +230,9 @@ fn batch_create_links_rejects_duplicate_id_atomically() {
     let res = client.try_batch_create_links(&merchant, &batch);
     assert_eq!(res, Err(Ok(Error::PaymentAlreadyExists)));
     // atomicity: nothing was persisted
-    assert!(client.try_get_link(&String::from_str(&env, "dup_a")).is_err());
+    assert!(client
+        .try_get_link(&String::from_str(&env, "dup_a"))
+        .is_err());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -315,7 +320,10 @@ fn create_payment_link_invoice_links_both_records() {
     );
 
     assert_eq!(link.link_id, String::from_str(&env, "inv_link_1"));
-    assert_eq!(invoice.payment_link_id, Some(String::from_str(&env, "inv_link_1")));
+    assert_eq!(
+        invoice.payment_link_id,
+        Some(String::from_str(&env, "inv_link_1"))
+    );
 
     // both records are independently retrievable afterwards
     let fetched_invoice = pp.get_invoice(&invoice.invoice_id);

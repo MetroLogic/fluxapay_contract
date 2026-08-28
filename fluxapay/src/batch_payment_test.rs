@@ -2,10 +2,7 @@ use crate::{
     merchant_registry::{MerchantRegistry, MerchantRegistryClient},
     PaymentProcessor, PaymentProcessorClient,
 };
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env, String, Symbol,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol};
 
 fn setup_payment_processor_with_registry(
     env: &Env,
@@ -59,7 +56,8 @@ fn test_create_payments_batch_all_succeed() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (_oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (_oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let args1 = crate::CreatePaymentArgs {
         payment_id: String::from_str(&env, "pay_batch_001"),
@@ -114,7 +112,8 @@ fn test_create_payments_batch_one_invalid_amount_fails_all() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (_oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (_oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let args1 = crate::CreatePaymentArgs {
         payment_id: String::from_str(&env, "pay_batch_bad_001"),
@@ -170,7 +169,8 @@ fn test_create_payments_batch_duplicate_idempotency_key_within_batch() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (_oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (_oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let client_token = String::from_str(&env, "idempotency_token_123");
 
@@ -225,7 +225,8 @@ fn test_create_payments_batch_size_limit_enforcement() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (_oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (_oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..51 {
@@ -261,7 +262,8 @@ fn test_create_payments_batch_events_emitted_for_each() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (_oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (_oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let args1 = crate::CreatePaymentArgs {
         payment_id: String::from_str(&env, "pay_batch_evt_001"),

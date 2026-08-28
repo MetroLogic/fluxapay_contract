@@ -81,7 +81,7 @@ pub fn validate_ipfs_multihash(s: &String) -> bool {
 /// - Allowed characters: ASCII alphanumeric, `-`, `_`
 pub fn validate_id(s: &String) -> bool {
     let len = s.len() as usize;
-    if len < 3 || len > 64 {
+    if !(3..=64).contains(&len) {
         return false;
     }
     let mut buf = [0u8; 64];

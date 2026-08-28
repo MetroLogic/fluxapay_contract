@@ -33,7 +33,8 @@ fn create_payment_args(
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
         fee_waiver_code: None,
     }
 }
@@ -319,7 +320,10 @@ fn test_no_memo_type_no_validation() {
     client.grant_role(&admin, &role_merchant(&env), &merchant_id);
 
     let mut args = create_payment_args(&env, &payment_id, &merchant_id, 1000);
-    args.memo = Some(String::from_str(&env, "this memo has no type so no validation"));
+    args.memo = Some(String::from_str(
+        &env,
+        "this memo has no type so no validation",
+    ));
     args.memo_type = None;
 
     let payment = client.create_payment(&args);
