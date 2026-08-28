@@ -5590,3 +5590,265 @@ fn test_admin_reactivate_max_retries_cancelled_subscription() {
     assert_eq!(reactivated.retry_count, 0u32);
 }
 
+#[test]
+fn test_get_merchant_payments_full_with_token_filter() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let usdc_token = Address::generate(&env);
+    let eurc_token = Address::generate(&env);
+
+    // Create 3 USDC payments
+    for i in 0..3 {
+        let payment_id = String::from_str(&env, &format!("usdc_payment_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.token_address = Some(usdc_token.clone());
+        client.create_payment(&args);
+    }
+
+    // Create 2 EURC payments
+    for i in 0..2 {
+        let payment_id = String::from_str(&env, &format!("eurc_payment_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 50_000_000i128);
+        args.token_address = Some(eurc_token.clone());
+        client.create_payment(&args);
+    }
+
+    // Test filtering by EURC token - should return exactly 2 results
+    let eurc_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &Some(eurc_token.clone()));
+    assert_eq!(eurc_payments.len(), 2);
+
+    // Test filtering by USDC token - should return exactly 3 results
+    let usdc_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &Some(usdc_token.clone()));
+    assert_eq!(usdc_payments.len(), 3);
+
+    // Test with no filter - should return all 5 payments
+    let all_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &None);
+    assert_eq!(all_payments.len(), 5);
+}
+
+#[test]
+fn test_get_merchant_payments_full_token_filter_backward_compatible() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    // Create 3 payments with no token_address (None)
+    for i in 0..3 {
+        let payment_id = String::from_str(&env, &format!("payment_{}", i));
+        let args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        client.create_payment(&args);
+    }
+
+    // Test with no filter - should return all 3 payments
+    let all_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &None);
+    assert_eq!(all_payments.len(), 3);
+
+    // Test with a filter - should return 0 since all payments have token_address = None
+    let specific_token = Address::generate(&env);
+    let filtered_payments = client.get_merchant_payments_full(&merchant_id, &0, &50, &Some(specific_token));
+    assert_eq!(filtered_payments.len(), 0);
+}
+
+#[test]
+fn test_get_merchant_payments_full_token_filter_with_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token_a = Address::generate(&env);
+
+    // Create 8 payments with token_a
+    for i in 0..8 {
+        let payment_id = String::from_str(&env, &format!("token_a_payment_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.token_address = Some(token_a.clone());
+        client.create_payment(&args);
+    }
+
+    // First page with limit 3
+    let page1 = client.get_merchant_payments_full(&merchant_id, &0, &3, &Some(token_a.clone()));
+    assert_eq!(page1.len(), 3);
+
+    // Second page with limit 3
+    let page2 = client.get_merchant_payments_full(&merchant_id, &3, &3, &Some(token_a.clone()));
+    assert_eq!(page2.len(), 3);
+
+    // Third page with limit 3
+    let page3 = client.get_merchant_payments_full(&merchant_id, &6, &3, &Some(token_a.clone()));
+    assert_eq!(page3.len(), 2);
+
+    // All different IDs
+    let all_ids: Vec<String> = page1.iter()
+        .chain(page2.iter())
+        .chain(page3.iter())
+        .map(|p| p.payment_id.clone())
+        .collect();
+    assert_eq!(all_ids.len(), 8);
+}
+
+#[test]
+fn test_batch_expire_payments_all_valid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let mut payment_ids = vec![&env];
+    let initial_ts = env.ledger().timestamp();
+
+    // Create 3 expirable pending payments
+    for i in 0..3 {
+        let payment_id = String::from_str(&env, &format!("expire_test_{}", i));
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+
+    // Advance time past expiry
+    env.ledger().set_timestamp(initial_ts + 2000);
+
+    // All 3 should expire successfully
+    let count = client.batch_expire_payments(&payment_ids).unwrap();
+    assert_eq!(count, 3);
+}
+
+#[test]
+fn test_batch_expire_payments_partial_mixed_states() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+
+    // Create 2 pending + 1 already-expired payment
+    let payment_1 = String::from_str(&env, "pending_1");
+    let payment_2 = String::from_str(&env, "pending_2");
+    let payment_3 = String::from_str(&env, "already_expired");
+
+    let mut args_1 = create_payment_args(&env, &payment_1, &merchant_id, 100_000_000i128);
+    args_1.expires_at = Some(initial_ts + 1000);
+    client.create_payment(&args_1);
+
+    let mut args_2 = create_payment_args(&env, &payment_2, &merchant_id, 100_000_000i128);
+    args_2.expires_at = Some(initial_ts + 1000);
+    client.create_payment(&args_2);
+
+    let mut args_3 = create_payment_args(&env, &payment_3, &merchant_id, 100_000_000i128);
+    args_3.expires_at = Some(initial_ts + 500);
+    client.create_payment(&args_3);
+
+    // First, expire the third payment by advancing time
+    env.ledger().set_timestamp(initial_ts + 600);
+    let _ = client.expire_payment(&payment_3);
+
+    // Now try to expire the batch with 2 pending + 1 already-expired
+    env.ledger().set_timestamp(initial_ts + 2000);
+    let mut batch_ids = vec![&env];
+    batch_ids.push_back(payment_1);
+    batch_ids.push_back(payment_2);
+    batch_ids.push_back(payment_3);
+
+    let count = client.batch_expire_payments(&batch_ids).unwrap();
+    // Only the 2 pending ones should be expired
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn test_batch_expire_payments_nonexistent_id_skipped() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+
+    // Create 1 valid pending payment
+    let valid_id = String::from_str(&env, "valid_payment");
+    let mut args = create_payment_args(&env, &valid_id, &merchant_id, 100_000_000i128);
+    args.expires_at = Some(initial_ts + 1000);
+    client.create_payment(&args);
+
+    // Create a batch with 1 valid + 1 nonexistent ID
+    let nonexistent_id = String::from_str(&env, "nonexistent_payment");
+    let mut batch_ids = vec![&env];
+    batch_ids.push_back(valid_id);
+    batch_ids.push_back(nonexistent_id);
+
+    // Advance time past expiry
+    env.ledger().set_timestamp(initial_ts + 2000);
+
+    // Only the valid one should be counted (nonexistent should be silently skipped, no panic)
+    let count = client.batch_expire_payments(&batch_ids).unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn test_batch_expire_payments_confirmed_payment_not_expired() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+
+    // Create 1 payment and confirm it
+    let payment_id = String::from_str(&env, "confirmed_payment");
+    let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+    args.expires_at = Some(initial_ts + 1000);
+    client.create_payment(&args);
+
+    // Manually mark payment as confirmed
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        let mut payment = PaymentProcessor::get_payment_internal(&env, &payment_id).unwrap();
+        payment.status = PaymentStatus::Confirmed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
+    });
+
+    // Advance time past expiry
+    env.ledger().set_timestamp(initial_ts + 2000);
+
+    // Try to expire the confirmed payment - should be skipped, return 0
+    let mut batch_ids = vec![&env];
+    batch_ids.push_back(payment_id);
+
+    let count = client.batch_expire_payments(&batch_ids).unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn test_batch_expire_payments_empty_vec() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let empty_batch = vec![&env];
+    let count = client.batch_expire_payments(&empty_batch).unwrap();
+
+    // Empty batch should return 0
+    assert_eq!(count, 0);
+}
+

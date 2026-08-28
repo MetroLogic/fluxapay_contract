@@ -8048,6 +8048,7 @@ impl PaymentProcessor {
         offset: u32,
         limit: u32,
         status_filter: Option<PaymentStatus>,
+        token_address: Option<Address>,
     ) -> Vec<String> {
         let all = Self::get_merchant_payments_internal(&env, &merchant_id);
         if limit == 0 {
@@ -8056,17 +8057,24 @@ impl PaymentProcessor {
 
         let mut filtered = vec![&env];
         for id in all.iter() {
-            let matches_filter = match &status_filter {
-                Some(status) => env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, PaymentCharge>(&DataKey::Payment(id.clone()))
-                    .map_or(false, |payment| payment.status == status.clone()),
-                None => true,
-            };
+            if let Some(payment) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PaymentCharge>(&DataKey::Payment(id.clone()))
+            {
+                let status_match = match &status_filter {
+                    Some(status) => payment.status == status.clone(),
+                    None => true,
+                };
 
-            if matches_filter {
-                filtered.push_back(id);
+                let token_match = match &token_address {
+                    Some(token) => payment.token_address.as_ref() == Some(token),
+                    None => true,
+                };
+
+                if status_match && token_match {
+                    filtered.push_back(id);
+                }
             }
         }
 
@@ -9753,33 +9761,47 @@ impl PaymentProcessor {
     /// Issue #396: Returns paginated full `PaymentCharge` structs for merchant dashboards.
     /// `limit` is capped at 50 to avoid ledger compute limits.
     /// Returns an empty vec (not an error) when `offset` exceeds the total count.
+    /// When `token_address` is provided, returns only payments matching that token.
     #[allow(deprecated)]
     pub fn get_merchant_payments_full(
         env: Env,
         merchant_id: Address,
         offset: u32,
         limit: u32,
+        token_address: Option<Address>,
     ) -> Vec<PaymentCharge> {
         let all = Self::get_merchant_payments_internal(&env, &merchant_id);
         let capped_limit = core::cmp::min(limit, 50);
 
-        if capped_limit == 0 || offset >= all.len() {
+        let mut filtered: Vec<PaymentCharge> = vec![&env];
+        for id in all.iter() {
+            if let Some(payment) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PaymentCharge>(&DataKey::Payment(id))
+            {
+                let token_match = match &token_address {
+                    Some(token) => payment.token_address.as_ref() == Some(token),
+                    None => true,
+                };
+
+                if token_match {
+                    filtered.push_back(payment);
+                }
+            }
+        }
+
+        if capped_limit == 0 || offset >= filtered.len() {
             return vec![&env];
         }
 
-        let end = core::cmp::min(all.len(), offset.saturating_add(capped_limit));
+        let end = core::cmp::min(filtered.len(), offset.saturating_add(capped_limit));
         let mut result: Vec<PaymentCharge> = vec![&env];
 
         let mut i = offset;
         while i < end {
-            if let Some(id) = all.get(i) {
-                if let Some(payment) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, PaymentCharge>(&DataKey::Payment(id))
-                {
-                    result.push_back(payment);
-                }
+            if let Some(payment) = filtered.get(i) {
+                result.push_back(payment.clone());
             }
             i += 1;
         }

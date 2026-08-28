@@ -58,6 +58,8 @@ pub struct PaymentLink {
     pub view_count: u32,
     /// Total revenue (in USDC stroops) accumulated from successful `use_link` calls.
     pub total_revenue: i128,
+    /// Timestamp of the last successful use; None if the link has never been used.
+    pub last_used_at: Option<u64>,
     pub active: bool,
     /// If true, funds are transferred directly to the merchant wallet on use_link,
     /// bypassing the escrow/platform wallet (issue #111).
@@ -88,6 +90,10 @@ pub struct LinkAnalytics {
     pub total_revenue: i128,
     /// Conversion rate in basis points (bps). 100 bps = 1%.
     pub conversion_rate: u32,
+    /// Timestamp of the last successful use; None if the link has never been used.
+    pub last_used_at: Option<u64>,
+    /// Average payment amount (in stroops); 0 if the link has never been used.
+    pub average_payment: i128,
 }
 
 #[contracttype]
@@ -317,6 +323,7 @@ impl PaymentLinkManager {
             use_count: 0,
             view_count: 0,
             total_revenue: 0,
+            last_used_at: None,
             active: true,
             direct_transfer,
             metadata,
@@ -452,8 +459,9 @@ impl PaymentLinkManager {
             .map(|m| link.use_count == m)
             .unwrap_or(false);
 
-        // Accumulate revenue from this payment.
+        // Accumulate revenue from this payment and record the timestamp.
         link.total_revenue = link.total_revenue.saturating_add(resolved_amount);
+        link.last_used_at = Some(env.ledger().timestamp());
         env.storage()
             .persistent()
             .set(&LinkDataKey::Link(link_id.clone()), &link);
@@ -734,11 +742,19 @@ impl PaymentLinkManager {
             0
         };
 
+        let average_payment = if link.use_count > 0 {
+            link.total_revenue / (link.use_count as i128)
+        } else {
+            0
+        };
+
         Ok(LinkAnalytics {
             view_count: link.view_count,
             use_count: link.use_count,
             total_revenue: link.total_revenue,
             conversion_rate,
+            last_used_at: link.last_used_at,
+            average_payment,
         })
     }
 
