@@ -8,6 +8,7 @@ export {
   usePayment,
   useMerchant,
   useMerchantPayments,
+  useMerchantLinks,
   useRefund,
   useCreatePayment,
   useSubscriptionPlan,
@@ -20,6 +21,7 @@ export {
 } from "./hooks.js";
 export type {
   UseMerchantPaymentsOptions,
+  UseMerchantLinksOptions,
   UseCreatePaymentResult,
   UseCreateInvoiceResult,
   UseMarkInvoicePaidResult,

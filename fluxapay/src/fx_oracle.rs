@@ -1,5 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol,
+    SymbolStr, TryFromVal, Vec,
 };
 
 use crate::access_control::{role_admin, role_oracle, AccessControl};
@@ -12,6 +13,16 @@ const MAX_LEDGER_GAP: u32 = 17_280;
 
 /// Maximum number of currency pairs accepted by `set_rates_batch`.
 const MAX_BATCH_RATES: u32 = 20;
+
+/// Issue #636: Fixed-point precision of the reciprocal rate returned by
+/// `get_rate_or_inverse` when it falls back to the inverse pair. 14 decimals
+/// keeps ~7 significant digits of precision for reciprocals of rates that
+/// themselves use up to 7 decimals.
+const INVERSE_RATE_DECIMALS: u32 = 14;
+
+/// Issue #636: Maximum length of a `BASE_QUOTE` pair symbol (matches the
+/// Soroban `Symbol` limit of 32 characters).
+const MAX_PAIR_SYMBOL_LEN: usize = 32;
 
 #[contract]
 pub struct FXOracle;
@@ -44,6 +55,9 @@ pub enum FXOracleError {
     BatchTooLarge = 4,
     /// Issue #478: Rate deviation exceeds configured limit
     RateDeviationExceeded = 5,
+    /// Issue #636: Neither the requested `BASE_QUOTE` pair nor its inverse
+    /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
+    PairNotFound = 6,
 }
 
 #[contracttype]
@@ -330,6 +344,162 @@ impl FXOracle {
         }
 
         Ok((usdc_amount * rate_data.rate) / divisor)
+    }
+
+    /// Issue #636: Return the rate for `pair`, transparently falling back to the
+    /// inverse pair when only the reciprocal is stored.
+    ///
+    /// Lookup order:
+    /// 1. Direct: `pair` (e.g. `EUR_USD`). If a rate is stored, it is returned
+    ///    as-is (subject to the usual staleness checks). A stored-but-stale
+    ///    direct rate surfaces `RateStale` — it does *not* fall through.
+    /// 2. Inverse: `pair` with its `BASE`/`QUOTE` halves swapped (e.g.
+    ///    `USD_EUR`). If found, the returned `RateData` carries `1 / rate`
+    ///    scaled to `INVERSE_RATE_DECIMALS` fixed-point precision, with `pair`
+    ///    set to the originally-requested symbol and the timestamp/sequence
+    ///    copied from the inverse rate.
+    ///
+    /// Returns [`FXOracleError::PairNotFound`] only when both the direct and
+    /// inverse lookups find nothing (or `pair` is not a parseable
+    /// `BASE_QUOTE` symbol).
+    pub fn get_rate_or_inverse(env: Env, pair: Symbol) -> Result<RateData, FXOracleError> {
+        match Self::get_rate(env.clone(), pair.clone()) {
+            Ok(direct) => return Ok(direct),
+            Err(FXOracleError::RateNotFound) => {}
+            Err(other) => return Err(other),
+        }
+
+        let inverse_pair =
+            Self::invert_pair(&env, &pair).ok_or(FXOracleError::PairNotFound)?;
+
+        let inverse = match Self::get_rate(env.clone(), inverse_pair) {
+            Ok(data) => data,
+            Err(FXOracleError::RateNotFound) => return Err(FXOracleError::PairNotFound),
+            Err(other) => return Err(other),
+        };
+
+        if inverse.rate <= 0 {
+            return Err(FXOracleError::PairNotFound);
+        }
+
+        // reciprocal = 10^(inverse.decimals + INVERSE_RATE_DECIMALS) / inverse.rate
+        let mut numerator: i128 = 1;
+        for _ in 0..(inverse.decimals + INVERSE_RATE_DECIMALS) {
+            numerator = numerator
+                .checked_mul(10)
+                .ok_or(FXOracleError::PairNotFound)?;
+        }
+        let reciprocal = numerator / inverse.rate;
+
+        Ok(RateData {
+            pair,
+            rate: reciprocal,
+            decimals: INVERSE_RATE_DECIMALS,
+            updated_at: inverse.updated_at,
+            updated_sequence: inverse.updated_sequence,
+        })
+    }
+
+    /// Issue #636: Convert `amount` units of `from` into `to`, using the
+    /// `FROM_TO` pair rate and automatically falling back to the inverse
+    /// `TO_FROM` pair via [`Self::get_rate_or_inverse`].
+    ///
+    /// `result = amount * rate / 10^decimals`.
+    pub fn get_settlement_amount_for_pair(
+        env: Env,
+        from: Symbol,
+        to: Symbol,
+        amount: i128,
+    ) -> Result<i128, FXOracleError> {
+        let pair = Self::join_pair(&env, &from, &to).ok_or(FXOracleError::PairNotFound)?;
+        let rate_data = Self::get_rate_or_inverse(env.clone(), pair)?;
+
+        let mut divisor: i128 = 1;
+        for _ in 0..rate_data.decimals {
+            divisor = divisor.checked_mul(10).ok_or(FXOracleError::PairNotFound)?;
+        }
+
+        let scaled = amount
+            .checked_mul(rate_data.rate)
+            .ok_or(FXOracleError::PairNotFound)?;
+        Ok(scaled / divisor)
+    }
+
+    /// Derive the inverse of a `BASE_QUOTE` pair symbol, e.g. `EUR_USD` ->
+    /// `USD_EUR`. Returns `None` when `pair` has no single `_` separator or
+    /// either half is empty.
+    fn invert_pair(env: &Env, pair: &Symbol) -> Option<Symbol> {
+        let str_repr = SymbolStr::try_from_val(env, &pair.to_symbol_val()).ok()?;
+        let text: &str = str_repr.as_ref();
+        let bytes = text.as_bytes();
+
+        let mut separator: Option<usize> = None;
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'_' {
+                if separator.is_some() {
+                    return None; // more than one separator — not a simple pair
+                }
+                separator = Some(i);
+            }
+        }
+        let separator = separator?;
+        let base = &bytes[..separator];
+        let quote = &bytes[separator + 1..];
+        if base.is_empty() || quote.is_empty() {
+            return None;
+        }
+
+        let mut buf = [0u8; MAX_PAIR_SYMBOL_LEN + 1];
+        let mut n = 0usize;
+        for &b in quote {
+            buf[n] = b;
+            n += 1;
+        }
+        buf[n] = b'_';
+        n += 1;
+        for &b in base {
+            buf[n] = b;
+            n += 1;
+        }
+        let inverted = core::str::from_utf8(&buf[..n]).ok()?;
+        Some(Symbol::new(env, inverted))
+    }
+
+    /// Join two currency symbols into a `FROM_TO` pair symbol. Returns `None`
+    /// when either symbol is empty or the joined result would exceed the
+    /// 32-character `Symbol` limit.
+    fn join_pair(env: &Env, from: &Symbol, to: &Symbol) -> Option<Symbol> {
+        let from_str = SymbolStr::try_from_val(env, &from.to_symbol_val()).ok()?;
+        let to_str = SymbolStr::try_from_val(env, &to.to_symbol_val()).ok()?;
+        let from_bytes = {
+            let s: &str = from_str.as_ref();
+            s.as_bytes()
+        };
+        let to_bytes = {
+            let s: &str = to_str.as_ref();
+            s.as_bytes()
+        };
+        if from_bytes.is_empty()
+            || to_bytes.is_empty()
+            || from_bytes.len() + to_bytes.len() + 1 > MAX_PAIR_SYMBOL_LEN
+        {
+            return None;
+        }
+
+        let mut buf = [0u8; MAX_PAIR_SYMBOL_LEN + 1];
+        let mut n = 0usize;
+        for &b in from_bytes {
+            buf[n] = b;
+            n += 1;
+        }
+        buf[n] = b'_';
+        n += 1;
+        for &b in to_bytes {
+            buf[n] = b;
+            n += 1;
+        }
+        let joined = core::str::from_utf8(&buf[..n]).ok()?;
+        Some(Symbol::new(env, joined))
     }
 
     pub fn get_staleness_threshold(env: Env) -> u64 {

@@ -187,6 +187,58 @@ fn test_deactivate_link() {
     assert!(!link.active);
 }
 
+/// Issue #634: create 5 links, deactivate 1 → `active_only = true` returns 4;
+/// the full list returns all 5, and pagination slices the index.
+#[test]
+fn test_get_merchant_links_active_only_and_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+
+    let mut ids = vec![&env];
+    for i in 0..5u32 {
+        let link_id = crate::format_id(&env, "mlink_", i as u64);
+        client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "L"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::None,
+            &None,
+        );
+        ids.push_back(link_id);
+    }
+
+    // Deactivate the 3rd link.
+    client.deactivate_link(&merchant, &ids.get(2).unwrap());
+
+    // Full list: all 5, in creation order.
+    let all = client.get_merchant_links(&merchant, &0u32, &50u32, &false);
+    assert_eq!(all.len(), 5);
+    assert_eq!(all.get(0).unwrap().link_id, ids.get(0).unwrap());
+
+    // active_only = true → 4.
+    let active = client.get_merchant_links(&merchant, &0u32, &50u32, &true);
+    assert_eq!(active.len(), 4);
+    for link in active.iter() {
+        assert!(link.active);
+    }
+
+    // Pagination over the active set: offset 2, limit 1 → the 4th active link.
+    let page = client.get_merchant_links(&merchant, &2u32, &1u32, &true);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().link_id, ids.get(3).unwrap());
+
+    // Unknown merchant → empty.
+    let other = Address::generate(&env);
+    assert_eq!(client.get_merchant_links(&other, &0u32, &10u32, &false).len(), 0);
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #3)")]
 fn test_link_expired() {

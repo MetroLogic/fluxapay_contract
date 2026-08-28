@@ -131,6 +131,10 @@ pub enum LinkDataKey {
     /// Issue #663: Contract-wide default fee (basis points) applied by
     /// `use_link` to links that don't have their own `fee_bps` override.
     GlobalFeeBps,
+    /// Issue #634: Append-only index of link IDs created by a merchant, keyed
+    /// by merchant address. Updated atomically inside `create_link`. Appended
+    /// at the end of the enum to preserve existing discriminants.
+    MerchantLinks(Address),
 }
 
 #[contract]
@@ -419,6 +423,18 @@ impl PaymentLinkManager {
             .persistent()
             .set(&LinkDataKey::Link(args.link_id.clone()), &link);
 
+        // Issue #634: Maintain the per-merchant link index atomically.
+        let merchant_links_key = LinkDataKey::MerchantLinks(merchant.clone());
+        let mut merchant_links: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&merchant_links_key)
+            .unwrap_or_else(|| vec![&env]);
+        merchant_links.push_back(link_id.clone());
+        env.storage()
+            .persistent()
+            .set(&merchant_links_key, &merchant_links);
+
         // Emit LINK/CREATED event
         env.events().publish(
             (Symbol::new(env, "LINK"), Symbol::new(env, "CREATED")),
@@ -426,6 +442,49 @@ impl PaymentLinkManager {
         );
 
         Ok(args.link_id)
+    }
+
+    /// Issue #634: List a merchant's payment links, paginated.
+    ///
+    /// Returns up to `limit` `PaymentLink` records (hard-capped at 100 per
+    /// call) starting at `offset` within the merchant's link index, in
+    /// creation order. When `active_only` is `true`, links that are
+    /// deactivated or expired are filtered out *before* pagination (expiry is
+    /// evaluated live via the same auto-deactivation path as `get_link`).
+    pub fn get_merchant_links(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+        active_only: bool,
+    ) -> Vec<PaymentLink> {
+        let link_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::MerchantLinks(merchant_id))
+            .unwrap_or_else(|| vec![&env]);
+
+        let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for link_id in link_ids.iter() {
+            let link = match Self::get_link_internal(&env, &link_id) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            if active_only && !link.active {
+                continue;
+            }
+            if matched >= offset {
+                result.push_back(link);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     /// Return the shareable URL for a link, if one was stored.

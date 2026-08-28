@@ -1171,6 +1171,7 @@ export class FluxapayClient {
   }) {
     return withMappedContractError(() =>
       (this.contract as any).generate_reconciliation_page({
+      (this.contract as any).reconciliation_report_page({
         merchant_id: params.merchantId,
         from_ts: params.fromTs,
         to_ts: params.toTs,
@@ -1566,6 +1567,22 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #634: List a merchant's payment links, paginated.
+   * Maps to `PaymentLinkManager.get_merchant_links` on-chain.
+   *
+   * @param merchantId - The merchant's Stellar address
+   * @param opts.offset - Index into the merchant's link list (default 0)
+   * @param opts.limit - Max links to return, 1..=100 (default 100)
+   * @param opts.activeOnly - Exclude deactivated/expired links (default false)
+   */
+  async getMerchantLinks(
+    merchantId: string,
+    opts: { offset?: number; limit?: number; activeOnly?: boolean } = {},
+  ): Promise<PaymentLink[]> {
+    return this.getPaymentLinkManager().getMerchantLinks(merchantId, opts);
+  }
+
+  /**
    * Verify a batch of payment links, returning only active ones.
    * Maps to `PaymentLinkManager.verify_batch` on-chain.
    * @param linkIds - Array of link IDs to verify
@@ -1688,6 +1705,32 @@ export class FluxapayClient {
         payment_id: params.paymentId,
       }),
     );
+  }
+
+  /**
+   * Issue #633: List the subscribers to a plan, paginated, for plan-level
+   * analytics and bulk notifications.
+   *
+   * Maps to `RefundManager.get_plan_subscribers` on-chain. When
+   * `includeCancelled` is `false` (the default), subscriptions with status
+   * `Cancelled` are filtered out before pagination. `limit` is hard-capped at
+   * 100 per call; pass `0` for the maximum page.
+   */
+  async getPlanSubscribers(params: {
+    planId: string;
+    offset?: number;
+    limit?: number;
+    includeCancelled?: boolean;
+  }): Promise<unknown[]> {
+    const raw = await withMappedContractError(() =>
+      (this.contract as any).get_plan_subscribers({
+        plan_id: params.planId,
+        offset: params.offset ?? 0,
+        limit: params.limit ?? 100,
+        include_cancelled: params.includeCancelled ?? false,
+      }),
+    );
+    return raw.result as unknown[];
   }
 
   /**
