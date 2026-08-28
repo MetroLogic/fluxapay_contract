@@ -169,7 +169,12 @@ jobs:
 
       - name: Optimize WASM contract
         working-directory: fluxapay
-        run: stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxapay.wasm
+        run: |
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            if [ -f "$wasm" ]; then
+              stellar contract optimize --wasm "$wasm"
+            fi
+          done
 
       - name: List build artifacts
         run: ls -lh target/wasm32-unknown-unknown/release/*.wasm
@@ -188,25 +193,33 @@ jobs:
           echo "| Contract | Size |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|------|" >> $GITHUB_STEP_SUMMARY
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            size=$(ls -lh "$wasm" | awk '{print $5}')
-            name=$(basename "$wasm")
-            echo "| $name | $size |" >> $GITHUB_STEP_SUMMARY
+            if [ -f "$wasm" ]; then
+              size=$(ls -lh "$wasm" | awk '{print $5}')
+              name=$(basename "$wasm")
+              echo "| $name | $size |" >> $GITHUB_STEP_SUMMARY
+            fi
           done
 
       - name: Enforce WASM size limit
         run: |
           MAX_SIZE=$((MAX_WASM_SIZE_KB * 1024))
           echo "Max allowed size: $MAX_WASM_SIZE_KB KB ($MAX_SIZE bytes)"
+          failed=0
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            size=$(stat -c%s "$wasm")
-            name=$(basename "$wasm")
-            if [ "$size" -gt "$MAX_SIZE" ]; then
-              echo "❌ Error: $name size is $size bytes, which exceeds the limit of $MAX_SIZE bytes!"
-              exit 1
-            else
-              echo "✅ $name size is $size bytes (within limit)"
+            if [ -f "$wasm" ]; then
+              size=$(stat -c%s "$wasm")
+              name=$(basename "$wasm")
+              if [ "$size" -gt "$MAX_SIZE" ]; then
+                echo "❌ Error: $name size is $size bytes, which exceeds the limit of $MAX_SIZE bytes!"
+                failed=1
+              else
+                echo "✅ $name size is $size bytes (within limit)"
+              fi
             fi
           done
+          if [ "$failed" -eq 1 ]; then
+            exit 1
+          fi
 
   # Job 4: WASM Size Check
   wasm-size-check:
@@ -236,13 +249,21 @@ jobs:
 
       - name: Build contracts (release)
         working-directory: fluxapay
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: |
+          cargo build --target wasm32-unknown-unknown --release
+          for feature in contract-payment-processor contract-refund-manager contract-gas-estimator contract-fx-oracle contract-merchant-registry contract-payment-link contract-payment-streaming; do
+            cargo build --target wasm32-unknown-unknown --release --no-default-features --features "$feature"
+          done
 
       - name: Check WASM sizes
         run: |
           MAX_SIZE=$((MAX_WASM_SIZE_KB * 1024))
           echo "Checking WASM contract sizes (max: $MAX_WASM_SIZE_KB KB = $MAX_SIZE bytes)"
           echo ""
+          echo "### WASM Contract Sizes 📦" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Contract | Size (Bytes) | Size (KB) | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
           failed=0
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
             if [ -f "$wasm" ]; then
@@ -250,14 +271,17 @@ jobs:
               name=$(basename "$wasm")
               size_kb=$((size / 1024))
               if [ "$size" -gt "$MAX_SIZE" ]; then
-                echo "❌ FAIL: $name is $size_kb KB (exceeds limit by $((size_kb - MAX_WASM_SIZE_KB)) KB)"
+                echo "❌ FAIL: $name is $size_kb KB ($size bytes) (exceeds limit by $((size_kb - MAX_WASM_SIZE_KB)) KB)"
+                echo "| $name | $size | ${size_kb} KB | ❌ Exceeds limit ($((size_kb - MAX_WASM_SIZE_KB)) KB over) |" >> $GITHUB_STEP_SUMMARY
                 failed=1
               else
-                echo "✅ PASS: $name is $size_kb KB (within limit)"
+                echo "✅ PASS: $name is $size_kb KB ($size bytes) (within limit)"
+                echo "| $name | $size | ${size_kb} KB | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
               fi
             fi
           done
           if [ "$failed" -eq 1 ]; then
+            echo "Error: One or more WASM binaries exceeded the MAX_WASM_SIZE_KB limit ($MAX_WASM_SIZE_KB KB)"
             exit 1
           fi
 

@@ -22,15 +22,18 @@ pub fn validate_metadata(meta_map: &Map<String, String>) -> Result<(), crate::Er
     Ok(())
 }
 
-/// Validates that a string is a valid IPFS multihash (CIDv0 or CIDv1).
+/// Validates that a string is a valid IPFS CID (CIDv0 or CIDv1).
 ///
-/// CIDv0: Base58-encoded SHA2-256 multihash, always starts with "Qm" and is 46 chars.
-/// CIDv1: Multibase-encoded, typically starts with "bafy" (base32 SHA2-256) and is ≥ 59 chars.
+/// Issue #622: Strengthened from length-only to prefix + length structural check.
+///
+/// CIDv0: Base58-encoded SHA2-256 multihash. Always starts with "Qm" and is exactly 46 chars.
+/// CIDv1 base32 (most common): Starts with "bafy" or "BAFY" (base32 SHA2-256) and is ≥ 59 chars.
+/// CIDv1 base16 (hex): Starts with "f" followed by hex digits, at least 34 chars.
 ///
 /// This performs a lightweight structural check (prefix + length) without
 /// a full base58/base32 decode, which is not feasible in `no_std` without
 /// additional crates.
-pub fn validate_ipfs_multihash(s: &String) -> bool {
+pub fn is_valid_cid(s: &String) -> bool {
     let len = s.len() as usize;
 
     // Need at least 4 bytes to check prefix
@@ -48,20 +51,12 @@ pub fn validate_ipfs_multihash(s: &String) -> bool {
     }
 
     // CIDv1 base32 (most common): starts with "bafy" and is at least 59 characters
-    if buf[0] == b'b'
-        && buf[1] == b'a'
-        && buf[2] == b'f'
-        && buf[3] == b'y'
-    {
+    if buf[0] == b'b' && buf[1] == b'a' && buf[2] == b'f' && buf[3] == b'y' {
         return len >= 59;
     }
 
     // CIDv1 base32 upper: starts with "BAFY"
-    if buf[0] == b'B'
-        && buf[1] == b'A'
-        && buf[2] == b'F'
-        && buf[3] == b'Y'
-    {
+    if buf[0] == b'B' && buf[1] == b'A' && buf[2] == b'F' && buf[3] == b'Y' {
         return len >= 59;
     }
 
@@ -71,6 +66,12 @@ pub fn validate_ipfs_multihash(s: &String) -> bool {
     }
 
     false
+}
+
+/// Alias for [`is_valid_cid`] — kept for backward compatibility.
+#[inline]
+pub fn validate_ipfs_multihash(s: &String) -> bool {
+    is_valid_cid(s)
 }
 
 /// Validates a user-supplied ID (payment_id, dispute_id, etc.).

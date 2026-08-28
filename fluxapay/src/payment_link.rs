@@ -135,6 +135,10 @@ pub enum LinkDataKey {
     /// by merchant address. Updated atomically inside `create_link`. Appended
     /// at the end of the enum to preserve existing discriminants.
     MerchantLinks(Address),
+    /// Issue #623: Contract-wide per-payer link-use rate limit config (max_uses, window_secs).
+    LinkRateLimitConfig,
+    /// Issue #623: Per-payer rolling window of link-use timestamps, keyed by payer address.
+    PayerLinkUseWindow(Address),
 }
 
 #[contract]
@@ -531,6 +535,9 @@ impl PaymentLinkManager {
     ) -> Result<String, crate::Error> {
         payer.require_auth();
 
+        // Issue #623: Enforce per-payer rate limit before any other checks.
+        Self::enforce_payer_link_rate_limit(&env, &payer)?;
+
         let mut link = Self::get_link_internal(&env, &link_id)?;
 
         if !link.active {
@@ -921,5 +928,78 @@ impl PaymentLinkManager {
             }
         }
         results
+    }
+
+    // ── Issue #623: Per-payer link-use rate limiting ──────────────────────────
+
+    /// Default per-payer rate-limit config: 5 uses per 60 seconds.
+    const DEFAULT_LINK_RATE_MAX_USES: u32 = 5;
+    const DEFAULT_LINK_RATE_WINDOW_SECS: u64 = 60;
+
+    /// Admin-only: configure the per-payer link-use rate limit.
+    ///
+    /// * `max_uses`    – Maximum number of `use_link` calls allowed per payer within the window.
+    /// * `window_secs` – Rolling window length in seconds.
+    pub fn set_link_rate_limit(
+        env: Env,
+        admin: Address,
+        max_uses: u32,
+        window_secs: u64,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkRateLimitConfig, &(max_uses, window_secs));
+        Ok(())
+    }
+
+    /// Enforce per-payer link-use rate limit.
+    ///
+    /// Reads (or creates) the rolling window of use timestamps for `payer`,
+    /// evicts entries older than `window_secs`, then rejects if the count
+    /// meets or exceeds `max_uses`. Records the current timestamp on success.
+    fn enforce_payer_link_rate_limit(env: &Env, payer: &Address) -> Result<(), crate::Error> {
+        let (max_uses, window_secs): (u32, u64) = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkRateLimitConfig)
+            .unwrap_or((Self::DEFAULT_LINK_RATE_MAX_USES, Self::DEFAULT_LINK_RATE_WINDOW_SECS));
+
+        let now = env.ledger().timestamp();
+        let cutoff = now.saturating_sub(window_secs);
+
+        // Load existing timestamps, drop stale ones.
+        let mut timestamps: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&LinkDataKey::PayerLinkUseWindow(payer.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut fresh: Vec<u64> = Vec::new(env);
+        for ts in timestamps.iter() {
+            if ts >= cutoff {
+                fresh.push_back(ts);
+            }
+        }
+
+        if fresh.len() >= max_uses {
+            return Err(crate::Error::RateLimitExceeded);
+        }
+
+        // Record this use and persist.
+        fresh.push_back(now);
+        env.storage()
+            .instance()
+            .set(&LinkDataKey::PayerLinkUseWindow(payer.clone()), &fresh);
+
+        Ok(())
     }
 }

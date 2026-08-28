@@ -410,6 +410,10 @@ pub enum Error {
     BatchContainsDuplicates = 66,
     /// Issue #625: A user-supplied string field (reason, evidence, resolution_notes) exceeds its maximum allowed length.
     InputTooLong = 67,
+    /// Issue #624: A timelocked admin action was executed before the delay period expired.
+    TimelockNotExpired = 68,
+    /// Issue #622: Evidence field is not a valid IPFS CID (CIDv0 starts with "Qm"/46 chars; CIDv1 starts with "bafy"/≥59 chars).
+    InvalidEvidenceCid = 69,
 }
 
 #[contracttype]
@@ -1086,10 +1090,45 @@ pub enum DataKey {
     /// plan_id. Updated atomically on every `subscribe` / `subscribe_to_plan`.
     /// Appended at the end of the enum to preserve existing discriminants.
     PlanSubscribers(String),
+    /// Issue #624: Timelock delay in seconds for critical admin operations.
+    TimelockDelaySecs,
+    /// Issue #624: Pending timelocked action keyed by a unique action ID.
+    PendingTimelockAction(String),
+    /// Issue #624: Counter for generating unique pending action IDs.
+    TimelockActionCounter,
 }
 
 /// Default initial contract version string.
 pub const INITIAL_CONTRACT_VERSION: &str = "1.0.0";
+
+/// Default timelock delay for critical admin operations: 48 hours.
+pub const DEFAULT_TIMELOCK_SECS: u64 = 48 * 60 * 60;
+
+/// Issue #624: Identifies which critical admin operation is pending in a timelock queue.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimelockActionKind {
+    /// `set_fee_rate(bps)`
+    SetFeeRate(i128),
+    /// `set_kyc_tier_limits(tier, max_amount)`
+    SetKycTierLimits(KycTier, i128),
+    /// `upgrade_contract(new_wasm_hash)`
+    UpgradeContract(BytesN<32>),
+}
+
+/// Issue #624: A queued admin action that cannot execute until `execute_after` has passed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingTimelockAction {
+    /// Unique ID for this pending action (e.g. "tl_1").
+    pub action_id: String,
+    /// The specific operation being queued.
+    pub kind: TimelockActionKind,
+    /// Ledger timestamp after which the action may be executed (proposed_at + delay).
+    pub execute_after: u64,
+    /// Address of the admin who proposed this action.
+    pub proposed_by: Address,
+}
 
 // When building for WASM deployment, only the active contract's #[contractimpl]
 // is compiled to avoid duplicate exported symbols. On non-WASM targets (tests,
@@ -2797,7 +2836,7 @@ impl RefundManager {
             .get::<DataKey, bool>(&DataKey::RequireEvidenceCid)
             .unwrap_or(true);
         if require_cid && evidence.len() > 0 && !validate_ipfs_multihash(&evidence) {
-            return Err(Error::InvalidEvidenceFormat);
+            return Err(Error::InvalidEvidenceCid);
         }
 
         // Rate limits: max open disputes per payer + global hourly creation cap.
@@ -5720,38 +5759,20 @@ impl RefundManager {
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
 
-    /// Upgrade the contract WASM and increment the contract version.
+    /// Queue a contract WASM upgrade via the timelock.
     ///
-    /// Only the admin can call this. On success, the `ContractVersion` in persistent
-    /// storage is updated and a `CONTRACT/UPGRADED` event is emitted with the old and
-    /// new version strings.
-    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+    /// Issue #624: `upgrade_contract` no longer takes effect immediately.  The
+    /// upgrade is queued as a `PendingTimelockAction` and can only be executed
+    /// after the configured delay (default 48 hours) via
+    /// `execute_timelocked_action`.  Returns the action ID.
+    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<String, Error> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
             return Err(Error::Unauthorized);
         }
 
-        let old_version: String = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ContractVersion)
-            .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION));
-
-        let new_version_str = bump_version_string(&env, &old_version);
-
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::ContractVersion, &new_version_str);
-
-        env.events().publish(
-            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
-            (old_version, new_version_str),
-        );
-
-        Ok(())
+        Self::enqueue_timelocked_action(&env, admin, TimelockActionKind::UpgradeContract(new_wasm_hash))
     }
 }
 
@@ -5954,15 +5975,17 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Set the settlement fee rate (in basis points) deducted from each payment
-    /// during `settle_payment` and accumulated in `TreasuryBalance`.
+    /// Queue a settlement fee rate change via the timelock.
     ///
-    /// Only the admin may call this function. A rate of 0 disables the fee.
+    /// Issue #624: `set_fee_rate` no longer takes effect immediately.  Instead it
+    /// enqueues a `PendingTimelockAction` that can only be executed after the
+    /// configured timelock delay (default 48 hours) has elapsed.  Returns the
+    /// action ID assigned to the pending action.
     ///
     /// # Arguments
     /// * `admin` – Must hold the admin role.
     /// * `bps`   – Fee in basis points (e.g. 100 = 1 %). Must be 0–10 000.
-    pub fn set_fee_rate(env: Env, admin: Address, bps: i128) -> Result<(), Error> {
+    pub fn set_fee_rate(env: Env, admin: Address, bps: i128) -> Result<String, Error> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -5972,10 +5995,7 @@ impl PaymentProcessor {
             return Err(Error::InvalidAmount);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::SettlementFeeRate, &bps);
-        Ok(())
+        Self::enqueue_timelocked_action(&env, admin, TimelockActionKind::SetFeeRate(bps))
     }
 
     /// Admin-only: enable or disable automatic pending refund creation for overpaid payments.
@@ -6816,19 +6836,13 @@ impl PaymentProcessor {
         admin: Address,
         tier: KycTier,
         max_amount: i128,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
             return Err(Error::Unauthorized);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::KycTierLimitsConfig, &KycTierLimits {
-                tier,
-                max_amount,
-            });
-        Self::bump_ttl(&env, &DataKey::KycTierLimitsConfig, LONG_LIVE_TTL);
-        Ok(())
+        // Issue #624: queue via timelock instead of applying immediately.
+        Self::enqueue_timelocked_action(&env, admin, TimelockActionKind::SetKycTierLimits(tier, max_amount))
     }
 
     /// Issue #303: Set the FX oracle contract address (admin only).
@@ -10507,36 +10521,184 @@ impl PaymentProcessor {
 
     /// Upgrade the contract WASM and increment the contract version.
     ///
-    /// Only the admin can call this. On success, the `ContractVersion` in persistent
-    /// storage is updated and a `CONTRACT/UPGRADED` event is emitted with the old and
-    /// new version strings.
-    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+    /// Issue #624: The upgrade is now queued via the timelock instead of
+    /// executing immediately.  Returns the action ID of the pending action.
+    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<String, Error> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
             return Err(Error::Unauthorized);
         }
 
-        let old_version = Self::version(env.clone());
+        Self::enqueue_timelocked_action(&env, admin, TimelockActionKind::UpgradeContract(new_wasm_hash))
+    }
 
-        // Increment the minor version: parse "X.Y.Z" → "X.Y+1.Z", or default to "2.0.0"
-        let new_version_str = bump_version_string(&env, &old_version);
+    // ── Issue #624: Timelock management functions ─────────────────────────────
 
-        // Call the host function to replace the WASM
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-
-        // Persist the updated version string
+    /// Set the timelock delay applied to critical admin operations.
+    ///
+    /// Default is 48 hours.  Only the admin may call this.
+    pub fn set_timelock_delay(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
         env.storage()
             .persistent()
-            .set(&DataKey::ContractVersion, &new_version_str);
+            .set(&DataKey::TimelockDelaySecs, &secs);
+        Ok(())
+    }
 
-        // Emit CONTRACT/UPGRADED event with old and new version
+    /// Return the current timelock delay in seconds.
+    pub fn get_timelock_delay(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TimelockDelaySecs)
+            .unwrap_or(DEFAULT_TIMELOCK_SECS)
+    }
+
+    /// Return all pending timelocked admin actions.
+    ///
+    /// Any actor may call this to inspect queued operations and their
+    /// `execute_after` timestamps.
+    pub fn get_pending_admin_actions(env: Env) -> Vec<PendingTimelockAction> {
+        let counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TimelockActionCounter)
+            .unwrap_or(0u64);
+
+        let mut pending: Vec<PendingTimelockAction> = Vec::new(&env);
+        for i in 0..counter {
+            let action_id = format_id(&env, "tl_", i);
+            if let Some(action) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PendingTimelockAction>(&DataKey::PendingTimelockAction(action_id))
+            {
+                pending.push_back(action);
+            }
+        }
+        pending
+    }
+
+    /// Execute a previously queued timelocked admin action.
+    ///
+    /// Reverts with `TimelockNotExpired` if called before `execute_after`.
+    /// Only the admin may execute.  Removes the action from the queue on success.
+    pub fn execute_timelocked_action(
+        env: Env,
+        admin: Address,
+        action_id: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let action: PendingTimelockAction = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PendingTimelockAction>(&DataKey::PendingTimelockAction(action_id.clone()))
+            .ok_or(Error::PaymentNotFound)?; // reuse "not found" semantics
+
+        let now = env.ledger().timestamp();
+        if now < action.execute_after {
+            return Err(Error::TimelockNotExpired);
+        }
+
+        // Dispatch the action
+        match action.kind {
+            TimelockActionKind::SetFeeRate(bps) => {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::SettlementFeeRate, &bps);
+            }
+            TimelockActionKind::SetKycTierLimits(tier, max_amount) => {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::KycTierLimitsConfig, &KycTierLimits { tier, max_amount });
+                Self::bump_ttl(&env, &DataKey::KycTierLimitsConfig, LONG_LIVE_TTL);
+            }
+            TimelockActionKind::UpgradeContract(new_wasm_hash) => {
+                let old_version: String = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::ContractVersion)
+                    .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION));
+
+                let new_version_str = bump_version_string(&env, &old_version);
+                env.deployer().update_current_contract_wasm(new_wasm_hash);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::ContractVersion, &new_version_str);
+
+                env.events().publish(
+                    (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
+                    (old_version, new_version_str),
+                );
+            }
+        }
+
+        // Remove the executed action from the queue
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingTimelockAction(action_id.clone()));
+
         env.events().publish(
-            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
-            (old_version, new_version_str),
+            (
+                Symbol::new(&env, "TIMELOCK"),
+                Symbol::new(&env, "ACTION_EXECUTED"),
+            ),
+            (action_id, admin),
         );
 
         Ok(())
+    }
+
+    /// Internal helper: assign an action ID, persist the pending action, and emit an event.
+    fn enqueue_timelocked_action(
+        env: &Env,
+        proposed_by: Address,
+        kind: TimelockActionKind,
+    ) -> Result<String, Error> {
+        let delay_secs: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TimelockDelaySecs)
+            .unwrap_or(DEFAULT_TIMELOCK_SECS);
+
+        let counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TimelockActionCounter)
+            .unwrap_or(0u64);
+
+        let action_id = format_id(env, "tl_", counter);
+
+        let action = PendingTimelockAction {
+            action_id: action_id.clone(),
+            kind,
+            execute_after: env.ledger().timestamp() + delay_secs,
+            proposed_by,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingTimelockAction(action_id.clone()), &action);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TimelockActionCounter, &(counter + 1));
+
+        env.events().publish(
+            (
+                Symbol::new(env, "TIMELOCK"),
+                Symbol::new(env, "ACTION_QUEUED"),
+            ),
+            (action_id.clone(), action.execute_after),
+        );
+
+        Ok(action_id)
     }
 
     // =========================================================================
@@ -11094,6 +11256,7 @@ mod subscription_test;
 
 pub mod utils;
 pub use utils::format_id;
+pub use utils::is_valid_cid;
 pub use utils::validate_ipfs_multihash;
 pub use utils::validate_id;
 
