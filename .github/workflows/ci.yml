@@ -467,6 +467,58 @@ jobs:
       - name: Check mainnet contract IDs
         run: node scripts/check-mainnet-contract-ids.js
 
+  # Job 6b: Check SDK React package build and types (Issue #620)
+  sdk-react-check:
+    name: SDK React Package Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sdk/react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sdk/react
+        run: npm ci
+
+      - name: Typecheck SDK React package
+        working-directory: sdk/react
+        run: npx tsc --noEmit
+
+  # Job 6c: Indexer TypeScript build and typecheck (Issue #619)
+  indexer-build:
+    name: Indexer TypeScript Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: indexer/package-lock.json
+
+      - name: Install dependencies
+        working-directory: indexer
+        run: npm ci
+
+      - name: Build indexer
+        working-directory: indexer
+        run: npm run build
+
+      - name: Typecheck indexer
+        working-directory: indexer
+        run: npx tsc --noEmit
+
   # Job 7: Lint GitHub Actions workflows with actionlint
   actionlint:
     name: Lint GitHub Actions (actionlint)
@@ -483,7 +535,7 @@ jobs:
   ci-success:
     name: CI Success
     if: ${{ always() }}
-    needs: [format, lint, security-audit, build, test, proptest, coverage, sdk-check, actionlint]
+    needs: [format, lint, security-audit, build, test, proptest, coverage, sdk-check, sdk-react-check, indexer-build, actionlint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -497,6 +549,8 @@ jobs:
              [[ "${{ needs.proptest.result }}" == "success" ]] && \
              [[ "${{ needs.coverage.result }}" == "success" ]] && \
              [[ "${{ needs.sdk-check.result }}" == "success" ]] && \
+             [[ "${{ needs.sdk-react-check.result }}" == "success" ]] && \
+             [[ "${{ needs.indexer-build.result }}" == "success" ]] && \
              [[ "${{ needs.actionlint.result }}" == "success" ]]; then
             echo "✅ All CI checks passed!"
             exit 0
