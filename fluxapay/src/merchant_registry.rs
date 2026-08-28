@@ -220,7 +220,6 @@ pub enum MerchantDataKey {
     /// Issue #667: Arbitrary on-chain contract metadata (description, deployment
     /// notes, audit commit hash, etc.), keyed by an admin-chosen Symbol.
     ContractMetadata(Symbol),
-    GlobalPaymentTolerance,
 }
 
 /// ~3 years at 5s/ledger — mirrors `LONG_LIVE_TTL` in lib.rs (issue #667).
@@ -1706,7 +1705,6 @@ impl MerchantRegistry {
             None => String::from_str(&env, ""),
         };
         merchant.anchor_config = MaybeAnchorConfig::from(anchor_config);
-        merchant.anchor_config = MaybeAnchorConfig::from(anchor_config.clone());
         env.storage()
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);

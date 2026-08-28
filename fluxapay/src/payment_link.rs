@@ -43,6 +43,28 @@ impl MaybeFiatConfig {
     }
 }
 
+/// Issue #637: Parameters for a single link in a `batch_create_links` call.
+/// Mirrors the positional arguments of `create_link` (the `merchant` is supplied
+/// once for the whole batch).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateLinkArgs {
+    pub link_id: String,
+    pub amount: Option<i128>,
+    pub currency: Symbol,
+    pub description: String,
+    pub expires_at: Option<u64>,
+    pub max_uses: Option<u32>,
+    pub direct_transfer: bool,
+    pub metadata: Option<Map<String, String>>,
+    pub fiat: MaybeFiatConfig,
+    pub base_url: Option<String>,
+}
+
+/// Issue #637: Maximum number of links that may be created in one
+/// `batch_create_links` call.
+pub const MAX_LINKS_PER_BATCH: u32 = 50;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentLink {
@@ -287,62 +309,123 @@ impl PaymentLinkManager {
         base_url: Option<String>,
     ) -> Result<String, crate::Error> {
         merchant.require_auth();
+        Self::build_and_store_link(
+            &env,
+            &merchant,
+            CreateLinkArgs {
+                link_id,
+                amount,
+                currency,
+                description,
+                expires_at,
+                max_uses,
+                direct_transfer,
+                metadata,
+                fiat,
+                base_url,
+            },
+        )
+    }
 
-        if !crate::utils::validate_id(&link_id) {
+    /// Issue #637: Bulk-create up to `MAX_LINKS_PER_BATCH` (50) payment links
+    /// for a single merchant in one atomic call.
+    ///
+    /// * Returns `BatchTooLarge` if more than 50 links are supplied.
+    /// * Per-item validation (`validate_id`, metadata limits) still runs for
+    ///   every link; a `link_id` that already exists — on-chain or earlier in
+    ///   the same batch — is rejected with `PaymentAlreadyExists`.
+    /// * On any failure the whole transaction reverts, so either all links are
+    ///   created or none are.
+    /// * Returns the created link IDs in submission order.
+    pub fn batch_create_links(
+        env: Env,
+        merchant: Address,
+        links: Vec<CreateLinkArgs>,
+    ) -> Result<Vec<String>, crate::Error> {
+        merchant.require_auth();
+
+        if links.len() > MAX_LINKS_PER_BATCH {
+            return Err(crate::Error::BatchTooLarge);
+        }
+
+        let mut created: Vec<String> = vec![&env];
+        for args in links.iter() {
+            if env
+                .storage()
+                .persistent()
+                .has(&LinkDataKey::Link(args.link_id.clone()))
+            {
+                return Err(crate::Error::PaymentAlreadyExists);
+            }
+            let id = Self::build_and_store_link(&env, &merchant, args)?;
+            created.push_back(id);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "LINK"), Symbol::new(&env, "BATCH_CREATED")),
+            (merchant, created.len()),
+        );
+
+        Ok(created)
+    }
+
+    /// Shared link-construction path used by `create_link` and
+    /// `batch_create_links`. Assumes `merchant` auth has already been checked by
+    /// the caller.
+    fn build_and_store_link(
+        env: &Env,
+        merchant: &Address,
+        args: CreateLinkArgs,
+    ) -> Result<String, crate::Error> {
+        if !crate::utils::validate_id(&args.link_id) {
             return Err(crate::Error::InvalidPaymentId);
         }
-        if let Some(ref meta_map) = metadata {
+        if let Some(ref meta_map) = args.metadata {
             utils::validate_metadata(meta_map)?;
         }
 
-        let resolved_base = base_url.or_else(|| {
-            env.storage()
-                .persistent()
-                .get(&LinkDataKey::PaymentBaseUrl)
-        });
+        let resolved_base = args
+            .base_url
+            .or_else(|| env.storage().persistent().get(&LinkDataKey::PaymentBaseUrl));
 
         let shareable_url = resolved_base.map(|base| {
             utils::concat_strings(
-                &env,
-                &[
-                    base,
-                    String::from_str(&env, "/pay/"),
-                    link_id.clone(),
-                ],
+                env,
+                &[base, String::from_str(env, "/pay/"), args.link_id.clone()],
             )
         });
 
         let link = PaymentLink {
-            link_id: link_id.clone(),
+            link_id: args.link_id.clone(),
             merchant_id: merchant.clone(),
-            amount,
-            currency,
-            description,
-            expires_at,
-            max_uses,
+            amount: args.amount,
+            currency: args.currency,
+            description: args.description,
+            expires_at: args.expires_at,
+            max_uses: args.max_uses,
             use_count: 0,
             view_count: 0,
             total_revenue: 0,
             last_used_at: None,
             active: true,
-            direct_transfer,
-            metadata,
-            fiat,
+            direct_transfer: args.direct_transfer,
+            metadata: args.metadata,
+            fiat: args.fiat,
             shareable_url,
             fee_bps: None,
         };
 
         env.storage()
             .persistent()
-            .set(&LinkDataKey::Link(link_id.clone()), &link);
+            .set(&LinkDataKey::Link(args.link_id.clone()), &link);
 
         // Emit LINK/CREATED event
         env.events().publish(
-            (Symbol::new(&env, "LINK"), Symbol::new(&env, "CREATED")),
-            (link_id.clone(), merchant),
+            (Symbol::new(env, "LINK"), Symbol::new(env, "CREATED")),
+            (args.link_id.clone(), merchant.clone()),
         );
 
-        Ok(link_id)
+        Ok(args.link_id)
     }
 
     /// Return the shareable URL for a link, if one was stored.
