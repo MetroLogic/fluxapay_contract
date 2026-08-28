@@ -91,6 +91,7 @@ pub struct PaymentStream {
 pub enum StreamDataKey {
     Stream(String),
     StreamFeeBps,
+    StreamFeeRecipient,
 }
 
 #[contracttype]
@@ -170,6 +171,12 @@ fn get_stream_fee_bps(env: &Env) -> i128 {
         .persistent()
         .get(&StreamDataKey::StreamFeeBps)
         .unwrap_or(0i128)
+}
+
+fn get_stream_fee_recipient(env: &Env) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&StreamDataKey::StreamFeeRecipient)
 }
 
 /// Compute fee and net amounts: returns (fee, net).
@@ -260,6 +267,16 @@ impl PaymentStreaming {
 
     pub fn get_stream_fee_bps(env: Env) -> i128 {
         get_stream_fee_bps(&env)
+    }
+
+    pub fn set_stream_fee_recipient(env: Env, recipient: Address) {
+        env.storage()
+            .persistent()
+            .set(&StreamDataKey::StreamFeeRecipient, &recipient);
+    }
+
+    pub fn get_stream_fee_recipient(env: Env) -> Option<Address> {
+        get_stream_fee_recipient(&env)
     }
 
     // ─── Stream creation ──────────────────────────────────────────────────────
@@ -737,8 +754,10 @@ impl PaymentStreaming {
                 let fee_bps = get_stream_fee_bps(&env);
                 let (fee, net) = apply_fee(withdrawable, fee_bps);
                 if fee > 0 {
-                    if let Some(admin) = crate::access_control::AccessControl::get_admin(&env) {
-                        token_client.transfer(&env.current_contract_address(), &admin, &fee);
+                    let fee_recipient = get_stream_fee_recipient(&env)
+                        .or_else(|| crate::access_control::AccessControl::get_admin(&env));
+                    if let Some(recipient) = fee_recipient {
+                        token_client.transfer(&env.current_contract_address(), &recipient, &fee);
                     }
                 }
                 token_client.transfer(&env.current_contract_address(), &recipient, &net);
@@ -1401,8 +1420,10 @@ impl PaymentStreaming {
             let fee_bps = get_stream_fee_bps(&env);
             let (fee, net) = apply_fee(withdrawable, fee_bps);
             if fee > 0 {
-                if let Some(admin) = crate::access_control::AccessControl::get_admin(&env) {
-                    token_client.transfer(&env.current_contract_address(), &admin, &fee);
+                let fee_recipient = get_stream_fee_recipient(&env)
+                    .or_else(|| crate::access_control::AccessControl::get_admin(&env));
+                if let Some(recipient) = fee_recipient {
+                    token_client.transfer(&env.current_contract_address(), &recipient, &fee);
                 }
             }
             token_client.transfer(

@@ -45,6 +45,8 @@ export interface PaymentLink {
  * when the link has not been viewed yet.
  */
 export interface LinkAnalytics {
+  /** Stellar address of the merchant that created the link */
+  merchant_id: string;
   /** Number of times the link has been viewed */
   view_count: number;
   /** Number of times the link has been successfully used */

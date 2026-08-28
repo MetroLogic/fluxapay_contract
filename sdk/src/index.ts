@@ -665,6 +665,30 @@ export class FluxapayClient {
     );
   }
 
+  async verifyPaymentBatch(params: {
+    operator: string;
+    verifications: Array<{
+      paymentId: string;
+      transactionHash: Buffer;
+      payerAddress: string;
+      amountReceived: bigint;
+      payerMuxedId?: bigint;
+    }>;
+  }) {
+    return withMappedContractError(() =>
+      (this.contract as any).verify_payment_batch({
+        operator: params.operator,
+        verifications: params.verifications.map((verification) => ({
+          payment_id: verification.paymentId,
+          transaction_hash: verification.transactionHash,
+          payer_address: verification.payerAddress,
+          amount_received: verification.amountReceived,
+          payer_muxed_id: verification.payerMuxedId,
+        })),
+      }),
+    );
+  }
+
   /**
    * Register a new merchant in the MerchantRegistry contract
    */
@@ -1652,6 +1676,18 @@ export class FluxapayClient {
           { stream_id: streamId, destination: recipient, amount: amount ?? I128_MAX },
         ],
       }),
+    );
+  }
+
+  async setStreamFeeRecipient(admin: string, recipient: string): Promise<void> {
+    return withMappedContractError(() =>
+      (this.contract as any).set_stream_fee_recipient({ admin, recipient }),
+    );
+  }
+
+  async getStreamFeeRecipient(): Promise<string | null> {
+    return withMappedContractError(() =>
+      (this.contract as any).get_stream_fee_recipient({}),
     );
   }
 
