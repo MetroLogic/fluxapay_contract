@@ -187,8 +187,14 @@ mod tests {
         let second = Bytes::from_slice(&env, b"same_payload");
         let different = Bytes::from_slice(&env, b"different_payload");
 
-        assert_eq!(env.crypto().sha256(&first), env.crypto().sha256(&second));
-        assert_ne!(env.crypto().sha256(&first), env.crypto().sha256(&different));
+        assert_eq!(
+            env.crypto().sha256(&first).to_bytes(),
+            env.crypto().sha256(&second).to_bytes()
+        );
+        assert_ne!(
+            env.crypto().sha256(&first).to_bytes(),
+            env.crypto().sha256(&different).to_bytes()
+        );
     }
 
     #[test]

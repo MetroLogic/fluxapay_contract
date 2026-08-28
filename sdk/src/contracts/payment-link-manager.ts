@@ -291,6 +291,33 @@ export class PaymentLinkManagerClient {
   }
 
   /**
+   * Issue #634: List a merchant's payment links, paginated.
+   *
+   * Maps to `PaymentLinkManager.get_merchant_links` on-chain. Links are
+   * returned in creation order. When `activeOnly` is `true`, deactivated and
+   * expired links are filtered out before pagination. `limit` is hard-capped
+   * at 100 per call; pass `0` for the maximum page.
+   *
+   * @param merchantId - The merchant's Stellar address
+   * @param opts.offset - Index into the merchant's link list (default 0)
+   * @param opts.limit - Max links to return, 1..=100 (default 100)
+   * @param opts.activeOnly - Exclude inactive/expired links (default false)
+   */
+  async getMerchantLinks(
+    merchantId: string,
+    opts: { offset?: number; limit?: number; activeOnly?: boolean } = {},
+  ): Promise<PaymentLink[]> {
+    return withMappedContractError(() =>
+      this.getContract().get_merchant_links({
+        merchant_id: merchantId,
+        offset: opts.offset ?? 0,
+        limit: opts.limit ?? 100,
+        active_only: opts.activeOnly ?? false,
+      }),
+    );
+  }
+
+  /**
    * Verify a batch of payment links, returning only the still-active ones.
    * @param linkIds - Array of link IDs to verify
    * @returns A promise resolving to an array of active link IDs

@@ -1,7 +1,7 @@
 use super::merchant_registry::*;
 use crate::{PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient};
-use soroban_sdk::{
 use crate::merchant_registry::MaybeFeeConfig;
+use soroban_sdk::{
     testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, String, Symbol,
     TryIntoVal,
 };

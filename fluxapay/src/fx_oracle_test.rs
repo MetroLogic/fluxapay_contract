@@ -246,6 +246,156 @@ fn test_set_rates_batch_rejects_non_oracle() {
     assert_eq!(result, Err(Ok(FXOracleError::Unauthorized)));
 }
 
+// ─── Issue #636: get_rate_or_inverse / get_settlement_amount_for_pair ─────────
+
+#[test]
+fn test_get_rate_or_inverse_direct_lookup() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // EUR_USD stored directly: 1 EUR = 1.08 USD (7 decimals).
+    let pair = Symbol::new(&env, "EUR_USD");
+    let rate = 1_0800000i128;
+    client.set_rate(&oracle, &pair, &rate, &7u32);
+
+    let data = client.get_rate_or_inverse(&pair);
+    assert_eq!(data.pair, pair);
+    assert_eq!(data.rate, rate);
+    assert_eq!(data.decimals, 7);
+}
+
+#[test]
+fn test_get_rate_or_inverse_falls_back_to_inverse() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // Only USD_EUR is stored: 1 USD = 0.90 EUR (7 decimals).
+    let stored = Symbol::new(&env, "USD_EUR");
+    client.set_rate(&oracle, &stored, &9_000000i128, &7u32);
+
+    // Asking for EUR_USD must return 1 / 0.90 ≈ 1.1111111 scaled to 14 decimals.
+    let requested = Symbol::new(&env, "EUR_USD");
+    let data = client.get_rate_or_inverse(&requested);
+
+    assert_eq!(data.pair, requested);
+    assert_eq!(data.decimals, 14);
+    // 10^(7+14) / 9_000000 = 10^21 / 9e6 = 111_111_111_111_111 (integer division)
+    assert_eq!(data.rate, 111_111_111_111_111i128);
+
+    // Sanity: rate / 10^14 ≈ 1.11111111111111
+    let one = 100_000_000_000_000i128; // 10^14
+    assert!(data.rate > one && data.rate < 2 * one);
+}
+
+#[test]
+fn test_get_rate_or_inverse_neither_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_oracle(&env);
+
+    let result = client.try_get_rate_or_inverse(&Symbol::new(&env, "GBP_JPY"));
+    assert_eq!(result, Err(Ok(FXOracleError::PairNotFound)));
+}
+
+#[test]
+fn test_get_rate_or_inverse_malformed_pair_without_separator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_oracle(&env);
+
+    // No '_' separator and no stored rate → PairNotFound (cannot invert).
+    let result = client.try_get_rate_or_inverse(&Symbol::new(&env, "EURUSD"));
+    assert_eq!(result, Err(Ok(FXOracleError::PairNotFound)));
+}
+
+#[test]
+fn test_get_rate_or_inverse_direct_stale_does_not_fall_through() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    let pair = Symbol::new(&env, "EUR_USD");
+    client.set_rate(&oracle, &pair, &1_0800000i128, &7u32);
+    // Also store the inverse so a fall-through would otherwise succeed.
+    client.set_rate(&oracle, &Symbol::new(&env, "USD_EUR"), &9_000000i128, &7u32);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 25 * 3600);
+
+    let result = client.try_get_rate_or_inverse(&pair);
+    assert_eq!(result, Err(Ok(FXOracleError::RateStale)));
+}
+
+#[test]
+fn test_get_settlement_amount_for_pair_uses_inverse_automatically() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // Store only NGN_USD: 1 NGN = 0.00065 USD (7 decimals → 6500).
+    client.set_rate(&oracle, &Symbol::new(&env, "NGN_USD"), &6500i128, &7u32);
+
+    // Convert 1_000_000 USD → NGN via the (missing) USD_NGN pair, which the
+    // contract derives as the inverse of NGN_USD.
+    let ngn = client.get_settlement_amount_for_pair(
+        &Symbol::new(&env, "USD"),
+        &Symbol::new(&env, "NGN"),
+        &1_000_000i128,
+    );
+
+    // inverse rate = 10^(7+14) / 6500 = 153_846_153_846_153_846 (14 decimals)
+    // amount = 1_000_000 * rate / 10^14 = 1_538_461_538 NGN
+    assert_eq!(ngn, 1_538_461_538i128);
+}
+
+#[test]
+fn test_get_settlement_amount_for_pair_direct() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // USD_NGN stored directly: 1 USD = 1500 NGN (7 decimals).
+    client.set_rate(&oracle, &Symbol::new(&env, "USD_NGN"), &1500_0000000i128, &7u32);
+
+    let ngn = client.get_settlement_amount_for_pair(
+        &Symbol::new(&env, "USD"),
+        &Symbol::new(&env, "NGN"),
+        &100i128,
+    );
+    assert_eq!(ngn, 150_000i128); // 100 * 1500
+}
+
+#[test]
+fn test_get_settlement_amount_for_pair_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_oracle(&env);
+
+    let result = client.try_get_settlement_amount_for_pair(
+        &Symbol::new(&env, "USD"),
+        &Symbol::new(&env, "CHF"),
+        &100i128,
+    );
+    assert_eq!(result, Err(Ok(FXOracleError::PairNotFound)));
+}
+
 #[test]
 fn test_set_rates_batch_rejects_oversized_batch() {
     use soroban_sdk::vec;

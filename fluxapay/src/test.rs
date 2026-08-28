@@ -2,8 +2,8 @@
 
 use super::*;
 use access_control::{role_admin, role_oracle, role_settlement_operator};
-use soroban_sdk::{
 use crate::merchant_registry::MaybeFeeConfig;
+use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Events as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
@@ -557,8 +557,7 @@ fn test_verify_payment_success() {
         &transaction_hash,
         &payer_address,
         &amount,
-        &None::<u64>);
-        &None,
+        &None::<u64>,
     );
 
     assert_eq!(status, PaymentStatus::Confirmed);
