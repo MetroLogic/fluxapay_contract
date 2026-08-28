@@ -366,7 +366,7 @@ jobs:
             ${{ runner.os }}-proptest-regressions-
 
       - name: Run bounded property tests
-        run: PROPTEST_CASES=256 cargo test -p fluxapay proptests:: --all-features -- --test-threads=1
+        run: "PROPTEST_CASES=256 cargo test -p fluxapay proptests:: --all-features -- --test-threads=1"
 
       - name: Upload proptest regression cases
         if: failure()
@@ -559,7 +559,7 @@ jobs:
   ci-success:
     name: CI Success
     if: ${{ always() }}
-    needs: [format, lint, security-audit, build, test, proptest, coverage, sdk-check, sdk-react-check, indexer-build, actionlint]
+    needs: [format, lint, security-audit, build, wasm-size-check, test, proptest, coverage, sdk-check, sdk-react-check, indexer-build, actionlint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -569,6 +569,7 @@ jobs:
              [[ "${{ needs.lint.result }}" == "success" ]] && \
              [[ "${{ needs.security-audit.result }}" == "success" ]] && \
              [[ "${{ needs.build.result }}" == "success" ]] && \
+             [[ "${{ needs.wasm-size-check.result }}" == "success" ]] && \
              [[ "${{ needs.test.result }}" == "success" ]] && \
              [[ "${{ needs.proptest.result }}" == "success" ]] && \
              [[ "${{ needs.coverage.result }}" == "success" ]] && \
