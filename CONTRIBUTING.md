@@ -332,6 +332,25 @@ Do **not** open a public issue. Follow the responsible disclosure process in [SE
 
 ---
 
+## 9. Adding Contract Events
+
+When adding new contract events to Soroban contracts, follow this 5-step process:
+
+1. **Define Event Struct**: Define `#[contractevent]` struct in `events.rs`.
+   ```rust
+   #[contractevent]
+   pub struct MerchantSuspendedEvent {
+       pub merchant_id: Address,
+       pub reason: Symbol,
+   }
+   ```
+2. **Emit Event in Entry Point**: Call event emission function inside contract logic.
+3. **Update Event Catalog**: Add event topics and data shapes to `docs/events.md`.
+4. **Register in Indexer**: Add event topic filter to `indexer/sync.yml`.
+5. **Update SDK**: Expose new event type in `sdk/src/types.ts`.
+
+---
+
 ## Questions?
 
 Join the community on [Telegram](https://t.me/+m23gN14007w0ZmQ0) or open a GitHub Discussion.
