@@ -65,6 +65,11 @@ export class RefundManagerClient {
    * @param refundAmount - The amount to refund in stroops
    * @param reason - The reason for the refund
    * @param requester - The address requesting the refund
+   * @param idempotencyKey - Issue #638: optional idempotency key. When supplied,
+   *   retrying with the same key and the same `(paymentId, refundAmount, reason)`
+   *   returns the original refund ID instead of creating a duplicate; reusing the
+   *   key with different parameters throws `DuplicateIdempotencyKey`. Keys are
+   *   retained for 30 days. Routes to the `create_refund_idempotent` entry point.
    * @returns A promise resolving to the refund ID
    * @throws Error if the refund creation fails
    */
@@ -73,7 +78,19 @@ export class RefundManagerClient {
     refundAmount: bigint,
     reason: string,
     requester: string,
+    idempotencyKey?: string,
   ): Promise<string> {
+    if (idempotencyKey !== undefined) {
+      return withMappedContractError(() =>
+        this.getContract().create_refund_idempotent({
+          payment_id: paymentId,
+          amount: refundAmount,
+          reason: reason,
+          requester: requester,
+          idempotency_key: idempotencyKey,
+        }),
+      );
+    }
     return withMappedContractError(() =>
       this.getContract().create_refund({
         payment_id: paymentId,
