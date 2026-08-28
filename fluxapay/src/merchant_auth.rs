@@ -431,13 +431,13 @@ mod period_reset_tests {
 
         // Pull within the same period — no reset, no PERIOD_RESET event.
         client.pull_payment(&merchant, &customer, &500i128);
-        let events_before = env.events().all().len();
+        let events_before = env.events().all().events().len();
 
         // Roll over into a new period — this pull must emit PERIOD_RESET
         // in addition to the usual CHARGED event.
         env.ledger().with_mut(|li| li.timestamp += 101);
         client.pull_payment(&merchant, &customer, &200i128);
-        let events_after = env.events().all().len();
+        let events_after = env.events().all().events().len();
 
         assert!(
             events_after > events_before + 1,

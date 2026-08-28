@@ -14,6 +14,8 @@ export const FX_ORACLE_ERROR_MAP: Record<number, string> = {
   2: "RateStale",
   3: "Unauthorized",
   4: "BatchTooLarge",
+  5: "RateDeviationExceeded",
+  6: "PairNotFound",
 };
 
 export class FxOracleError extends Error {
@@ -191,6 +193,45 @@ export class FxOracleClient {
         usdc_amount: usdcAmount,
         target_currency: targetCurrency,
       }),
+    );
+  }
+
+  /**
+   * Issue #636: Retrieve the rate for a `BASE_QUOTE` pair, transparently
+   * falling back to `1 / rate` of the inverse `QUOTE_BASE` pair when only the
+   * reciprocal is stored.
+   *
+   * The direct pair is tried first; a stored-but-stale direct rate rejects
+   * with `RateStale` rather than falling through. When the inverse is used the
+   * returned `RateData.rate` is scaled to 14-decimal fixed point.
+   *
+   * Rejects with `FxOracleError` (`PairNotFound`) only when neither the direct
+   * nor the inverse pair has a stored rate.
+   *
+   * @param pair - Currency pair symbol, e.g. `"EUR_USD"`
+   */
+  async getFxRateOrInverse(pair: string): Promise<RateData> {
+    return withFxOracleContractError(() =>
+      this.getContract().get_rate_or_inverse({ pair }),
+    );
+  }
+
+  /**
+   * Issue #636: Convert `amount` units of `from` into `to` using the
+   * `FROM_TO` pair rate, automatically falling back to the inverse `TO_FROM`
+   * pair. `result = amount * rate / 10^decimals`.
+   *
+   * @param from - Source currency symbol, e.g. `"USD"`
+   * @param to - Destination currency symbol, e.g. `"NGN"`
+   * @param amount - Amount of `from` (contract i128, integer units)
+   */
+  async getSettlementAmountForPair(
+    from: string,
+    to: string,
+    amount: bigint,
+  ): Promise<bigint> {
+    return withFxOracleContractError(() =>
+      this.getContract().get_settlement_amount_for_pair({ from, to, amount }),
     );
   }
 

@@ -136,31 +136,6 @@ pub struct PaymentCharge {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaymentSummary {
-    pub payment_id: String,
-    pub amount: i128,
-    pub fee: i128,
-    pub refund_amount: i128,
-    pub status: PaymentStatus,
-    pub settled_at: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconciliationReport {
-    pub merchant_id: Address,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub payments: Vec<PaymentSummary>,
-    pub total_gross: i128,
-    pub total_fees: i128,
-    pub total_refunds: i128,
-    pub total_net_settled: i128,
-    pub dispute_adjustments: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationPage {
     pub items: Vec<PaymentSummary>,
     pub total_confirmed: i128,
@@ -1093,6 +1068,10 @@ pub enum DataKey {
     /// Issue #667: Arbitrary on-chain contract metadata (description, deployment notes,
     /// audit commit hash, etc.), keyed by an admin-chosen Symbol.
     ContractMetadata(Symbol),
+    /// Issue #633: Append-only index of subscription IDs for a plan, keyed by
+    /// plan_id. Updated atomically on every `subscribe` / `subscribe_to_plan`.
+    /// Appended at the end of the enum to preserve existing discriminants.
+    PlanSubscribers(String),
 }
 
 /// Default initial contract version string.
@@ -1101,31 +1080,6 @@ pub const INITIAL_CONTRACT_VERSION: &str = "1.0.0";
 // When building for WASM deployment, only the active contract's #[contractimpl]
 // is compiled to avoid duplicate exported symbols. On non-WASM targets (tests,
 // tooling), all impls compile so that *Client types are available everywhere.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaymentSummary {
-    pub payment_id: String,
-    pub amount: i128,
-    pub fee: i128,
-    pub refund_amount: i128,
-    pub status: PaymentStatus,
-    pub settled_at: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconciliationReport {
-    pub merchant_id: Address,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub payments: Vec<PaymentSummary>,
-    pub total_gross: i128,
-    pub total_fees: i128,
-    pub total_refunds: i128,
-    pub total_net_settled: i128,
-    pub dispute_adjustments: i128,
-}
-
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MerchantAnalytics {
@@ -1322,33 +1276,8 @@ impl RefundManager {
         Ok(())
     }
 
-    fn require_not_paused(env: &Env) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
-            .unwrap_or(REFUND_COOLDOWN_SECS)
-    }
-
-    fn get_refund_fee_bps_internal(env: &Env) -> i128 {
-        env.storage()
-            .instance()
-            .get::<DataKey, i128>(&DataKey::RefundFeeBps)
-            .unwrap_or(REFUND_FEE_BPS)
-    }
-
     pub fn get_refund_fee_bps(env: Env) -> i128 {
         Self::get_refund_fee_bps_internal(&env)
-    }
-
-    fn get_dispute_bond_amount(env: Env) -> i128 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, i128>(&DataKey::DisputeBondAmount)
-            .unwrap_or(DISPUTE_BOND_AMOUNT)
     }
 
     /// Admin: configure the DEX router used to route swap_and_pay refunds
@@ -4490,6 +4419,9 @@ impl RefundManager {
         // Issue #302: Track in ActiveSubscriptions index
         Self::add_active_subscription(&env, &subscription_id);
 
+        // Issue #633: Track in the per-plan subscriber index
+        Self::add_plan_subscriber(&env, &plan_id, &subscription_id);
+
         env.events().publish(
             (
                 Symbol::new(&env, "SUBSCRIPTION"),
@@ -4564,6 +4496,9 @@ impl RefundManager {
 
         Self::add_active_subscription(&env, &subscription_id);
 
+        // Issue #633: Track in the per-plan subscriber index
+        Self::add_plan_subscriber(&env, &plan_id, &subscription_id);
+
         env.events().publish(
             (
                 Symbol::new(&env, "SUBSCRIPTION"),
@@ -4588,6 +4523,51 @@ impl RefundManager {
             }
         }
         subscriptions
+    }
+
+    /// Issue #633: List subscribers to a plan, paginated.
+    ///
+    /// Returns up to `limit` `Subscription` records (hard-capped at 100 per
+    /// call) starting at `offset` within the plan's subscriber index, in
+    /// subscription order. When `include_cancelled` is `false`, subscriptions
+    /// with `status == Cancelled` are filtered out *before* pagination, so the
+    /// page always contains `limit` live subscribers when that many remain.
+    ///
+    /// Used by merchants for plan-level analytics and bulk notifications.
+    pub fn get_plan_subscribers(
+        env: Env,
+        plan_id: String,
+        offset: u32,
+        limit: u32,
+        include_cancelled: bool,
+    ) -> Vec<Subscription> {
+        let subscription_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlanSubscribers(plan_id))
+            .unwrap_or_else(|| vec![&env]);
+
+        let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in subscription_ids.iter() {
+            let sub = match Self::get_subscription_internal(&env, &id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if !include_cancelled && sub.status == SubscriptionStatus::Cancelled {
+                continue;
+            }
+            if matched >= offset {
+                result.push_back(sub);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     pub fn pause_subscription(
@@ -5309,6 +5289,25 @@ impl RefundManager {
         result
     }
 
+    /// Issue #633: Append a subscription ID to the per-plan subscriber index.
+    /// Idempotent — a subscription ID already present is not added twice.
+    fn add_plan_subscriber(env: &Env, plan_id: &String, subscription_id: &String) {
+        let key = DataKey::PlanSubscribers(plan_id.clone());
+        let mut subscribers: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        for id in subscribers.iter() {
+            if id == subscription_id.clone() {
+                return;
+            }
+        }
+        subscribers.push_back(subscription_id.clone());
+        env.storage().persistent().set(&key, &subscribers);
+        Self::bump_ttl(env, &key, LONG_LIVE_TTL);
+    }
+
     /// Issue #302: Track subscription in the ActiveSubscriptions index
     fn add_active_subscription(env: &Env, subscription_id: &String) {
         let mut active: Vec<String> = env
@@ -5571,22 +5570,6 @@ impl RefundManager {
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
-    fn record_payment_status(env: &Env, payment: &PaymentCharge) {
-        let key = DataKey::PaymentStatusHistory(payment.payment_id.clone());
-        let mut history: Vec<PaymentStatusEvent> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| vec![env]);
-        history.push_back(PaymentStatusEvent {
-            status: payment.status.clone(),
-            timestamp: env.ledger().timestamp(),
-            tx_hash: payment.transaction_hash.clone(),
-        });
-        env.storage().persistent().set(&key, &history);
-        Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
-    }
-
     fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
@@ -5687,6 +5670,8 @@ impl PaymentProcessor {
             fx_oracle_configured,
             merchant_registry_configured,
         }
+    }
+
     /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
@@ -8235,7 +8220,7 @@ impl PaymentProcessor {
         })
     }
 
-    pub fn generate_reconciliation_report_paginated(
+    pub fn reconciliation_report_page(
         env: Env,
         merchant_id: Address,
         from_ts: u64,
@@ -9977,6 +9962,22 @@ impl PaymentProcessor {
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
 
+    fn record_payment_status(env: &Env, payment: &PaymentCharge) {
+        let key = DataKey::PaymentStatusHistory(payment.payment_id.clone());
+        let mut history: Vec<PaymentStatusEvent> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        history.push_back(PaymentStatusEvent {
+            status: payment.status.clone(),
+            timestamp: env.ledger().timestamp(),
+            tx_hash: payment.transaction_hash.clone(),
+        });
+        env.storage().persistent().set(&key, &history);
+        Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
+    }
+
     // ─── Merchant pre-authorization (pull payments) ───────────────────────────
 
     /// Customer grants a merchant permission to pull up to `limit_per_period`
@@ -10586,7 +10587,6 @@ impl PaymentProcessor {
             result.push_back(s);
         }
         result
-        Self::get_merchant_invoices_internal(&env, &merchant_id)
     }
 
     fn get_next_invoice_id(env: &Env) -> String {
@@ -10728,6 +10728,7 @@ mod partial_overpaid_test;
 mod pause_test;
 #[cfg(test)]
 mod payment_link_test;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod payment_metadata_test;

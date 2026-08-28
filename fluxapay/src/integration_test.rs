@@ -3,8 +3,8 @@ use crate::{
     ArbitratorVoteChoice, DataKey, DisputeStatus, Error, PaymentProcessor, PaymentProcessorClient,
     PaymentStatus, RefundManager, RefundManagerClient, RefundStatus, SettlementSplit,
 };
-use soroban_sdk::{
 use crate::merchant_registry::MaybeFeeConfig;
+use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol,
 };

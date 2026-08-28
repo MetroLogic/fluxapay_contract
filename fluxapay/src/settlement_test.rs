@@ -4,8 +4,8 @@ use crate::{
     },
     Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus,
 };
-use soroban_sdk::{
 use crate::merchant_registry::MaybeFeeConfig;
+use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol,
 };
