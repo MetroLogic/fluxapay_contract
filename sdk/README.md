@@ -284,6 +284,46 @@ const report = await client.getPlatformFeeReport(1700000000n, 1700086400n);
 // { totalFeesCollected, treasuryShare, developerShare, paymentCount }
 ```
 
+## Merchant Analytics (FluxapayClient)
+
+All three calls are read-only — no authorization required.
+
+`getMerchantPaymentCount` returns the O(1) count of payments created for a
+merchant (backed by the on-chain `MerchantPaymentCount` index), for dashboard
+pagination:
+
+```typescript
+const count = await client.getMerchantPaymentCount(merchantId); // number
+```
+
+`getMerchantAnalytics` aggregates a merchant's activity over a time window
+`[fromTimestamp, toTimestamp]` (inclusive, ledger seconds). Omit `toTimestamp`
+(or pass `0`) for all-time figures — the client then sends the contract's
+`u64::MAX` sentinel so it scans the merchant index directly:
+
+```typescript
+const analytics = await client.getMerchantAnalytics(merchantId, 0);
+// or a bounded window:
+// await client.getMerchantAnalytics(merchantId, 1700000000, 1702592000);
+// MerchantAnalytics:
+// {
+//   totalPayments, confirmedPayments, failedPayments,
+//   totalVolume, averageAmount,
+//   disputeCount, refundCount, netSettledVolume
+// }
+```
+
+`getTopMerchants` ranks merchants by cumulative gross payment volume across the
+whole platform (operator-level reporting). It reads only the volume/count
+indexes — never individual payments — and the contract caps `limit` at 100
+(`limit = 0` returns up to the cap). Results are ordered by `totalVolume`
+descending:
+
+```typescript
+const leaderboard = await client.getTopMerchants(10);
+// MerchantRanking[]: [{ merchantId, totalVolume, paymentCount }, ...]
+```
+
 ## Collaborative Dispute Settlement (issue #665)
 
 When the buyer and merchant agree on a settlement amount off-chain, they can
@@ -438,6 +478,31 @@ await merchantClient.updateMerchant({
   merchantId: "merchant_001",
   businessName: "Updated Corp Name",
 });
+```
+
+### Payment tolerance configuration (issue #529 / #630)
+
+Payment tolerance is the amount an incoming payment may fall short of the
+requested amount and still be accepted (smallest currency unit). There is a
+global default plus an optional per-merchant override; the contract caps the
+effective tolerance at 1% of each payment amount.
+
+The setters and getters are exposed on both `FluxapayClient` and the standalone
+`MerchantRegistryClient` with identical signatures:
+
+```typescript
+// Global default — signed by the MerchantRegistry admin.
+// An unauthorized signer throws a mapped `Unauthorized` FluxapayError.
+await client.setGlobalPaymentTolerance("G...ADMIN", 100n);
+const globalTolerance = await client.getGlobalPaymentTolerance(); // bigint
+
+// Per-merchant override — signed by the merchant. Pass null to clear it and
+// fall back to the global default.
+await client.setMerchantPaymentTolerance("merchant_001", 250n);
+await client.setMerchantPaymentTolerance("merchant_001", null);
+
+// Effective value: the merchant override if set, otherwise the global default.
+const effective = await client.getMerchantPaymentTolerance("merchant_001"); // bigint
 ```
 
 ## FxOracleClient

@@ -135,7 +135,20 @@ pub enum StreamError {
     StreamNotPaused = 13,
     /// Receiver address cannot be the same as sender address.
     InvalidReceiver = 14,
+    /// Issue #627: A bulk operation was passed more stream IDs than the per-call cap.
+    BatchTooLarge = 15,
 }
+
+/// Issue #627: Maximum number of stream IDs accepted by `bulk_bump_stream_ttls`
+/// in a single call. Mirrors the 50-item cap on
+/// `PaymentProcessor::bulk_bump_payment_ttls`.
+pub const MAX_BULK_TTL_BUMP: u32 = 50;
+
+/// Issue #627: TTL (in ledgers) that `bulk_bump_stream_ttls` extends each stream
+/// entry to — ~3 years at 5s/ledger, matching `LONG_LIVE_TTL` in the payment
+/// processor. The bump only fires when the remaining TTL drops below
+/// `STREAM_TTL_BUMP / 5`.
+pub const STREAM_TTL_BUMP: u32 = 18_921_600;
 
 /// Storage key for the per-stream withdrawal reentrancy lock.
 #[contracttype]
@@ -1420,5 +1433,45 @@ impl PaymentStreaming {
         }
 
         Ok(processed)
+    }
+
+    // ─── Bulk TTL maintenance ─────────────────────────────────────────────────
+
+    /// Issue #627: Extend the persistent-storage TTL of many stream entries in a
+    /// single call, so contracts with many active streams pay one batched set of
+    /// TTL writes instead of one per stream interaction.
+    ///
+    /// Mirrors `PaymentProcessor::bulk_bump_payment_ttls`:
+    /// * Permissionless — TTL bumps only ever extend an entry's lifetime.
+    /// * Stream IDs that don't resolve to a stored stream are silently skipped.
+    /// * Rejects batches larger than [`MAX_BULK_TTL_BUMP`] (50).
+    ///
+    /// Returns the number of streams whose TTL was actually bumped.
+    pub fn bulk_bump_stream_ttls(
+        env: Env,
+        stream_ids: Vec<String>,
+    ) -> Result<u32, StreamError> {
+        if stream_ids.len() > MAX_BULK_TTL_BUMP {
+            return Err(StreamError::BatchTooLarge);
+        }
+
+        let threshold = core::cmp::max(1, STREAM_TTL_BUMP / 5);
+        let mut bumped = 0u32;
+        for stream_id in stream_ids.iter() {
+            let key = StreamDataKey::Stream(stream_id.clone());
+            if env.storage().persistent().has(&key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, threshold, STREAM_TTL_BUMP);
+                bumped += 1;
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "STREAM"), Symbol::new(&env, "TTL_BUMPED")),
+            bumped,
+        );
+
+        Ok(bumped)
     }
 }
