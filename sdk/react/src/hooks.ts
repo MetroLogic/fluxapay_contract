@@ -9,6 +9,7 @@ import type {
   LineItem,
   InvoiceStatus,
   CreateInvoiceParams,
+  PaymentLink,
 } from "@fluxapay/sdk";
 import { useFluxapayClient } from "./FluxapayProvider.js";
 import { useAsync, type AsyncState } from "./useAsync.js";
@@ -67,6 +68,42 @@ export function useMerchantPayments(
       return payments as unknown as PaymentCharge[];
     },
     [merchantId, offset, limit],
+    !!merchantId,
+  );
+}
+
+export interface UseMerchantLinksOptions {
+  /** Number of links to skip. Defaults to 0. */
+  offset?: number;
+  /** Max number of links to return (1..=100). Defaults to 100. */
+  limit?: number;
+  /** When true, deactivated and expired links are excluded. Defaults to false. */
+  activeOnly?: boolean;
+}
+
+/**
+ * Issue #634: Fetch a merchant's payment links, paginated.
+ *
+ * Maps to `PaymentLinkManager.get_merchant_links` on-chain and re-fetches
+ * whenever `merchantId` or any option changes.
+ */
+export function useMerchantLinks(
+  merchantId: string | undefined,
+  options?: UseMerchantLinksOptions,
+): AsyncState<PaymentLink[]> {
+  const client = useFluxapayClient();
+  const offset = options?.offset ?? 0;
+  const limit = options?.limit ?? 100;
+  const activeOnly = options?.activeOnly ?? false;
+
+  return useAsync(
+    () =>
+      client.getMerchantLinks(merchantId as string, {
+        offset,
+        limit,
+        activeOnly,
+      }) as unknown as Promise<PaymentLink[]>,
+    [merchantId, offset, limit, activeOnly],
     !!merchantId,
   );
 }

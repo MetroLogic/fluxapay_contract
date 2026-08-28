@@ -334,6 +334,42 @@ pub struct SubscriptionPaymentCreated {
     pub amount: i128,
 }
 
+/// Issue #635: Emit a `SUBSCRIPTION/PLAN_CREATED` event when a merchant creates
+/// a new subscription/billing plan. Topics: `(SUBSCRIPTION, PLAN_CREATED)`,
+/// data: `(plan_id, merchant_id, amount, interval_secs)`.
+pub fn emit_subscription_plan_created(
+    env: &Env,
+    plan_id: &String,
+    merchant_id: &Address,
+    amount: i128,
+    interval_secs: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "PLAN_CREATED"),
+        ),
+        (plan_id.clone(), merchant_id.clone(), amount, interval_secs),
+    );
+}
+
+/// Issue #635: Emit a `SUBSCRIPTION/PLAN_DEACTIVATED` event when a merchant
+/// deactivates a subscription/billing plan. Topics:
+/// `(SUBSCRIPTION, PLAN_DEACTIVATED)`, data: `(plan_id, merchant_id)`.
+pub fn emit_subscription_plan_deactivated(
+    env: &Env,
+    plan_id: &String,
+    merchant_id: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "PLAN_DEACTIVATED"),
+        ),
+        (plan_id.clone(), merchant_id.clone()),
+    );
+}
+
 // ============================================================================
 // Stream Events
 // ============================================================================

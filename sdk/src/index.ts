@@ -51,6 +51,7 @@ import {
   type LinkAnalytics,
   type CreateLinkParams,
   type CreatePaymentLinkResult,
+  type BatchLinkItem,
 } from "./contracts/payment-link-manager.js";
 import { SEP10Authenticator, type SEP10ChallengeResponse, type SEP10AuthenticatedResponse } from "./sep10.js";
 
@@ -1238,7 +1239,8 @@ export class FluxapayClient {
     limit: number;
   }) {
     return withMappedContractError(() =>
-      (this.contract as any).generate_reconciliation_report_paginated({
+      (this.contract as any).generate_reconciliation_page({
+      (this.contract as any).reconciliation_report_page({
         merchant_id: params.merchantId,
         from_ts: params.fromTs,
         to_ts: params.toTs,
@@ -1605,6 +1607,77 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #637: Bulk-create up to 50 payment links for one merchant in a single
+   * atomic call. Maps to `PaymentLinkManager.batch_create_links` on-chain.
+   */
+  async batchCreateLinks(merchant: string, links: BatchLinkItem[]): Promise<string[]> {
+    return this.getPaymentLinkManager().batchCreateLinks(merchant, links);
+  }
+
+  /**
+   * Issue #632: Atomically create an on-chain invoice together with a payment
+   * link and wire them up (`invoice.payment_link_id` is set to the new link ID).
+   * Maps to `PaymentProcessor.create_payment_link_invoice`.
+   *
+   * If link creation fails the invoice is never persisted; if any later step
+   * fails the whole transaction reverts.
+   *
+   * @returns `[invoice, paymentLink]` as returned by the contract
+   */
+  async createInvoiceWithLink(params: {
+    merchantId: string;
+    /** PaymentLinkManager contract address (defaults to the configured one) */
+    linkManager?: string;
+    customerEmail: string;
+    lineItems: Array<{ description: string; amount: bigint; quantity: number }>;
+    totalAmount: bigint;
+    currency: string;
+    dueDate: bigint;
+    link: {
+      linkId: string;
+      amount?: bigint;
+      currency?: string;
+      description?: string;
+      expiresAt?: bigint;
+      maxUses?: number;
+      directTransfer?: boolean;
+      metadata?: Record<string, string>;
+      baseUrl?: string;
+    };
+  }): Promise<unknown> {
+    const linkManager =
+      params.linkManager ??
+      resolveContractId(
+        this.config.paymentLinkContractId,
+        FLUXAPAY_CONTRACT_IDS[this.config.network].paymentLinkManager,
+        "paymentLinkContractId",
+      );
+    return withMappedContractError(() =>
+      (this.contract as any).create_payment_link_invoice({
+        merchant_id: params.merchantId,
+        link_manager: linkManager,
+        customer_email: params.customerEmail,
+        line_items: params.lineItems,
+        total_amount: params.totalAmount,
+        currency: params.currency,
+        due_date: params.dueDate,
+        link_args: {
+          link_id: params.link.linkId,
+          amount: params.link.amount,
+          currency: params.link.currency ?? params.currency,
+          description: params.link.description ?? "",
+          expires_at: params.link.expiresAt,
+          max_uses: params.link.maxUses,
+          direct_transfer: params.link.directTransfer ?? false,
+          metadata: params.link.metadata,
+          fiat: { tag: "None", values: undefined },
+          base_url: params.link.baseUrl,
+        },
+      }),
+    );
+  }
+
+  /**
    * Create a payment link and return shareable URL + QR code payload.
    *
    * @returns `{ linkId, shareableUrl, qrCodeData }` where `qrCodeData` is the
@@ -1656,6 +1729,22 @@ export class FluxapayClient {
    */
   async getLink(linkId: string): Promise<PaymentLink> {
     return this.getPaymentLinkManager().getLink(linkId);
+  }
+
+  /**
+   * Issue #634: List a merchant's payment links, paginated.
+   * Maps to `PaymentLinkManager.get_merchant_links` on-chain.
+   *
+   * @param merchantId - The merchant's Stellar address
+   * @param opts.offset - Index into the merchant's link list (default 0)
+   * @param opts.limit - Max links to return, 1..=100 (default 100)
+   * @param opts.activeOnly - Exclude deactivated/expired links (default false)
+   */
+  async getMerchantLinks(
+    merchantId: string,
+    opts: { offset?: number; limit?: number; activeOnly?: boolean } = {},
+  ): Promise<PaymentLink[]> {
+    return this.getPaymentLinkManager().getMerchantLinks(merchantId, opts);
   }
 
   /**
@@ -1781,6 +1870,32 @@ export class FluxapayClient {
         payment_id: params.paymentId,
       }),
     );
+  }
+
+  /**
+   * Issue #633: List the subscribers to a plan, paginated, for plan-level
+   * analytics and bulk notifications.
+   *
+   * Maps to `RefundManager.get_plan_subscribers` on-chain. When
+   * `includeCancelled` is `false` (the default), subscriptions with status
+   * `Cancelled` are filtered out before pagination. `limit` is hard-capped at
+   * 100 per call; pass `0` for the maximum page.
+   */
+  async getPlanSubscribers(params: {
+    planId: string;
+    offset?: number;
+    limit?: number;
+    includeCancelled?: boolean;
+  }): Promise<unknown[]> {
+    const raw = await withMappedContractError(() =>
+      (this.contract as any).get_plan_subscribers({
+        plan_id: params.planId,
+        offset: params.offset ?? 0,
+        limit: params.limit ?? 100,
+        include_cancelled: params.includeCancelled ?? false,
+      }),
+    );
+    return raw.result as unknown[];
   }
 
   /**

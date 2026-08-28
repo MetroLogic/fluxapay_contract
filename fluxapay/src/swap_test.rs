@@ -4,8 +4,8 @@ use crate::{
     Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, SwapAndPayArgs, SwapRoute,
     ZERO_CONTRACT_STRKEY,
 };
-use soroban_sdk::{
 use crate::merchant_registry::MaybeFeeConfig;
+use soroban_sdk::{
     testutils::Address as _, testutils::Events, token, vec, Address, Env, String, Symbol,
     Vec,
 };

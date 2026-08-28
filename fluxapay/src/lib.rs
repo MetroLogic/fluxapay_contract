@@ -18,6 +18,9 @@ const REFUND_FEE_BPS: i128 = 100;
 const REFUND_COOLDOWN_SECS: u64 = 300;
 /// Default refund request expiry period (30 days in seconds).
 const REFUND_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+/// Issue #638: TTL (in ledgers, ~5s each) for a stored refund idempotency key —
+/// 30 days, matching the payment `client_token` retention window.
+const REFUND_IDEMPOTENCY_TTL_LEDGERS: u32 = (30 * 24 * 60 * 60) / 5;
 /// Issue #480: Minimum time between daily settlements (24 hours in seconds).
 const SETTLEMENT_DAILY_INTERVAL_SECS: u64 = 86_400;
 /// Issue #480: Minimum time between weekly settlements (7 days in seconds).
@@ -136,31 +139,6 @@ pub struct PaymentCharge {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaymentSummary {
-    pub payment_id: String,
-    pub amount: i128,
-    pub fee: i128,
-    pub refund_amount: i128,
-    pub status: PaymentStatus,
-    pub settled_at: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconciliationReport {
-    pub merchant_id: Address,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub payments: Vec<PaymentSummary>,
-    pub total_gross: i128,
-    pub total_fees: i128,
-    pub total_refunds: i128,
-    pub total_net_settled: i128,
-    pub dispute_adjustments: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationPage {
     pub items: Vec<PaymentSummary>,
     pub total_confirmed: i128,
@@ -200,31 +178,6 @@ pub enum PaymentStatus {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaymentSummary {
-    pub payment_id: String,
-    pub amount: i128,
-    pub fee: i128,
-    pub refund_amount: i128,
-    pub status: PaymentStatus,
-    pub settled_at: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconciliationReport {
-    pub merchant_id: Address,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub payments: Vec<PaymentSummary>,
-    pub total_gross: i128,
-    pub total_fees: i128,
-    pub total_refunds: i128,
-    pub total_net_settled: i128,
-    pub dispute_adjustments: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Refund {
     pub refund_id: String,
     pub payment_id: String,
@@ -249,6 +202,20 @@ pub enum RefundStatus {
     Completed,
     Rejected,
     Cancelled,
+}
+
+/// Issue #638: Persisted record for a refund idempotency key. Stored under
+/// `DataKey::RefundIdempotencyKey(key)` with a 30-day TTL so that retrying
+/// `create_refund` with the same key returns the original `refund_id` instead
+/// of creating a duplicate. Reusing a key with different parameters is rejected
+/// with `Error::DuplicateIdempotencyKey`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefundIdempotencyRecord {
+    pub refund_id: String,
+    pub payment_id: String,
+    pub amount: i128,
+    pub reason: String,
 }
 
 /// Issue #676: consolidated read-only view of all refund configuration.
@@ -1104,6 +1071,14 @@ pub enum DataKey {
     /// Issue #628: Append-only list of every merchant address that has had at
     /// least one payment created, for `get_top_merchants` enumeration.
     TrackedMerchants,
+    /// Issue #638: Refund idempotency key → `RefundIdempotencyRecord`. Stored with a
+    /// 30-day TTL so a retried `create_refund` with the same key returns the original
+    /// `refund_id` rather than creating a duplicate refund.
+    RefundIdempotencyKey(String),
+    /// Issue #633: Append-only index of subscription IDs for a plan, keyed by
+    /// plan_id. Updated atomically on every `subscribe` / `subscribe_to_plan`.
+    /// Appended at the end of the enum to preserve existing discriminants.
+    PlanSubscribers(String),
 }
 
 /// Default initial contract version string.
@@ -1112,31 +1087,6 @@ pub const INITIAL_CONTRACT_VERSION: &str = "1.0.0";
 // When building for WASM deployment, only the active contract's #[contractimpl]
 // is compiled to avoid duplicate exported symbols. On non-WASM targets (tests,
 // tooling), all impls compile so that *Client types are available everywhere.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaymentSummary {
-    pub payment_id: String,
-    pub amount: i128,
-    pub fee: i128,
-    pub refund_amount: i128,
-    pub status: PaymentStatus,
-    pub settled_at: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconciliationReport {
-    pub merchant_id: Address,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub payments: Vec<PaymentSummary>,
-    pub total_gross: i128,
-    pub total_fees: i128,
-    pub total_refunds: i128,
-    pub total_net_settled: i128,
-    pub dispute_adjustments: i128,
-}
-
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MerchantAnalytics {
@@ -1345,33 +1295,8 @@ impl RefundManager {
         Ok(())
     }
 
-    fn require_not_paused(env: &Env) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
-            .unwrap_or(REFUND_COOLDOWN_SECS)
-    }
-
-    fn get_refund_fee_bps_internal(env: &Env) -> i128 {
-        env.storage()
-            .instance()
-            .get::<DataKey, i128>(&DataKey::RefundFeeBps)
-            .unwrap_or(REFUND_FEE_BPS)
-    }
-
     pub fn get_refund_fee_bps(env: Env) -> i128 {
         Self::get_refund_fee_bps_internal(&env)
-    }
-
-    fn get_dispute_bond_amount(env: Env) -> i128 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, i128>(&DataKey::DisputeBondAmount)
-            .unwrap_or(DISPUTE_BOND_AMOUNT)
     }
 
     /// Admin: configure the DEX router used to route swap_and_pay refunds
@@ -1851,7 +1776,7 @@ impl RefundManager {
         }
 
         Self::require_not_blacklisted(&env, &requester)?;
-        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, None)
+        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, None, None)
     }
 
     pub fn create_refund(
@@ -1863,10 +1788,43 @@ impl RefundManager {
     ) -> Result<String, Error> {
         requester.require_auth();
         Self::require_not_blacklisted(&env, &requester)?;
-        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, None)
+        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, None, None)
+    }
+
+    /// Issue #638: Create a refund request with an optional idempotency key.
+    ///
+    /// When `idempotency_key` is `Some`, the key is persisted for 30 days:
+    /// * Retrying with the same key **and** the same `(payment_id, refund_amount,
+    ///   reason)` returns the original `refund_id` without creating a duplicate.
+    /// * Reusing the key with different parameters returns
+    ///   `Error::DuplicateIdempotencyKey`.
+    ///
+    /// Passing `None` is exactly equivalent to `create_refund` (backward compatible).
+    pub fn create_refund_idempotent(
+        env: Env,
+        payment_id: String,
+        refund_amount: i128,
+        reason: String,
+        requester: Address,
+        idempotency_key: Option<String>,
+    ) -> Result<String, Error> {
+        requester.require_auth();
+        Self::require_not_blacklisted(&env, &requester)?;
+        Self::create_refund_internal(
+            &env,
+            payment_id,
+            refund_amount,
+            reason,
+            requester,
+            None,
+            idempotency_key,
+        )
     }
 
     /// Create a refund request with optional receipt hash metadata.
+    ///
+    /// Issue #638: also accepts an optional `idempotency_key` with the same
+    /// semantics as `create_refund_idempotent`.
     pub fn create_refund_with_receipt(
         env: Env,
         payment_id: String,
@@ -1874,10 +1832,19 @@ impl RefundManager {
         reason: String,
         requester: Address,
         receipt_hash: Option<BytesN<32>>,
+        idempotency_key: Option<String>,
     ) -> Result<String, Error> {
         requester.require_auth();
         Self::require_not_blacklisted(&env, &requester)?;
-        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, receipt_hash)
+        Self::create_refund_internal(
+            &env,
+            payment_id,
+            refund_amount,
+            reason,
+            requester,
+            receipt_hash,
+            idempotency_key,
+        )
     }
 
     fn create_refund_internal(
@@ -1887,9 +1854,30 @@ impl RefundManager {
         reason: String,
         requester: Address,
         receipt_hash: Option<BytesN<32>>,
+        idempotency_key: Option<String>,
     ) -> Result<String, Error> {
         if refund_amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+
+        // Issue #638: Idempotency short-circuit. If this key was already used,
+        // return the original refund_id for identical params, or reject a reuse
+        // with different params.
+        if let Some(ref key) = idempotency_key {
+            let dk = DataKey::RefundIdempotencyKey(key.clone());
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, RefundIdempotencyRecord>(&dk)
+            {
+                if record.payment_id == payment_id
+                    && record.amount == refund_amount
+                    && record.reason == reason
+                {
+                    return Ok(record.refund_id);
+                }
+                return Err(Error::DuplicateIdempotencyKey);
+            }
         }
 
         // Validate refund amount does not exceed original payment amount
@@ -1949,7 +1937,7 @@ impl RefundManager {
             refund_id: refund_id.clone(),
             payment_id: payment_id.clone(),
             amount: refund_amount,
-            reason,
+            reason: reason.clone(),
             status: RefundStatus::Pending,
             requester,
             created_at,
@@ -1976,6 +1964,22 @@ impl RefundManager {
         );
 
         Self::bump_refund_ttl(env, &refund_id, &refund.status);
+
+        // Issue #638: Persist the idempotency key → refund mapping (30-day TTL) so a
+        // retried call with the same key returns this refund_id instead of duplicating.
+        if let Some(key) = idempotency_key {
+            let dk = DataKey::RefundIdempotencyKey(key);
+            env.storage().persistent().set(
+                &dk,
+                &RefundIdempotencyRecord {
+                    refund_id: refund_id.clone(),
+                    payment_id: payment_id.clone(),
+                    amount: refund_amount,
+                    reason,
+                },
+            );
+            Self::bump_ttl(env, &dk, REFUND_IDEMPOTENCY_TTL_LEDGERS);
+        }
 
         // Issue #27: emit REFUND/CREATED event
         env.events().publish(
@@ -2549,6 +2553,7 @@ impl RefundManager {
             refund_amount,
             reason,
             payment.payer_address.clone().ok_or(Error::Unauthorized)?,
+            None,
             None,
         )?;
 
@@ -3419,6 +3424,7 @@ impl RefundManager {
             refund_reason,
             dispute.disputer.clone(),
             None,
+            None,
         )?;
 
         // Process the refund immediately (CEI: status=Completed before token transfer)
@@ -3676,6 +3682,7 @@ impl RefundManager {
             settlement_amount,
             refund_reason,
             dispute.disputer.clone(),
+            None,
             None,
         )?;
 
@@ -4020,6 +4027,7 @@ impl RefundManager {
                 refund_reason,
                 dispute.disputer.clone(),
                 None,
+                None,
             ) {
                 let _ = Self::process_refund_internal(&env, &operator, refund_id);
             }
@@ -4147,6 +4155,7 @@ impl RefundManager {
                     dispute.amount,
                     refund_reason,
                     dispute.disputer.clone(),
+                    None,
                     None,
                 ) {
                     let _ = Self::process_refund_internal(env, &admin, refund_id);
@@ -4357,7 +4366,7 @@ impl RefundManager {
 
         let plan = SubscriptionPlan {
             plan_id: plan_id.clone(),
-            merchant_id: merchant,
+            merchant_id: merchant.clone(),
             name,
             description,
             amount,
@@ -4370,7 +4379,10 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::SubscriptionPlan(plan_id), &plan);
+            .set(&DataKey::SubscriptionPlan(plan_id.clone()), &plan);
+
+        // Issue #635: emit SUBSCRIPTION/PLAN_CREATED for indexer plan-level visibility.
+        events::emit_subscription_plan_created(&env, &plan_id, &merchant, amount, interval_secs);
 
         Ok(())
     }
@@ -4448,7 +4460,10 @@ impl RefundManager {
         plan.active = false;
         env.storage()
             .persistent()
-            .set(&DataKey::SubscriptionPlan(plan_id), &plan);
+            .set(&DataKey::SubscriptionPlan(plan_id.clone()), &plan);
+
+        // Issue #635: emit SUBSCRIPTION/PLAN_DEACTIVATED for indexer plan-level visibility.
+        events::emit_subscription_plan_deactivated(&env, &plan_id, &merchant);
 
         Ok(())
     }
@@ -4512,6 +4527,9 @@ impl RefundManager {
 
         // Issue #302: Track in ActiveSubscriptions index
         Self::add_active_subscription(&env, &subscription_id);
+
+        // Issue #633: Track in the per-plan subscriber index
+        Self::add_plan_subscriber(&env, &plan_id, &subscription_id);
 
         env.events().publish(
             (
@@ -4587,6 +4605,9 @@ impl RefundManager {
 
         Self::add_active_subscription(&env, &subscription_id);
 
+        // Issue #633: Track in the per-plan subscriber index
+        Self::add_plan_subscriber(&env, &plan_id, &subscription_id);
+
         env.events().publish(
             (
                 Symbol::new(&env, "SUBSCRIPTION"),
@@ -4611,6 +4632,51 @@ impl RefundManager {
             }
         }
         subscriptions
+    }
+
+    /// Issue #633: List subscribers to a plan, paginated.
+    ///
+    /// Returns up to `limit` `Subscription` records (hard-capped at 100 per
+    /// call) starting at `offset` within the plan's subscriber index, in
+    /// subscription order. When `include_cancelled` is `false`, subscriptions
+    /// with `status == Cancelled` are filtered out *before* pagination, so the
+    /// page always contains `limit` live subscribers when that many remain.
+    ///
+    /// Used by merchants for plan-level analytics and bulk notifications.
+    pub fn get_plan_subscribers(
+        env: Env,
+        plan_id: String,
+        offset: u32,
+        limit: u32,
+        include_cancelled: bool,
+    ) -> Vec<Subscription> {
+        let subscription_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlanSubscribers(plan_id))
+            .unwrap_or_else(|| vec![&env]);
+
+        let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in subscription_ids.iter() {
+            let sub = match Self::get_subscription_internal(&env, &id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if !include_cancelled && sub.status == SubscriptionStatus::Cancelled {
+                continue;
+            }
+            if matched >= offset {
+                result.push_back(sub);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     pub fn pause_subscription(
@@ -5332,6 +5398,25 @@ impl RefundManager {
         result
     }
 
+    /// Issue #633: Append a subscription ID to the per-plan subscriber index.
+    /// Idempotent — a subscription ID already present is not added twice.
+    fn add_plan_subscriber(env: &Env, plan_id: &String, subscription_id: &String) {
+        let key = DataKey::PlanSubscribers(plan_id.clone());
+        let mut subscribers: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        for id in subscribers.iter() {
+            if id == subscription_id.clone() {
+                return;
+            }
+        }
+        subscribers.push_back(subscription_id.clone());
+        env.storage().persistent().set(&key, &subscribers);
+        Self::bump_ttl(env, &key, LONG_LIVE_TTL);
+    }
+
     /// Issue #302: Track subscription in the ActiveSubscriptions index
     fn add_active_subscription(env: &Env, subscription_id: &String) {
         let mut active: Vec<String> = env
@@ -5594,22 +5679,6 @@ impl RefundManager {
         Self::bump_ttl(env, &key, Self::payment_ttl(status));
     }
 
-    fn record_payment_status(env: &Env, payment: &PaymentCharge) {
-        let key = DataKey::PaymentStatusHistory(payment.payment_id.clone());
-        let mut history: Vec<PaymentStatusEvent> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| vec![env]);
-        history.push_back(PaymentStatusEvent {
-            status: payment.status.clone(),
-            timestamp: env.ledger().timestamp(),
-            tx_hash: payment.transaction_hash.clone(),
-        });
-        env.storage().persistent().set(&key, &history);
-        Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
-    }
-
     fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
         let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
         env.storage().persistent().extend_ttl(key, threshold, ttl);
@@ -5710,6 +5779,8 @@ impl PaymentProcessor {
             fx_oracle_configured,
             merchant_registry_configured,
         }
+    }
+
     /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
@@ -8357,7 +8428,8 @@ impl PaymentProcessor {
         })
     }
 
-    pub fn generate_reconciliation_report_paginated(
+    pub fn generate_reconciliation_page(
+    pub fn reconciliation_report_page(
         env: Env,
         merchant_id: Address,
         from_ts: u64,
@@ -10099,6 +10171,23 @@ impl PaymentProcessor {
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
 
+    /// Append a status-transition entry to a payment's on-chain status history.
+    fn record_payment_status(env: &Env, payment: &PaymentCharge) {
+        let key = DataKey::PaymentStatusHistory(payment.payment_id.clone());
+        let mut history: Vec<PaymentStatusEvent> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![env]);
+        history.push_back(PaymentStatusEvent {
+            status: payment.status.clone(),
+            timestamp: env.ledger().timestamp(),
+            tx_hash: payment.transaction_hash.clone(),
+        });
+        env.storage().persistent().set(&key, &history);
+        Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
+    }
+
     // ─── Merchant pre-authorization (pull payments) ───────────────────────────
 
     /// Customer grants a merchant permission to pull up to `limit_per_period`
@@ -10681,6 +10770,98 @@ impl PaymentProcessor {
         Ok(invoice_id)
     }
 
+    /// Issue #632: Atomically create an invoice together with a payment link and
+    /// wire them up (`invoice.payment_link_id` is set to the new link's ID).
+    ///
+    /// The payment link is created first via a cross-contract call to the
+    /// `link_manager` (`PaymentLinkManager`) contract. If link creation fails the
+    /// call returns an error and the invoice is never persisted; if any later
+    /// step fails the whole transaction reverts, so the two records are always
+    /// created together or not at all.
+    pub fn create_payment_link_invoice(
+        env: Env,
+        merchant_id: Address,
+        link_manager: Address,
+        customer_email: String,
+        line_items: Vec<LineItem>,
+        total_amount: i128,
+        currency: Symbol,
+        due_date: u64,
+        link_args: CreateLinkArgs,
+    ) -> Result<(Invoice, PaymentLink), Error> {
+        merchant_id.require_auth();
+
+        if total_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        // Step 1: create the payment link on the PaymentLinkManager contract.
+        let link_client =
+            crate::payment_link::PaymentLinkManagerClient::new(&env, &link_manager);
+        let link_id = match link_client.try_create_link(
+            &merchant_id,
+            &link_args.link_id,
+            &link_args.amount,
+            &link_args.currency,
+            &link_args.description,
+            &link_args.expires_at,
+            &link_args.max_uses,
+            &link_args.direct_transfer,
+            &link_args.metadata,
+            &link_args.fiat,
+            &link_args.base_url,
+        ) {
+            Ok(Ok(id)) => id,
+            _ => return Err(Error::InvalidPaymentId),
+        };
+
+        let payment_link = match link_client.try_get_link(&link_id) {
+            Ok(Ok(link)) => link,
+            _ => return Err(Error::PaymentNotFound),
+        };
+
+        // Step 2: create the invoice, pointing it at the new link.
+        let invoice_id = Self::get_next_invoice_id(&env);
+        let now = env.ledger().timestamp();
+        let invoice = Invoice {
+            invoice_id: invoice_id.clone(),
+            merchant_id: merchant_id.clone(),
+            customer_email,
+            line_items,
+            total_amount,
+            currency,
+            due_date,
+            status: InvoiceStatus::Created,
+            payment_link_id: Some(link_id.clone()),
+            created_at: now,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
+
+        let mut merchant_invoices = Self::get_merchant_invoices_internal(&env, &merchant_id);
+        merchant_invoices.push_back(invoice_id.clone());
+        env.storage().persistent().set(
+            &DataKey::MerchantInvoices(merchant_id.clone()),
+            &merchant_invoices,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "CREATED")),
+            (invoice_id.clone(), merchant_id.clone(), total_amount),
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "INVOICE"),
+                Symbol::new(&env, "LINK_ATTACHED"),
+            ),
+            (invoice_id, link_id),
+        );
+
+        Ok((invoice, payment_link))
+    }
+
     pub fn mark_invoice_paid(env: Env, invoice_id: String) -> Result<(), Error> {
         let mut invoice: Invoice = env
             .storage()
@@ -10719,7 +10900,6 @@ impl PaymentProcessor {
             result.push_back(s);
         }
         result
-        Self::get_merchant_invoices_internal(&env, &merchant_id)
     }
 
     fn get_next_invoice_id(env: &Env) -> String {
@@ -10850,9 +11030,11 @@ mod payment_link;
 #[cfg(test)]
 mod proptests;
 pub use payment_link::{
-    FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
+    CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
     PaymentLinkManagerClient,
 };
+#[cfg(test)]
+mod feature_tests;
 #[cfg(test)]
 mod memo_test;
 #[cfg(test)]
@@ -10861,6 +11043,7 @@ mod partial_overpaid_test;
 mod pause_test;
 #[cfg(test)]
 mod payment_link_test;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod payment_metadata_test;

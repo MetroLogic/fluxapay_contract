@@ -87,6 +87,23 @@ export interface CreateLinkParams {
   description?: string;
 }
 
+/**
+ * Issue #637: One link entry for `batchCreateLinks`. Mirrors the on-chain
+ * `CreateLinkArgs` struct. `merchant` is supplied once for the whole batch.
+ */
+export interface BatchLinkItem {
+  /** Link ID (validated per item, must be unique within the batch and on-chain) */
+  linkId: string;
+  amount?: bigint;
+  currency?: string;
+  description?: string;
+  expiresAt?: bigint;
+  maxUses?: number;
+  directTransfer?: boolean;
+  metadata?: Record<string, string>;
+  baseUrl?: string;
+}
+
 /** Result of `createPaymentLink`, including QR-ready payload. */
 export interface CreatePaymentLinkResult {
   linkId: string;
@@ -165,6 +182,36 @@ export class PaymentLinkManagerClient {
         usdc_token: params.usdcToken,
         metadata: params.metadata,
         base_url: params.baseUrl,
+      }),
+    );
+  }
+
+  /**
+   * Issue #637: Bulk-create up to 50 payment links for one merchant in a single
+   * atomic call. Maps to `PaymentLinkManager.batch_create_links` on-chain.
+   *
+   * @param merchant - The merchant's Stellar address (applies to every link)
+   * @param links - Up to 50 link definitions; validated individually
+   * @returns The created link IDs in submission order
+   * @throws `BatchTooLarge` if more than 50 links are supplied, or
+   *   `PaymentAlreadyExists` if a link ID collides on-chain or within the batch
+   */
+  async batchCreateLinks(merchant: string, links: BatchLinkItem[]): Promise<string[]> {
+    return withMappedContractError(() =>
+      this.getContract().batch_create_links({
+        merchant,
+        links: links.map((l) => ({
+          link_id: l.linkId,
+          amount: l.amount,
+          currency: l.currency ?? "USDC",
+          description: l.description ?? "",
+          expires_at: l.expiresAt,
+          max_uses: l.maxUses,
+          direct_transfer: l.directTransfer ?? false,
+          metadata: l.metadata,
+          fiat: { tag: "None", values: undefined },
+          base_url: l.baseUrl,
+        })),
       }),
     );
   }
@@ -290,6 +337,33 @@ export class PaymentLinkManagerClient {
     return withMappedContractError(() =>
       this.getContract().get_link({
         link_id: linkId,
+      }),
+    );
+  }
+
+  /**
+   * Issue #634: List a merchant's payment links, paginated.
+   *
+   * Maps to `PaymentLinkManager.get_merchant_links` on-chain. Links are
+   * returned in creation order. When `activeOnly` is `true`, deactivated and
+   * expired links are filtered out before pagination. `limit` is hard-capped
+   * at 100 per call; pass `0` for the maximum page.
+   *
+   * @param merchantId - The merchant's Stellar address
+   * @param opts.offset - Index into the merchant's link list (default 0)
+   * @param opts.limit - Max links to return, 1..=100 (default 100)
+   * @param opts.activeOnly - Exclude inactive/expired links (default false)
+   */
+  async getMerchantLinks(
+    merchantId: string,
+    opts: { offset?: number; limit?: number; activeOnly?: boolean } = {},
+  ): Promise<PaymentLink[]> {
+    return withMappedContractError(() =>
+      this.getContract().get_merchant_links({
+        merchant_id: merchantId,
+        offset: opts.offset ?? 0,
+        limit: opts.limit ?? 100,
+        active_only: opts.activeOnly ?? false,
       }),
     );
   }
