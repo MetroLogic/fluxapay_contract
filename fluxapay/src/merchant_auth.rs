@@ -248,7 +248,9 @@ impl MerchantPreAuth {
         }
 
         // ── Limit check ───────────────────────────────────────────────────────
-        let remaining = auth.limit_per_period.saturating_sub(auth.pulled_this_period);
+        let remaining = auth
+            .limit_per_period
+            .saturating_sub(auth.pulled_this_period);
         if amount > remaining {
             return Err(MerchantAuthError::LimitExceeded);
         }

@@ -1,9 +1,9 @@
+use crate::merchant_registry::MaybeFeeConfig;
 use crate::{
     merchant_registry::{KycTier, MerchantRegistry, MerchantRegistryClient},
     ArbitratorVoteChoice, DataKey, DisputeStatus, Error, PaymentProcessor, PaymentProcessorClient,
     PaymentStatus, RefundManager, RefundManagerClient, RefundStatus, SettlementSplit,
 };
-use crate::merchant_registry::MaybeFeeConfig;
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol,
@@ -106,7 +106,8 @@ fn test_create_payment_with_verified_registry_merchant_succeeds() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
@@ -129,12 +130,16 @@ fn test_create_payment_with_unverified_registry_merchant_fails() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
 
-    let result = payment_client
-        .try_create_payment(&integration_payment_args(&env, "REG_UNVERIFIED", &merchant));
+    let result = payment_client.try_create_payment(&integration_payment_args(
+        &env,
+        "REG_UNVERIFIED",
+        &merchant,
+    ));
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
@@ -151,7 +156,8 @@ fn test_create_payment_with_suspended_registry_merchant_fails() {
         &String::from_str(&env, "USD"),
         &None,
         &None,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.suspend_merchant(
         &admin,
@@ -162,8 +168,11 @@ fn test_create_payment_with_suspended_registry_merchant_fails() {
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
 
-    let result = payment_client
-        .try_create_payment(&integration_payment_args(&env, "REG_SUSPENDED", &merchant));
+    let result = payment_client.try_create_payment(&integration_payment_args(
+        &env,
+        "REG_SUSPENDED",
+        &merchant,
+    ));
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
@@ -177,8 +186,11 @@ fn test_create_payment_with_unregistered_registry_merchant_fails() {
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
 
-    let result =
-        payment_client.try_create_payment(&integration_payment_args(&env, "REG_MISSING", &merchant));
+    let result = payment_client.try_create_payment(&integration_payment_args(
+        &env,
+        "REG_MISSING",
+        &merchant,
+    ));
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
@@ -198,7 +210,8 @@ fn test_happy_path_flow() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     let merchant_info = merchant_client.get_merchant(&merchant);
     assert_eq!(merchant_info.kyc_tier, KycTier::Basic);
@@ -221,14 +234,22 @@ fn test_happy_path_flow() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     let tx_hash = BytesN::<32>::random(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>, );
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &tx_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     let payment_info = payment_client.get_payment(&payment_id);
     assert_eq!(payment_info.status, PaymentStatus::Confirmed);
@@ -293,7 +314,8 @@ fn test_settlement_path() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
@@ -348,7 +370,8 @@ fn test_failure_and_expiration_path() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
@@ -414,7 +437,9 @@ fn test_upgrade_contract_payment_processor_non_admin_rejected() {
     let new_wasm_hash = BytesN::<32>::random(&env);
 
     // Non-admin cannot upgrade
-    assert!(payment_client.try_upgrade_contract(&non_admin, &new_wasm_hash).is_err());
+    assert!(payment_client
+        .try_upgrade_contract(&non_admin, &new_wasm_hash)
+        .is_err());
 }
 
 #[test]
@@ -441,7 +466,9 @@ fn test_upgrade_contract_refund_manager_non_admin_rejected() {
     let new_wasm_hash = BytesN::<32>::random(&env);
 
     // Non-admin cannot upgrade
-    assert!(refund_client.try_upgrade_contract(&non_admin, &new_wasm_hash).is_err());
+    assert!(refund_client
+        .try_upgrade_contract(&non_admin, &new_wasm_hash)
+        .is_err());
 }
 
 #[test]
@@ -470,7 +497,8 @@ fn test_upgrade_contract_storage_compatibility() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
@@ -517,7 +545,8 @@ fn test_prune_expired_payments_expired_pending() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
@@ -563,7 +592,8 @@ fn test_prune_expired_payments_non_expired_skipped() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
@@ -608,13 +638,20 @@ fn test_prune_expired_payments_non_pending_skipped() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     // Verify the payment to change it from Pending to Confirmed
     let customer = Address::generate(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &customer,
+        &amount,
+    );
 
     // Jump forward in time
     env.ledger().set_timestamp(expires_at + 1);
@@ -639,7 +676,9 @@ fn test_prune_expired_payments_unauthorized_rejected() {
 
     // Try to prune as non-operator
     let payment_ids = vec![&env];
-    assert!(payment_client.try_prune_expired_payments(&non_operator, &payment_ids).is_err());
+    assert!(payment_client
+        .try_prune_expired_payments(&non_operator, &payment_ids)
+        .is_err());
 }
 
 #[test]
@@ -677,7 +716,8 @@ fn test_settle_payment_with_zero_merchant_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &0i128, &0i128, &None::<Address>);
 
@@ -701,20 +741,30 @@ fn test_settle_payment_with_zero_merchant_fee() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     let customer = Address::generate(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &customer,
+        &amount,
+    );
 
     // Settlement should work with registry and fee config
-    let splits = vec![&env, crate::SettlementSplit {
-        recipient: merchant.clone(),
-        amount,
-    }];
+    let splits = vec![
+        &env,
+        crate::SettlementSplit {
+            recipient: merchant.clone(),
+            amount,
+        },
+    ];
     payment_client.settle_payment(&operator, &payment_id, &splits);
 
     let payment = payment_client.get_payment(&payment_id);
@@ -740,7 +790,8 @@ fn test_settle_payment_with_bps_only_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &500i128, &0i128, &None::<Address>);
 
@@ -764,20 +815,30 @@ fn test_settle_payment_with_bps_only_fee() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     let customer = Address::generate(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &customer,
+        &amount,
+    );
 
     // Settlement should work with registry and fee config
-    let splits = vec![&env, crate::SettlementSplit {
-        recipient: merchant.clone(),
-        amount,
-    }];
+    let splits = vec![
+        &env,
+        crate::SettlementSplit {
+            recipient: merchant.clone(),
+            amount,
+        },
+    ];
     payment_client.settle_payment(&operator, &payment_id, &splits);
 
     let payment = payment_client.get_payment(&payment_id);
@@ -803,7 +864,8 @@ fn test_settle_payment_with_fixed_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &0i128, &100i128, &None::<Address>);
 
@@ -827,20 +889,30 @@ fn test_settle_payment_with_fixed_fee() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     let customer = Address::generate(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &customer,
+        &amount,
+    );
 
     // Settlement should work with registry and fee config
-    let splits = vec![&env, crate::SettlementSplit {
-        recipient: merchant.clone(),
-        amount,
-    }];
+    let splits = vec![
+        &env,
+        crate::SettlementSplit {
+            recipient: merchant.clone(),
+            amount,
+        },
+    ];
     payment_client.settle_payment(&operator, &payment_id, &splits);
 
     let payment = payment_client.get_payment(&payment_id);
@@ -866,7 +938,8 @@ fn test_settle_payment_with_combined_fee() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
     merchant_client.set_fee_config(&admin, &merchant, &200i128, &50i128, &None::<Address>);
 
@@ -890,20 +963,30 @@ fn test_settle_payment_with_combined_fee() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     let customer = Address::generate(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &customer,
+        &amount,
+    );
 
     // Settlement should work with registry and fee config
-    let splits = vec![&env, crate::SettlementSplit {
-        recipient: merchant.clone(),
-        amount,
-    }];
+    let splits = vec![
+        &env,
+        crate::SettlementSplit {
+            recipient: merchant.clone(),
+            amount,
+        },
+    ];
     payment_client.settle_payment(&operator, &payment_id, &splits);
 
     let payment = payment_client.get_payment(&payment_id);
@@ -940,20 +1023,30 @@ fn test_settle_payment_no_registry_configured() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
     let customer = Address::generate(&env);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &customer,
+        &amount,
+    );
 
     // Settlement with splits should work without registry
-    let splits = vec![&env, crate::SettlementSplit {
-        recipient: Address::generate(&env),
-        amount,
-    }];
+    let splits = vec![
+        &env,
+        crate::SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
     payment_client.settle_payment(&operator, &payment_id, &splits);
 
     let payment = payment_client.get_payment(&payment_id);
@@ -983,7 +1076,8 @@ fn test_cross_contract_happy_path() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
 
     let merchant_info = merchant_client.get_merchant(&merchant);
     assert_eq!(merchant_info.kyc_tier, KycTier::Unverified);
@@ -1010,7 +1104,8 @@ fn test_cross_contract_happy_path() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
     payment_client.create_payment(&args);
 
@@ -1021,7 +1116,14 @@ fn test_cross_contract_happy_path() {
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>, );
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &tx_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     let confirmed = payment_client.get_payment(&payment_id);
     assert_eq!(confirmed.status, PaymentStatus::Confirmed);
@@ -1059,7 +1161,8 @@ fn test_cross_contract_unverified_merchant_rejection() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
 
     // Try to create payment with unverified merchant
     payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
@@ -1079,7 +1182,8 @@ fn test_cross_contract_unverified_merchant_rejection() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
 
     // Creating payment with unverified merchant should fail
@@ -1105,7 +1209,8 @@ fn test_cross_contract_suspended_merchant_rejection() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
 
     // Suspend the merchant
@@ -1134,7 +1239,8 @@ fn test_cross_contract_suspended_merchant_rejection() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
 
     // Creating payment with suspended merchant should fail
@@ -1160,7 +1266,8 @@ fn test_cross_contract_registry_not_set_regression() {
         &String::from_str(&env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
 
     // Try to create payment without registry wired
     // Should check merchant role, not merchant verification status
@@ -1181,7 +1288,8 @@ fn test_cross_contract_registry_not_set_regression() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
 
     // Should succeed because merchant has MERCHANT role (registry check skipped)
@@ -1191,7 +1299,14 @@ fn test_cross_contract_registry_not_set_regression() {
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount, &None::<u64>, );
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &tx_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     let payment_info = payment_client.get_payment(&payment_id);
     assert_eq!(payment_info.status, PaymentStatus::Confirmed);
@@ -1207,13 +1322,12 @@ fn mint_dispute_bonds(
     customer: &Address,
     merchant: &Address,
 ) {
-    let token_address = env
-        .as_contract(&refund_client.address, || {
-            env.storage()
-                .persistent()
-                .get::<DataKey, Address>(&DataKey::UsdcToken)
-                .unwrap()
-        });
+    let token_address = env.as_contract(&refund_client.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken)
+            .unwrap()
+    });
     let usdc_client = token::StellarAssetClient::new(env, &token_address);
     usdc_client.mint(customer, &100_000);
     usdc_client.mint(merchant, &100_000);
@@ -1238,7 +1352,8 @@ fn setup_dispute(
         &String::from_str(env, "USD"),
         &None::<Address>,
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(admin, &merchant);
 
     let pid = String::from_str(env, payment_id);
@@ -1259,24 +1374,20 @@ fn setup_dispute(
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
-    retry_of_payment_id: None,
-    payer_muxed_id: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
     payment_client.create_payment(&args);
 
     let tx_hash = BytesN::<32>::random(env);
     let oracle = Address::generate(env);
     payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &pid, &tx_hash, &customer, &amount, &None::<u64>, );
+    payment_client.verify_payment(&oracle, &pid, &tx_hash, &customer, &amount, &None::<u64>);
 
     refund_client.register_payment(&pid, &merchant, &amount, &Symbol::new(env, "USDC"));
     mint_dispute_bonds(env, refund_client, &customer, &merchant);
 
-    refund_client.grant_role(
-        admin,
-        &Symbol::new(env, "SETTLEMENT_OPERATOR"),
-        &operator,
-    );
+    refund_client.grant_role(admin, &Symbol::new(env, "SETTLEMENT_OPERATOR"), &operator);
 
     let evidence = String::from_str(env, "Qm00000000000000000000000000000000000000");
     let dispute_id = refund_client.create_dispute(
@@ -1311,11 +1422,7 @@ fn test_full_dispute_arbitration_lifecycle() {
     for i in 0..arb_count {
         let arb = Address::generate(&env);
         refund_client.grant_role(&admin, &Symbol::new(&env, "ARBITRATOR"), &arb);
-        refund_client.submit_arbitrator_vote(
-            &dispute_id,
-            &arb,
-            &ArbitratorVoteChoice::Approve,
-        );
+        refund_client.submit_arbitrator_vote(&dispute_id, &arb, &ArbitratorVoteChoice::Approve);
         arbitrators.push(arb);
     }
 
@@ -1337,13 +1444,12 @@ fn test_full_dispute_arbitration_lifecycle() {
     assert_eq!(refund.status, RefundStatus::Completed);
 
     let voters_key = DataKey::DisputeArbitratorVotes(dispute_id.clone());
-    let voters: soroban_sdk::Vec<Address> = env
-        .as_contract(&refund_client.address, || {
-            env.storage()
-                .persistent()
-                .get(&voters_key)
-                .unwrap_or(vec![&env])
-        });
+    let voters: soroban_sdk::Vec<Address> = env.as_contract(&refund_client.address, || {
+        env.storage()
+            .persistent()
+            .get(&voters_key)
+            .unwrap_or(vec![&env])
+    });
     assert_eq!(voters.len(), arb_count);
 }
 
@@ -1365,11 +1471,7 @@ fn test_dispute_rejection_lifecycle() {
     for _ in 0..3 {
         let arb = Address::generate(&env);
         refund_client.grant_role(&admin, &Symbol::new(&env, "ARBITRATOR"), &arb);
-        refund_client.submit_arbitrator_vote(
-            &dispute_id,
-            &arb,
-            &ArbitratorVoteChoice::Reject,
-        );
+        refund_client.submit_arbitrator_vote(&dispute_id, &arb, &ArbitratorVoteChoice::Reject);
     }
 
     let threshold_result = refund_client.try_check_arbitration_threshold(&dispute_id);

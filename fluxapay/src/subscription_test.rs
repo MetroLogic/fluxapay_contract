@@ -3,8 +3,8 @@ use crate::{
     SubscriptionStatus,
 };
 use soroban_sdk::{
-    testutils::Address as _, testutils::Events, testutils::Ledger as _, token, Address, Env,
-    String, Symbol, vec, TryIntoVal,
+    testutils::Address as _, testutils::Events, testutils::Ledger as _, token, vec, Address, Env,
+    String, Symbol, TryIntoVal,
 };
 
 // ── Shared setup helpers ──────────────────────────────────────────────────────
@@ -215,8 +215,7 @@ fn test_resume_subscription_by_payer_becomes_active_with_updated_payment_at() {
     client.pause_subscription(&payer, &sub_id);
 
     // Advance time
-    env.ledger()
-        .set_timestamp(env.ledger().timestamp() + 1_000);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1_000);
 
     let before_resume = env.ledger().timestamp();
     client.resume_subscription(&payer, &sub_id);

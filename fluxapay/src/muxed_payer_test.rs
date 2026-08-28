@@ -59,7 +59,8 @@ fn test_create_payment_with_g_address_payer_muxed_id_is_none() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (_oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (_oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let payment_id = String::from_str(&env, "pay_test_001");
     let deposit_addr = Address::generate(&env);
@@ -95,7 +96,8 @@ fn test_verify_payment_with_muxed_sender_populates_muxed_id() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let payment_id = String::from_str(&env, "pay_test_mux_001");
     let deposit_addr = Address::generate(&env);
@@ -144,7 +146,8 @@ fn test_verify_payment_without_muxed_id_remains_none() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let payment_id = String::from_str(&env, "pay_test_nomux_001");
     let deposit_addr = Address::generate(&env);
@@ -192,7 +195,8 @@ fn test_muxed_payer_auth_not_checked_in_create_or_verify() {
     let env = Env::default();
     let (_admin, _processor_addr, payment_client, merchant_client) =
         setup_payment_processor_with_registry(&env);
-    let (oracle, merchant) = setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+    let (oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
 
     let payment_id = String::from_str(&env, "pay_test_auth_001");
     let deposit_addr = Address::generate(&env);

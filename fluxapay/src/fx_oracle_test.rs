@@ -102,8 +102,7 @@ fn test_circuit_breaker_rejects_rate_by_ledger_gap() {
     client.set_rate(&oracle, &pair, &1500i128, &0);
 
     let seq_at_update = env.ledger().sequence();
-    env.ledger()
-        .set_sequence_number(seq_at_update + 17_281);
+    env.ledger().set_sequence_number(seq_at_update + 17_281);
 
     let result = client.try_get_rate(&pair);
     assert_eq!(result, Err(Ok(FXOracleError::RateStale)));
@@ -226,8 +225,14 @@ fn test_set_rates_batch_stores_all_rates() {
     let count = client.set_rates_batch(&oracle, &rates);
     assert_eq!(count, 3);
 
-    assert_eq!(client.get_rate(&Symbol::new(&env, "USD")).rate, 1_0000000i128);
-    assert_eq!(client.get_rate(&Symbol::new(&env, "NGN")).rate, 1500_0000000i128);
+    assert_eq!(
+        client.get_rate(&Symbol::new(&env, "USD")).rate,
+        1_0000000i128
+    );
+    assert_eq!(
+        client.get_rate(&Symbol::new(&env, "NGN")).rate,
+        1500_0000000i128
+    );
     assert_eq!(client.get_rate(&Symbol::new(&env, "EUR")).rate, 9200000i128);
 }
 
@@ -372,7 +377,12 @@ fn test_get_settlement_amount_for_pair_direct() {
     client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
 
     // USD_NGN stored directly: 1 USD = 1500 NGN (7 decimals).
-    client.set_rate(&oracle, &Symbol::new(&env, "USD_NGN"), &1500_0000000i128, &7u32);
+    client.set_rate(
+        &oracle,
+        &Symbol::new(&env, "USD_NGN"),
+        &1500_0000000i128,
+        &7u32,
+    );
 
     let ngn = client.get_settlement_amount_for_pair(
         &Symbol::new(&env, "USD"),

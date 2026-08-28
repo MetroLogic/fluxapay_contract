@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, token, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
 
 use crate::PaymentProcessor;
@@ -348,7 +348,12 @@ impl PaymentStreaming {
 
         env.events().publish(
             (Symbol::new(&env, "STREAM"), Symbol::new(&env, "CREATED")),
-            (stream_id.clone(), stream.sender.clone(), stream.receiver.clone(), deposit),
+            (
+                stream_id.clone(),
+                stream.sender.clone(),
+                stream.receiver.clone(),
+                deposit,
+            ),
         );
 
         Ok(stream)
@@ -393,7 +398,10 @@ impl PaymentStreaming {
             .set(&StreamDataKey::Stream(stream_id.clone()), &stream);
 
         env.events().publish(
-            (Symbol::new(&env, "STREAM"), Symbol::new(&env, "DESTINATION_SET")),
+            (
+                Symbol::new(&env, "STREAM"),
+                Symbol::new(&env, "DESTINATION_SET"),
+            ),
             (stream_id, recipient, destination),
         );
 
@@ -424,7 +432,10 @@ impl PaymentStreaming {
             .set(&StreamDataKey::Stream(stream_id.clone()), &stream);
 
         env.events().publish(
-            (Symbol::new(&env, "STREAM"), Symbol::new(&env, "MILESTONE_APPROVED")),
+            (
+                Symbol::new(&env, "STREAM"),
+                Symbol::new(&env, "MILESTONE_APPROVED"),
+            ),
             (stream_id, sender),
         );
 
@@ -609,7 +620,10 @@ impl PaymentStreaming {
 
         // ── Step 3: Emit RateDecreased event ─────────────────────────────────
         env.events().publish(
-            (Symbol::new(&env, "STREAM"), Symbol::new(&env, "RATE_DECREASED")),
+            (
+                Symbol::new(&env, "STREAM"),
+                Symbol::new(&env, "RATE_DECREASED"),
+            ),
             (stream_id, sender, old_rate, new_rate, surplus),
         );
 
@@ -759,7 +773,13 @@ impl PaymentStreaming {
 
                 env.events().publish(
                     (Symbol::new(&env, "STREAM"), Symbol::new(&env, "WITHDRAWN")),
-                    (stream_id.clone(), recipient.clone(), recipient.clone(), withdrawable, stream.remaining_deposit),
+                    (
+                        stream_id.clone(),
+                        recipient.clone(),
+                        recipient.clone(),
+                        withdrawable,
+                        stream.remaining_deposit,
+                    ),
                 );
 
                 processed.push_back(stream_id);
@@ -843,7 +863,13 @@ impl PaymentStreaming {
 
         env.events().publish(
             (Symbol::new(&env, "STREAM"), Symbol::new(&env, "WITHDRAWN")),
-            (stream_id.clone(), stream.receiver.clone(), destination.clone(), withdrawable, stream.remaining_deposit),
+            (
+                stream_id.clone(),
+                stream.receiver.clone(),
+                destination.clone(),
+                withdrawable,
+                stream.remaining_deposit,
+            ),
         );
 
         Ok(stream_id)
@@ -1224,7 +1250,10 @@ impl PaymentStreaming {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "STREAM"), Symbol::new(&env, "RATE_UPDATED")),
+            (
+                Symbol::new(&env, "STREAM"),
+                Symbol::new(&env, "RATE_UPDATED"),
+            ),
             (stream_id, sender, old_rate, new_rate, surplus),
         );
 
@@ -1257,7 +1286,10 @@ impl PaymentStreaming {
         }
 
         // Pay out any residual accrued balance to the receiver.
-        let residual = stream.accrued_at_checkpoint.min(stream.remaining_deposit).max(0);
+        let residual = stream
+            .accrued_at_checkpoint
+            .min(stream.remaining_deposit)
+            .max(0);
         if residual > 0 {
             let token_client = token::Client::new(&env, &stream.token);
             token_client.transfer(&env.current_contract_address(), &stream.receiver, &residual);
@@ -1418,15 +1450,17 @@ impl PaymentStreaming {
                     token_client.transfer(&env.current_contract_address(), &admin, &fee);
                 }
             }
-            token_client.transfer(
-                &env.current_contract_address(),
-                &w.destination,
-                &net,
-            );
+            token_client.transfer(&env.current_contract_address(), &w.destination, &net);
 
             env.events().publish(
                 (Symbol::new(&env, "STREAM"), Symbol::new(&env, "WITHDRAWN")),
-                (w.stream_id.clone(), recipient.clone(), w.destination.clone(), withdrawable, stream.remaining_deposit),
+                (
+                    w.stream_id.clone(),
+                    recipient.clone(),
+                    w.destination.clone(),
+                    withdrawable,
+                    stream.remaining_deposit,
+                ),
             );
 
             processed.push_back(w.stream_id.clone());
@@ -1447,10 +1481,7 @@ impl PaymentStreaming {
     /// * Rejects batches larger than [`MAX_BULK_TTL_BUMP`] (50).
     ///
     /// Returns the number of streams whose TTL was actually bumped.
-    pub fn bulk_bump_stream_ttls(
-        env: Env,
-        stream_ids: Vec<String>,
-    ) -> Result<u32, StreamError> {
+    pub fn bulk_bump_stream_ttls(env: Env, stream_ids: Vec<String>) -> Result<u32, StreamError> {
         if stream_ids.len() > MAX_BULK_TTL_BUMP {
             return Err(StreamError::BatchTooLarge);
         }

@@ -1,8 +1,5 @@
 use crate::PaymentProcessor;
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env, Symbol,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
 
 #[test]
 fn test_swap_and_pay_with_allowed_router_succeeds() {

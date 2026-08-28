@@ -7,9 +7,7 @@ use soroban_sdk::{
     token, vec, Address, BytesN, Env, String, Symbol,
 };
 
-fn setup(
-    env: &Env,
-) -> (Address, PaymentProcessorClient, RefundManagerClient) {
+fn setup(env: &Env) -> (Address, PaymentProcessorClient, RefundManagerClient) {
     let payment_processor = env.register(PaymentProcessor, ());
     let refund_manager = env.register(RefundManager, ());
 
@@ -54,8 +52,8 @@ fn create_and_verify(
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
-    retry_of_payment_id: None,
-    payer_muxed_id: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
     };
     payment_client.create_payment(&args);
 
@@ -108,7 +106,10 @@ fn test_overpaid_auto_creates_refund() {
     assert_eq!(payment.amount_received, Some(1500));
 
     let auto_refund_count = count_event(&env, "REFUND", "AUTO_CREATED");
-    assert_eq!(auto_refund_count, 1, "REFUND/AUTO_CREATED must be emitted once");
+    assert_eq!(
+        auto_refund_count, 1,
+        "REFUND/AUTO_CREATED must be emitted once"
+    );
 }
 
 #[test]

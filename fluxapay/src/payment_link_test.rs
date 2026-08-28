@@ -1,8 +1,7 @@
 use crate::{
-    FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLinkManager, PaymentLinkManagerClient, FXOracle,
-    FXOracleClient,
+    FXOracle, FXOracleClient, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLinkManager,
+    PaymentLinkManagerClient,
 };
-
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -236,7 +235,12 @@ fn test_get_merchant_links_active_only_and_pagination() {
 
     // Unknown merchant → empty.
     let other = Address::generate(&env);
-    assert_eq!(client.get_merchant_links(&other, &0u32, &10u32, &false).len(), 0);
+    assert_eq!(
+        client
+            .get_merchant_links(&other, &0u32, &10u32, &false)
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -334,8 +338,14 @@ fn test_verify_batch_handles_missing_links() {
 
     let results = client.verify_batch(&vec![&env, existing_link.clone(), missing_link.clone()]);
     assert_eq!(results.len(), 2);
-    assert_eq!(results.get(0).unwrap(), (existing_link.clone(), true, 0, None));
-    assert_eq!(results.get(1).unwrap(), (missing_link.clone(), false, 0, None));
+    assert_eq!(
+        results.get(0).unwrap(),
+        (existing_link.clone(), true, 0, None)
+    );
+    assert_eq!(
+        results.get(1).unwrap(),
+        (missing_link.clone(), false, 0, None)
+    );
 }
 
 #[test]
@@ -363,7 +373,10 @@ fn test_verify_batch_returns_inactive_for_deactivated_link() {
 
     let results = client.verify_batch(&vec![&env, link_id.clone()]);
     assert_eq!(results.len(), 1);
-    assert_eq!(results.get(0).unwrap(), (link_id.clone(), false, 0, Some(10)));
+    assert_eq!(
+        results.get(0).unwrap(),
+        (link_id.clone(), false, 0, Some(10))
+    );
 }
 
 #[test]
@@ -447,7 +460,10 @@ fn test_max_uses_exact_accepted_and_emits_event() {
                 if a == Symbol::new(&env, "LINK") && b == Symbol::new(&env, "MAX_USES_REACHED")
         )
     });
-    assert!(emitted, "LINK/MAX_USES_REACHED must fire when final use is consumed");
+    assert!(
+        emitted,
+        "LINK/MAX_USES_REACHED must fire when final use is consumed"
+    );
 
     let rejected = client.try_use_link(&payer, &link_id, &50i128, &None);
     assert_eq!(rejected, Err(Ok(crate::Error::LinkMaxUsesReached)));
@@ -567,8 +583,8 @@ fn test_metadata_too_large_21_keys() {
 
     let link_id = String::from_str(&env, "meta_large");
     let keys_21 = [
-        "k0","k1","k2","k3","k4","k5","k6","k7","k8","k9",
-        "k10","k11","k12","k13","k14","k15","k16","k17","k18","k19","k20",
+        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13",
+        "k14", "k15", "k16", "k17", "k18", "k19", "k20",
     ];
     let mut metadata = Map::new(&env);
     for k in keys_21.iter() {
@@ -626,8 +642,8 @@ fn test_metadata_20_keys_256_char_values_succeeds() {
     let link_id = String::from_str(&env, "meta_valid");
     let mut metadata = Map::new(&env);
     let keys_20 = [
-        "k0","k1","k2","k3","k4","k5","k6","k7","k8","k9",
-        "k10","k11","k12","k13","k14","k15","k16","k17","k18","k19",
+        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13",
+        "k14", "k15", "k16", "k17", "k18", "k19",
     ];
     let val256 = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     for k in keys_20.iter() {
@@ -687,8 +703,14 @@ fn test_create_link_with_metadata_stores_and_returns_correct_values() {
 
     let link_id = String::from_str(&env, "meta_store_test");
     let mut metadata = Map::new(&env);
-    metadata.set(String::from_str(&env, "order_id"), String::from_str(&env, "ORD-2026-001"));
-    metadata.set(String::from_str(&env, "campaign"), String::from_str(&env, "summer_sale"));
+    metadata.set(
+        String::from_str(&env, "order_id"),
+        String::from_str(&env, "ORD-2026-001"),
+    );
+    metadata.set(
+        String::from_str(&env, "campaign"),
+        String::from_str(&env, "summer_sale"),
+    );
 
     let id = client.create_link(
         &merchant,
@@ -1448,18 +1470,18 @@ fn test_link_expired_event_emitted() {
 
     client.expire_link(&link_id);
 
-    let has_expired_event = env
-        .events()
-        .all()
-        .iter()
-        .any(|e| {
-            let topics = e.0.clone();
-            topics.len() >= 2
-                && topics.get(0).and_then(|t| t.try_into_val::<Symbol>(&env).ok())
-                    == Some(Symbol::new(&env, "LINK"))
-                && topics.get(1).and_then(|t| t.try_into_val::<Symbol>(&env).ok())
-                    == Some(Symbol::new(&env, "EXPIRED"))
-        });
+    let has_expired_event = env.events().all().iter().any(|e| {
+        let topics = e.0.clone();
+        topics.len() >= 2
+            && topics
+                .get(0)
+                .and_then(|t| t.try_into_val::<Symbol>(&env).ok())
+                == Some(Symbol::new(&env, "LINK"))
+            && topics
+                .get(1)
+                .and_then(|t| t.try_into_val::<Symbol>(&env).ok())
+                == Some(Symbol::new(&env, "EXPIRED"))
+    });
     assert!(has_expired_event);
 }
 
@@ -1746,5 +1768,3 @@ fn test_link_analytics_last_used_at_tracking() {
     assert!(analytics_after.last_used_at.is_some());
     assert!(analytics_after.last_used_at.unwrap() >= initial_timestamp);
 }
-
-

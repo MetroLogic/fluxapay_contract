@@ -1,10 +1,8 @@
+use crate::merchant_registry::MaybeFeeConfig;
 use crate::{
-    merchant_registry::{
-        MerchantRegistry, MerchantRegistryClient, SettlementSchedule,
-    },
+    merchant_registry::{MerchantRegistry, MerchantRegistryClient, SettlementSchedule},
     Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus,
 };
-use crate::merchant_registry::MaybeFeeConfig;
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
     token, vec, Address, BytesN, Env, String, Symbol,
@@ -42,12 +40,7 @@ fn setup(
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
 
     let merchant = Address::generate(env);
-    (
-        admin,
-        payment_client,
-        merchant_client,
-        merchant,
-    )
+    (admin, payment_client, merchant_client, merchant)
 }
 
 fn register_merchant(
@@ -62,7 +55,8 @@ fn register_merchant(
         &String::from_str(env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(admin, merchant);
 }
 
@@ -91,8 +85,8 @@ fn create_and_settle(
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
-    retry_of_payment_id: None,
-    payer_muxed_id: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
         retry_of_payment_id: None,
         payer_muxed_id: None,
     };
@@ -165,7 +159,14 @@ fn test_pending_settlement_accumulates_on_settle() {
 
     register_merchant(&env, &admin, &merchant_client, &merchant);
 
-    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_SETTLE_001", 1000);
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_SETTLE_001",
+        1000,
+    );
 
     let pending = merchant_client.get_pending_settlement(&merchant);
     assert_eq!(pending, 1000);
@@ -203,10 +204,18 @@ fn test_trigger_settlement_manual_settles_immediately() {
         &String::from_str(&env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
 
-    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_TRIGGER", 2000000);
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_TRIGGER",
+        2000000,
+    );
 
     let operator = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
@@ -230,13 +239,21 @@ fn test_trigger_settlement_daily_enforces_interval() {
         &String::from_str(&env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
 
     // Set to daily schedule.
     merchant_client.set_settlement_schedule(&merchant, &SettlementSchedule::Daily);
 
-    create_and_settle(&env, &admin, &payment_client, &merchant, "PAY_DAILY", 2000000);
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_DAILY",
+        2000000,
+    );
 
     let operator = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
@@ -262,7 +279,8 @@ fn test_trigger_settlement_below_min_rejected() {
         &String::from_str(&env, "USD"),
         &Some(merchant.clone()),
         &None::<String>,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(&admin, &merchant);
 
     // Settle a very small amount (below SETTLEMENT_MIN_AMOUNT = 1_000_000).

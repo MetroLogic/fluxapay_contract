@@ -19,6 +19,7 @@ contract-gas-estimator = []
 contract-fx-oracle = []
 contract-merchant-registry = []
 contract-payment-link = []
+contract-dex-router = []
 
 [dependencies]
 soroban-sdk = { workspace = true }

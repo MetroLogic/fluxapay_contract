@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, vec, Address, BytesN, Env, Map, MuxedAddress, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, token, vec, Address, BytesN, Env, Map, MuxedAddress,
+    String, Symbol, Vec,
 };
 
 use crate::utils;
@@ -135,6 +135,10 @@ pub enum LinkDataKey {
     /// by merchant address. Updated atomically inside `create_link`. Appended
     /// at the end of the enum to preserve existing discriminants.
     MerchantLinks(Address),
+    /// Issue #623: Contract-wide per-payer link-use rate limit config (max_uses, window_secs).
+    LinkRateLimitConfig,
+    /// Issue #623: Per-payer rolling window of link-use timestamps, keyed by payer address.
+    PayerLinkUseWindow(Address),
 }
 
 #[contract]
@@ -160,7 +164,11 @@ impl PaymentLinkManager {
     /// Upgrade the contract WASM.
     ///
     /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event on success.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), crate::Error> {
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), crate::Error> {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -185,11 +193,7 @@ impl PaymentLinkManager {
     }
 
     /// Set the default base URL used when `create_link` omits `base_url`.
-    pub fn set_payment_base_url(
-        env: Env,
-        admin: Address,
-        url: String,
-    ) -> Result<(), crate::Error> {
+    pub fn set_payment_base_url(env: Env, admin: Address, url: String) -> Result<(), crate::Error> {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -210,9 +214,7 @@ impl PaymentLinkManager {
 
     /// Return the admin-configured default payment base URL, if any.
     pub fn get_payment_base_url(env: Env) -> Option<String> {
-        env.storage()
-            .persistent()
-            .get(&LinkDataKey::PaymentBaseUrl)
+        env.storage().persistent().get(&LinkDataKey::PaymentBaseUrl)
     }
 
     /// Issue #663: Set a per-link or contract-wide default fee override
@@ -366,7 +368,10 @@ impl PaymentLinkManager {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "LINK"), Symbol::new(&env, "BATCH_CREATED")),
+            (
+                Symbol::new(&env, "LINK"),
+                Symbol::new(&env, "BATCH_CREATED"),
+            ),
             (merchant, created.len()),
         );
 
@@ -430,7 +435,7 @@ impl PaymentLinkManager {
             .persistent()
             .get(&merchant_links_key)
             .unwrap_or_else(|| vec![&env]);
-        merchant_links.push_back(link_id.clone());
+        merchant_links.push_back(args.link_id.clone());
         env.storage()
             .persistent()
             .set(&merchant_links_key, &merchant_links);
@@ -464,7 +469,11 @@ impl PaymentLinkManager {
             .get(&LinkDataKey::MerchantLinks(merchant_id))
             .unwrap_or_else(|| vec![&env]);
 
-        let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
 
         let mut result = vec![&env];
         let mut matched: u32 = 0;
@@ -531,6 +540,9 @@ impl PaymentLinkManager {
     ) -> Result<String, crate::Error> {
         payer.require_auth();
 
+        // Issue #623: Enforce per-payer rate limit before any other checks.
+        Self::enforce_payer_link_rate_limit(&env, &payer)?;
+
         let mut link = Self::get_link_internal(&env, &link_id)?;
 
         if !link.active {
@@ -596,10 +608,7 @@ impl PaymentLinkManager {
         // in-memory snapshot; the single storage write below commits the bump
         // in the same transaction (Soroban tx isolation prevents mid-tx races).
         link.use_count = link.use_count.saturating_add(1);
-        let hit_max_uses = link
-            .max_uses
-            .map(|m| link.use_count == m)
-            .unwrap_or(false);
+        let hit_max_uses = link.max_uses.map(|m| link.use_count == m).unwrap_or(false);
 
         // Accumulate revenue from this payment and record the timestamp.
         link.total_revenue = link.total_revenue.saturating_add(resolved_amount);
@@ -661,7 +670,10 @@ impl PaymentLinkManager {
         // Emit LINK/DIRECT_TRANSFER_USED event for audit trail when direct transfer is used
         if link.direct_transfer {
             env.events().publish(
-                (Symbol::new(&env, "LINK"), Symbol::new(&env, "DIRECT_TRANSFER_USED")),
+                (
+                    Symbol::new(&env, "LINK"),
+                    Symbol::new(&env, "DIRECT_TRANSFER_USED"),
+                ),
                 (link_id.clone(), payer.clone(), resolved_amount),
             );
         }
@@ -712,9 +724,10 @@ impl PaymentLinkManager {
         // If this is a direct transfer payment, mark it in the main contract storage
         // to prevent future disputes (issue #485)
         if link.direct_transfer {
-            env.storage()
-                .persistent()
-                .set(&crate::DataKey::DirectTransferPayment(payment_id.clone()), &true);
+            env.storage().persistent().set(
+                &crate::DataKey::DirectTransferPayment(payment_id.clone()),
+                &true,
+            );
         }
 
         // Track payment ID in the link's payment list
@@ -731,7 +744,13 @@ impl PaymentLinkManager {
         // Emit LINK/USED event with the resolved USDC amount and metadata
         env.events().publish(
             (Symbol::new(&env, "LINK"), Symbol::new(&env, "USED")),
-            (link_id, payer, resolved_amount, payment_id.clone(), link.metadata.clone()),
+            (
+                link_id,
+                payer,
+                resolved_amount,
+                payment_id.clone(),
+                link.metadata.clone(),
+            ),
         );
 
         Ok(payment_id)
@@ -798,7 +817,7 @@ impl PaymentLinkManager {
 
         let expired = link
             .expires_at
-            .map_or(false, |exp| env.ledger().timestamp() > exp);
+            .is_some_and(|exp| env.ledger().timestamp() > exp);
 
         if !expired {
             return Ok(()); // Not expired — nothing to do.
@@ -831,7 +850,11 @@ impl PaymentLinkManager {
             if let Ok(()) = Self::expire_link(env.clone(), link_id.clone()) {
                 // Check if the link was actually deactivated by reading it back.
                 if let Ok(link) = Self::get_link_internal(&env, &link_id) {
-                    if !link.active && link.expires_at.map_or(false, |exp| env.ledger().timestamp() > exp) {
+                    if !link.active
+                        && link
+                            .expires_at
+                            .is_some_and(|exp| env.ledger().timestamp() > exp)
+                    {
                         deactivated += 1;
                     }
                 }
@@ -879,7 +902,7 @@ impl PaymentLinkManager {
         let link = Self::get_link_internal(&env, &link_id)?;
 
         let conversion_rate = if link.view_count > 0 {
-            (link.use_count as u32).saturating_mul(10_000) / link.view_count
+            link.use_count.saturating_mul(10_000) / link.view_count
         } else {
             0
         };
@@ -921,5 +944,81 @@ impl PaymentLinkManager {
             }
         }
         results
+    }
+
+    // ── Issue #623: Per-payer link-use rate limiting ──────────────────────────
+
+    /// Default per-payer rate-limit config: 5 uses per 60 seconds.
+    const DEFAULT_LINK_RATE_MAX_USES: u32 = 5;
+    const DEFAULT_LINK_RATE_WINDOW_SECS: u64 = 60;
+
+    /// Admin-only: configure the per-payer link-use rate limit.
+    ///
+    /// * `max_uses`    – Maximum number of `use_link` calls allowed per payer within the window.
+    /// * `window_secs` – Rolling window length in seconds.
+    pub fn set_link_rate_limit(
+        env: Env,
+        admin: Address,
+        max_uses: u32,
+        window_secs: u64,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkRateLimitConfig, &(max_uses, window_secs));
+        Ok(())
+    }
+
+    /// Enforce per-payer link-use rate limit.
+    ///
+    /// Reads (or creates) the rolling window of use timestamps for `payer`,
+    /// evicts entries older than `window_secs`, then rejects if the count
+    /// meets or exceeds `max_uses`. Records the current timestamp on success.
+    fn enforce_payer_link_rate_limit(env: &Env, payer: &Address) -> Result<(), crate::Error> {
+        let (max_uses, window_secs): (u32, u64) = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkRateLimitConfig)
+            .unwrap_or((
+                Self::DEFAULT_LINK_RATE_MAX_USES,
+                Self::DEFAULT_LINK_RATE_WINDOW_SECS,
+            ));
+
+        let now = env.ledger().timestamp();
+        let cutoff = now.saturating_sub(window_secs);
+
+        // Load existing timestamps, drop stale ones.
+        let timestamps: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&LinkDataKey::PayerLinkUseWindow(payer.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut fresh: Vec<u64> = Vec::new(env);
+        for ts in timestamps.iter() {
+            if ts >= cutoff {
+                fresh.push_back(ts);
+            }
+        }
+
+        if fresh.len() >= max_uses {
+            return Err(crate::Error::RateLimitExceeded);
+        }
+
+        // Record this use and persist.
+        fresh.push_back(now);
+        env.storage()
+            .instance()
+            .set(&LinkDataKey::PayerLinkUseWindow(payer.clone()), &fresh);
+
+        Ok(())
     }
 }

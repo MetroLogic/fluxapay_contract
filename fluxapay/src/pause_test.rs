@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::{CreatePaymentArgs, PaymentProcessorClient, PauseInfo, PauseState};
+use crate::{CreatePaymentArgs, PauseInfo, PauseState, PaymentProcessorClient};
 use soroban_sdk::{
     testutils::Address as _, testutils::Ledger as _, vec, Address, Env, String, Symbol,
 };
@@ -59,13 +59,7 @@ fn test_global_pause_blocks_creation() {
 
     let info: PauseInfo = client.get_pause_info();
     assert_pause_state(&info.global, true, &reason, Some(&admin), pause_ts);
-    assert_pause_state(
-        &info.creation,
-        false,
-        &String::from_str(&env, ""),
-        None,
-        0,
-    );
+    assert_pause_state(&info.creation, false, &String::from_str(&env, ""), None, 0);
 
     // Try to create payment
     let res = client.try_create_payment(&CreatePaymentArgs {
@@ -81,7 +75,8 @@ fn test_global_pause_blocks_creation() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
         fee_waiver_code: None,
     });
 
@@ -111,13 +106,7 @@ fn test_creation_pause_blocks_only_creation() {
     client.set_creation_pause(&admin, &true, &reason);
 
     let info: PauseInfo = client.get_pause_info();
-    assert_pause_state(
-        &info.global,
-        false,
-        &String::from_str(&env, ""),
-        None,
-        0,
-    );
+    assert_pause_state(&info.global, false, &String::from_str(&env, ""), None, 0);
     assert_pause_state(&info.creation, true, &reason, Some(&admin), pause_ts);
 
     // create_payment should fail
@@ -134,7 +123,8 @@ fn test_creation_pause_blocks_only_creation() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
         fee_waiver_code: None,
     });
     assert!(res.is_err());
@@ -199,12 +189,11 @@ fn test_all_write_ops_blocked_when_paused() {
     client.set_global_pause(&admin, &true, &reason);
 
     // Test settle_payment is blocked
-    let settle_res = client.try_settle_payment(
-        &operator,
-        &payment_id,
-        &vec![&env],
+    let settle_res = client.try_settle_payment(&operator, &payment_id, &vec![&env]);
+    assert!(
+        settle_res.is_err(),
+        "settle_payment should be blocked by pause"
     );
-    assert!(settle_res.is_err(), "settle_payment should be blocked by pause");
 
     // Test process_refund is blocked (after creating a refund)
     let _ = client.try_create_refund(
@@ -215,7 +204,10 @@ fn test_all_write_ops_blocked_when_paused() {
     );
     let refund_id = String::from_str(&env, "ref1");
     let process_res = client.try_process_refund(&operator, &refund_id);
-    assert!(process_res.is_err(), "process_refund should be blocked by pause");
+    assert!(
+        process_res.is_err(),
+        "process_refund should be blocked by pause"
+    );
 
     // Test create_dispute is blocked
     let dispute_res = client.try_create_dispute(
@@ -226,11 +218,17 @@ fn test_all_write_ops_blocked_when_paused() {
         &requester,
         &vec![&env],
     );
-    assert!(dispute_res.is_err(), "create_dispute should be blocked by pause");
+    assert!(
+        dispute_res.is_err(),
+        "create_dispute should be blocked by pause"
+    );
 
     // Test batch_expire_payments is blocked
     let expire_res = client.try_batch_expire_payments(&vec![&env, &payment_id]);
-    assert!(expire_res.is_err(), "batch_expire_payments should be blocked by pause");
+    assert!(
+        expire_res.is_err(),
+        "batch_expire_payments should be blocked by pause"
+    );
 
     // Test swap_and_pay is blocked
     let swap_res = client.try_swap_and_pay(&crate::SwapAndPayArgs {
@@ -274,13 +272,7 @@ fn test_pause_unpause_cycle_exposes_pause_state_fields() {
     client.set_global_pause(&admin, &true, &pause_reason);
 
     let paused: PauseInfo = client.get_pause_info();
-    assert_pause_state(
-        &paused.global,
-        true,
-        &pause_reason,
-        Some(&admin),
-        pause_ts,
-    );
+    assert_pause_state(&paused.global, true, &pause_reason, Some(&admin), pause_ts);
     assert_pause_state(&paused.creation, false, &empty, None, 0);
 
     let unpause_ts = pause_ts + 120;

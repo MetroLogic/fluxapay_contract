@@ -1,13 +1,12 @@
+use crate::merchant_registry::MaybeFeeConfig;
 use crate::{
     merchant_registry::{MerchantRegistry, MerchantRegistryClient},
     mock_dex_router::{configure_mock_dex, MockDexRouter},
     Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, SwapAndPayArgs, SwapRoute,
     ZERO_CONTRACT_STRKEY,
 };
-use crate::merchant_registry::MaybeFeeConfig;
 use soroban_sdk::{
-    testutils::Address as _, testutils::Events, token, vec, Address, Env, String, Symbol,
-    Vec,
+    testutils::Address as _, testutils::Events, token, vec, Address, Env, String, Symbol, Vec,
 };
 
 fn setup_swap_test_env(
@@ -60,7 +59,8 @@ fn register_verified_merchant(
         &String::from_str(env, "USD"),
         &None,
         &None,
-        &MaybeFeeConfig::None);
+        &MaybeFeeConfig::None,
+    );
     merchant_client.verify_merchant(admin, &merchant);
     payment_client.grant_role(admin, &Symbol::new(env, "MERCHANT"), &merchant);
     merchant
@@ -324,7 +324,10 @@ fn test_xlm_auto_wrapping_and_wrapped_contract() {
 
     let wxlm = Address::generate(&env);
     payment_client.set_wrapped_xlm_contract(&admin, &wxlm);
-    assert_eq!(payment_client.get_wrapped_xlm_contract(), Some(wxlm.clone()));
+    assert_eq!(
+        payment_client.get_wrapped_xlm_contract(),
+        Some(wxlm.clone())
+    );
 
     let mock_dex = env.register(MockDexRouter, ());
     configure_mock_dex(&env, &mock_dex, 10_000, false);
@@ -393,7 +396,10 @@ fn test_swap_and_pay_multi_route_aggregation() {
     let routes = vec![&env, route1, route2];
 
     let payment = payment_client.swap_and_pay_multi_route(&args, &routes, &9_900);
-    assert_eq!(payment.payment_id, String::from_str(&env, "MULTI_ROUTE_PAYMENT"));
+    assert_eq!(
+        payment.payment_id,
+        String::from_str(&env, "MULTI_ROUTE_PAYMENT")
+    );
     assert_eq!(payment.amount, 9_900);
 }
 

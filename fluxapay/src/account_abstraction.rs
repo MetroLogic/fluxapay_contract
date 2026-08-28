@@ -37,6 +37,7 @@ pub enum AccountAbstractionDataKey {
 
 /// Register a new session key with an expiration timestamp for an account.
 /// Requires authorization from the account owner.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn register_session_key(
     env: Env,
     account: Address,
@@ -70,6 +71,7 @@ pub fn register_session_key(
 
 /// Revoke an existing session key for an account.
 /// Requires authorization from the account owner.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn revoke_session_key(
     env: Env,
     account: Address,
@@ -97,6 +99,7 @@ pub fn revoke_session_key(
 }
 
 /// Execute a transaction payload on behalf of an account using a delegated session key.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn execute_with_session(
     env: Env,
     account: Address,
