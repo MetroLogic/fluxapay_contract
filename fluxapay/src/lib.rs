@@ -143,6 +143,16 @@ pub struct PaymentCharge {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyPaymentArgs {
+    pub payment_id: String,
+    pub transaction_hash: BytesN<32>,
+    pub payer_address: Address,
+    pub amount_received: i128,
+    pub payer_muxed_id: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentSummary {
     pub payment_id: String,
     pub amount: i128,
@@ -8066,6 +8076,31 @@ impl PaymentProcessor {
         Ok(new_status)
     }
 
+    pub fn verify_payment_batch(
+        env: Env,
+        operator: Address,
+        verifications: Vec<VerifyPaymentArgs>,
+    ) -> Result<Vec<Result<PaymentStatus, Error>>, Error> {
+        operator.require_auth();
+        if verifications.len() > 20 {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut results = Vec::new(&env);
+        for verification in verifications.iter() {
+            results.push_back(Self::verify_payment(
+                env.clone(),
+                operator.clone(),
+                verification.payment_id,
+                verification.transaction_hash,
+                verification.payer_address,
+                verification.amount_received,
+                verification.payer_muxed_id,
+            ));
+        }
+        Ok(results)
+    }
+
     /// Issue #471: Allow a merchant to accept a PartiallyPaid payment at the received amount.
     /// Moves the payment from PartiallyPaid to Confirmed, using the received amount as the
     /// effective payment amount. No refund is created for the difference.
@@ -10716,6 +10751,19 @@ impl PaymentProcessor {
 
     pub fn get_stream_fee_bps(env: Env) -> i128 {
         PaymentStreaming::get_stream_fee_bps(env)
+    }
+
+    pub fn set_stream_fee_recipient(env: Env, admin: Address, recipient: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if AccessControl::get_admin(&env) != Some(admin) {
+            return Err(Error::AccessControlError);
+        }
+        PaymentStreaming::set_stream_fee_recipient(env, recipient);
+        Ok(())
+    }
+
+    pub fn get_stream_fee_recipient(env: Env) -> Option<Address> {
+        PaymentStreaming::get_stream_fee_recipient(env)
     }
 
     /// Upgrade the contract WASM and increment the contract version.

@@ -9,3 +9,9 @@ SECURITY.md                        @MetroLogic/security-reviewers
 
 # Catch-all for other files
 *                                @MetroLogic/core-maintainers
+indexer/                         @MetroLogic/backend-team
+sdk/                             @MetroLogic/sdk-team
+sdk/react/                        @MetroLogic/sdk-team
+scripts/                         @MetroLogic/devops-team
+docs/                            @MetroLogic/docs-team
+.github/                         @MetroLogic/devops-team

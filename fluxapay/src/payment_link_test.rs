@@ -986,6 +986,7 @@ fn test_get_link_analytics_conversion_rate() {
     client.use_link(&payer, &link_id, &amount, &None);
 
     let analytics = client.get_link_analytics(&link_id);
+    assert_eq!(analytics.merchant_id, merchant);
     assert_eq!(analytics.view_count, 10);
     assert_eq!(analytics.use_count, 1);
     assert_eq!(analytics.total_revenue, amount);

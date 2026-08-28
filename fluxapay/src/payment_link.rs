@@ -107,6 +107,7 @@ pub struct PaymentLink {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkAnalytics {
+    pub merchant_id: Address,
     pub view_count: u32,
     pub use_count: u32,
     pub total_revenue: i128,
@@ -914,6 +915,7 @@ impl PaymentLinkManager {
         };
 
         Ok(LinkAnalytics {
+            merchant_id: link.merchant,
             view_count: link.view_count,
             use_count: link.use_count,
             total_revenue: link.total_revenue,
