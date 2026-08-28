@@ -58,6 +58,11 @@ const TIER_UPGRADE_THRESHOLD_BUSINESS: i128 = TIER_CAP_FULL;          // $100,00
 pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
 /// Spacing between retry attempts in seconds (2 days).
 pub const SUBSCRIPTION_RETRY_INTERVAL_SECS: u64 = 2 * 24 * 60 * 60;
+
+// Issue #625: Maximum lengths for user-supplied string fields to prevent ledger bloat.
+const MAX_REASON_LEN: usize = 256;
+const MAX_EVIDENCE_LEN: usize = 512;
+const MAX_NOTES_LEN: usize = 512;
 pub(crate) const ZERO_CONTRACT_STRKEY: &str =
     "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
@@ -403,6 +408,8 @@ pub enum Error {
     RouteOutputInsufficient = 65,
     /// Issue #682: Batch payment creation contains duplicate payment IDs.
     BatchContainsDuplicates = 66,
+    /// Issue #625: A user-supplied string field (reason, evidence, resolution_notes) exceeds its maximum allowed length.
+    InputTooLong = 67,
 }
 
 #[contracttype]
@@ -1860,6 +1867,11 @@ impl RefundManager {
             return Err(Error::InvalidAmount);
         }
 
+        // Issue #625: Enforce maximum length on the reason field.
+        if reason.len() as usize > MAX_REASON_LEN {
+            return Err(Error::InputTooLong);
+        }
+
         // Issue #638: Idempotency short-circuit. If this key was already used,
         // return the original refund_id for identical params, or reject a reuse
         // with different params.
@@ -2772,6 +2784,11 @@ impl RefundManager {
             return Err(Error::InvalidAmount);
         }
 
+        // Issue #625: Enforce maximum length on the evidence field.
+        if evidence.len() as usize > MAX_EVIDENCE_LEN {
+            return Err(Error::InputTooLong);
+        }
+
         // IPFS CID validation when require_evidence_cid is enabled (default: true).
         // Empty evidence is always allowed; non-empty must be CIDv0/CIDv1 when flag is on.
         let require_cid = env
@@ -3526,6 +3543,11 @@ impl RefundManager {
     ) -> Result<(), Error> {
         operator.require_auth();
 
+        // Issue #625: Enforce maximum length on the resolution_notes field.
+        if resolution_notes.len() as usize > MAX_NOTES_LEN {
+            return Err(Error::InputTooLong);
+        }
+
         let has_settlement =
             AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
@@ -3563,6 +3585,20 @@ impl RefundManager {
         );
 
         Self::release_open_dispute_slot(&env, &dispute.disputer);
+
+        // Issue #626: Decrement the merchant's active dispute count when a dispute is
+        // rejected, so the suspension threshold only tracks non-rejected disputes.
+        let merchant_dispute_key = DataKey::MerchantDisputeCount(dispute.merchant_id.clone());
+        let current_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&merchant_dispute_key)
+            .unwrap_or(0u64);
+        if current_count > 0 {
+            env.storage()
+                .persistent()
+                .set(&merchant_dispute_key, &(current_count - 1));
+        }
 
         let usdc_token_address = env
             .storage()

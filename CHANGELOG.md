@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #625**: `Error::InputTooLong = 67` — new error variant returned when user-supplied string fields exceed their maximum allowed lengths: `reason` in refund creation (≤ 256 chars), `evidence` in dispute creation (≤ 512 chars), `resolution_notes` in dispute rejection (≤ 512 chars). Constants `MAX_REASON_LEN`, `MAX_EVIDENCE_LEN`, and `MAX_NOTES_LEN` defined in `lib.rs`. Error code documented in `docs/error-codes.md`.
+- **Issue #619**: New CI job `indexer-build` in `.github/workflows/ci.yml` — installs dependencies, runs `npm run build`, and runs `npx tsc --noEmit` in `indexer/` to catch TypeScript errors before deployment. Added to the `ci-success` gate.
+- **Issue #620**: New CI job `sdk-react-check` in `.github/workflows/ci.yml` — installs dependencies and runs `npx tsc --noEmit` in `sdk/react/` to catch TypeScript errors in React hooks before publish. Runs in parallel with `sdk-check`. Added to the `ci-success` gate.
+
+### Fixed
+- **Issue #626**: `reject_dispute` now decrements `MerchantDisputeCount` for the affected merchant when a dispute is rejected, so `get_merchant_dispute_count` reflects only active (non-rejected) disputes. The auto-suspension threshold no longer counts rejected disputes, preventing unjust merchant suspension.
+
 - **Issue #671**: Added `docs/sdk-migration-guide.md` covering breaking-change migration steps between major `@fluxapay/sdk` versions, linked from `sdk/README.md` and `sdk/CHANGELOG.md`.
 - **Issue #670**: `PaymentProcessor::get_creation_pause_info() -> PauseState` — read-only getter for the creation-only pause state, distinct from `get_pause_info()`'s consolidated global+creation view; clarified `set_creation_pause`/`set_global_pause` scope docs (creation pause never blocks `verify_payment`, `settle_payment`, `cancel_payment`, or refund/dispute flows).
 - **Issue #668**: `PaymentCharge.payment_link_id: Option<String>` — populated by `use_link` with the source link's ID so payments can be traced back to the link that created them; `None` for payments created via `create_payment`/`swap_and_pay`. Updated the generated SDK `PaymentCharge` TypeScript type.
