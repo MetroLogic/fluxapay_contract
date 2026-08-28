@@ -643,3 +643,50 @@ fn test_default_min_rate_of_one() {
     let result = client.try_decrease_rate_per_second(&sender, &stream_id, &0i128);
     assert_eq!(result, Err(Ok(StreamError::RateBelowMinimum)));
 }
+
+// ─── Issue #627: bulk_bump_stream_ttls ────────────────────────────────────────
+
+#[test]
+fn test_bulk_bump_stream_ttls_counts_only_existing_streams() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    // 3 valid streams + 1 ID that was never created.
+    let s1 = String::from_str(&env, "ttl_stream_1");
+    let s2 = String::from_str(&env, "ttl_stream_2");
+    let s3 = String::from_str(&env, "ttl_stream_3");
+    let missing = String::from_str(&env, "ttl_stream_missing");
+
+    client.create_stream(&sender, &receiver, &token, &10i128, &1_000i128, &s1, &None::<i128>);
+    client.create_stream(&sender, &receiver, &token, &10i128, &1_000i128, &s2, &None::<i128>);
+    client.create_stream(&sender, &receiver, &token, &10i128, &1_000i128, &s3, &None::<i128>);
+
+    let bumped = client.bulk_bump_stream_ttls(&vec![&env, s1, s2, s3, missing]);
+    assert_eq!(bumped, 3);
+}
+
+#[test]
+fn test_bulk_bump_stream_ttls_empty_batch_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _sender, _receiver, _token) = setup(&env);
+
+    let bumped = client.bulk_bump_stream_ttls(&vec![&env]);
+    assert_eq!(bumped, 0);
+}
+
+#[test]
+fn test_bulk_bump_stream_ttls_rejects_oversized_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _sender, _receiver, _token) = setup(&env);
+
+    let mut ids = vec![&env];
+    for _ in 0..51u32 {
+        ids.push_back(String::from_str(&env, "s"));
+    }
+
+    let result = client.try_bulk_bump_stream_ttls(&ids);
+    assert_eq!(result, Err(Ok(StreamError::BatchTooLarge)));
+}

@@ -341,4 +341,71 @@ export class MerchantRegistryClient {
     }
     return payouts;
   }
+
+  /**
+   * Issue #630 / #529: Set a merchant-specific payment tolerance (in the
+   * smallest currency unit). Pass `null` to clear the override and fall back to
+   * the global default. The contract requires the **merchant's** signature
+   * (`merchant_id.require_auth()`), and caps the effective tolerance at 1% of
+   * each payment amount.
+   *
+   * Maps to `MerchantRegistry.set_merchant_payment_tolerance`.
+   */
+  async setMerchantPaymentTolerance(
+    merchantId: string,
+    tolerance: bigint | null,
+  ): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().set_merchant_payment_tolerance({
+        merchant_id: merchantId,
+        tolerance: tolerance === null ? null : tolerance,
+      }),
+    );
+  }
+
+  /**
+   * Issue #630 / #529: Read a merchant's effective payment tolerance — the
+   * merchant-specific override if one is set, otherwise the global default.
+   *
+   * Read-only — no authorization required.
+   */
+  async getMerchantPaymentTolerance(merchantId: string): Promise<bigint> {
+    const merchant = (await this.getMerchant(merchantId)) as {
+      payment_tolerance?: bigint | null;
+    };
+    if (merchant?.payment_tolerance !== undefined && merchant?.payment_tolerance !== null) {
+      return BigInt(merchant.payment_tolerance);
+    }
+    return this.getGlobalPaymentTolerance();
+  }
+
+  /**
+   * Issue #630 / #529: Set the global default payment tolerance (basis for any
+   * merchant without a specific override). The contract requires the registry
+   * **admin's** signature and rejects negative values; an unauthorized caller
+   * surfaces as a mapped `Unauthorized` `FluxapayError`.
+   *
+   * Maps to `MerchantRegistry.set_global_payment_tolerance`.
+   */
+  async setGlobalPaymentTolerance(admin: string, tolerance: bigint): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().set_global_payment_tolerance({
+        admin,
+        tolerance,
+      }),
+    );
+  }
+
+  /**
+   * Issue #630 / #529: Read the global default payment tolerance.
+   *
+   * Read-only — no authorization required.
+   */
+  async getGlobalPaymentTolerance(): Promise<bigint> {
+    const result = await withMappedContractError(() =>
+      this.getContract().get_global_payment_tolerance(),
+    );
+    const value = (result as { result?: unknown }).result ?? result;
+    return BigInt(value as number | bigint);
+  }
 }

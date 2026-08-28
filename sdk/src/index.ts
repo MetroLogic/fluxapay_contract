@@ -167,6 +167,8 @@ export enum StreamError {
   RateBelowMinimum = 12,
   StreamNotPaused = 13,
   InvalidReceiver = 14,
+  /** Issue #627: a bulk operation exceeded the per-call cap (50). */
+  BatchTooLarge = 15,
 }
 
 /** Mirrors the on-chain `PaymentStream` struct in `stream.rs`. */
@@ -319,6 +321,35 @@ export interface PlatformFeeReport {
   treasuryShare: bigint;
   developerShare: bigint;
   paymentCount: bigint;
+}
+
+/**
+ * Issue #628: One merchant's entry in `PaymentProcessor.get_top_merchants`,
+ * mirroring the `MerchantRanking` contracttype in `fluxapay/src/lib.rs`.
+ * `getTopMerchants` returns these already ordered by `totalVolume` descending.
+ */
+export interface MerchantRanking {
+  merchantId: string;
+  /** Sum of `amount` over every payment created for this merchant. */
+  totalVolume: bigint;
+  /** Number of payments created for this merchant. */
+  paymentCount: bigint;
+}
+
+/**
+ * Issue #629: Aggregate analytics for a single merchant over a time window,
+ * mirroring the `MerchantAnalytics` contracttype in `fluxapay/src/lib.rs`
+ * (`PaymentProcessor.get_merchant_analytics`).
+ */
+export interface MerchantAnalytics {
+  totalPayments: number;
+  confirmedPayments: number;
+  failedPayments: number;
+  totalVolume: bigint;
+  averageAmount: bigint;
+  disputeCount: number;
+  refundCount: number;
+  netSettledVolume: bigint;
 }
 
 /**
@@ -764,6 +795,44 @@ export class FluxapayClient {
             : params.expiresAt,
       }),
     );
+  }
+
+  /**
+   * Issue #630 / #529: Set a merchant-specific payment tolerance (smallest
+   * currency unit). Pass `null` to clear the override and use the global
+   * default. Signed by the **merchant** (`merchant_id.require_auth()` on-chain);
+   * the contract caps the effective tolerance at 1% of each payment amount.
+   */
+  async setMerchantPaymentTolerance(
+    merchantId: string,
+    tolerance: bigint | null,
+  ): Promise<void> {
+    return this.getMerchantRegistry().setMerchantPaymentTolerance(merchantId, tolerance);
+  }
+
+  /**
+   * Issue #630 / #529: Read a merchant's effective payment tolerance — the
+   * merchant-specific override when set, otherwise the global default.
+   * Read-only.
+   */
+  async getMerchantPaymentTolerance(merchantId: string): Promise<bigint> {
+    return this.getMerchantRegistry().getMerchantPaymentTolerance(merchantId);
+  }
+
+  /**
+   * Issue #630 / #529: Set the global default payment tolerance. Signed by the
+   * MerchantRegistry **admin**; an unauthorized caller surfaces as a mapped
+   * `Unauthorized` `FluxapayError`, and negative values are rejected.
+   */
+  async setGlobalPaymentTolerance(admin: string, tolerance: bigint): Promise<void> {
+    return this.getMerchantRegistry().setGlobalPaymentTolerance(admin, tolerance);
+  }
+
+  /**
+   * Issue #630 / #529: Read the global default payment tolerance. Read-only.
+   */
+  async getGlobalPaymentTolerance(): Promise<bigint> {
+    return this.getMerchantRegistry().getGlobalPaymentTolerance();
   }
 
   /**
@@ -1226,6 +1295,102 @@ export class FluxapayClient {
     return withMappedContractError(() =>
       this.contract.get_top_customers({ merchant_id: merchantId, limit }),
     );
+  }
+
+  /**
+   * Issue #628: Rank merchants by cumulative gross payment volume across the
+   * whole platform, for operator-level analytics. Reads the on-chain
+   * volume/count indexes only — it never scans individual payments.
+   *
+   * `limit` is capped at 100 by the contract; a `limit` of 0 returns up to the
+   * cap. Results are already ordered by `totalVolume` descending.
+   *
+   * Read-only — no authorization required.
+   */
+  async getTopMerchants(limit: number): Promise<MerchantRanking[]> {
+    const result = await withMappedContractError(() =>
+      this.contract.get_top_merchants({ limit }),
+    );
+    const rows = (result as { result?: unknown }).result ?? result;
+    return (rows as Array<{ merchant_id: string; total_volume: bigint; payment_count: bigint }>).map(
+      (row) => ({
+        merchantId: row.merchant_id,
+        totalVolume: row.total_volume,
+        paymentCount: row.payment_count,
+      }),
+    );
+  }
+
+  /**
+   * Issue #629: O(1) count of payments created for a merchant, backed by the
+   * `MerchantPaymentCount` index. Pairs with `getMerchantPaymentsFull` for
+   * dashboard pagination.
+   *
+   * Read-only — no authorization required.
+   */
+  async getMerchantPaymentCount(merchantId: string): Promise<number> {
+    const result = await withMappedContractError(() =>
+      this.contract.get_merchant_payment_count({ merchant_id: merchantId }),
+    );
+    const value = (result as { result?: unknown }).result ?? result;
+    return Number(value as number | bigint);
+  }
+
+  /**
+   * Issue #629: Aggregate analytics for a merchant over `[fromTimestamp,
+   * toTimestamp]` (inclusive, ledger seconds): volume, payment counts,
+   * average amount, dispute and refund counts, and net settled volume.
+   *
+   * Pass `fromTimestamp = 0` and omit `toTimestamp` (or pass `0` /
+   * `Number.MAX_SAFE_INTEGER`) for all-time analytics — the client sends the
+   * contract's `u64::MAX` sentinel, which makes it scan the merchant index
+   * directly instead of walking an unbounded range of day buckets.
+   *
+   * Read-only — no authorization required.
+   */
+  async getMerchantAnalytics(
+    merchantId: string,
+    fromTimestamp: number,
+    toTimestamp?: number,
+  ): Promise<MerchantAnalytics> {
+    const U64_MAX = 18446744073709551615n;
+    // A missing / zero / not-finite / above-safe-integer upper bound means
+    // "all time": send the exact u64::MAX the contract special-cases, never a
+    // large finite value (that would make it iterate ~to_ts/86400 day buckets).
+    const toTs =
+      toTimestamp === undefined ||
+      toTimestamp <= 0 ||
+      !Number.isFinite(toTimestamp) ||
+      toTimestamp >= Number.MAX_SAFE_INTEGER
+        ? U64_MAX
+        : BigInt(Math.floor(toTimestamp));
+    const result = await withMappedContractError(() =>
+      this.contract.get_merchant_analytics({
+        merchant_id: merchantId,
+        from_ts: BigInt(Math.max(0, Math.floor(fromTimestamp))),
+        to_ts: toTs,
+      }),
+    );
+    const a = ((result as { result?: unknown }).result ?? result) as {
+      total_payments: number;
+      confirmed_payments: number;
+      failed_payments: number;
+      total_volume: bigint;
+      avg_payment_amount: bigint;
+      dispute_count: number;
+      refund_count: number;
+      net_settled_volume: bigint;
+    };
+    return {
+      totalPayments: Number(a.total_payments),
+      confirmedPayments: Number(a.confirmed_payments),
+      failedPayments: Number(a.failed_payments),
+      totalVolume: a.total_volume,
+      averageAmount: a.avg_payment_amount,
+      disputeCount: Number(a.dispute_count),
+      refundCount: Number(a.refund_count),
+      netSettledVolume: a.net_settled_volume,
+    };
   }
 
   /**
@@ -1693,6 +1858,26 @@ export class FluxapayClient {
     return withMappedContractError(() =>
       (this.contract as any).top_up_stream({ caller: sender, stream_id: streamId, amount }),
     );
+  }
+
+  /**
+   * Issue #627: Bulk-extend the persistent-storage TTL of many streams in one
+   * call, instead of paying a TTL write per stream interaction. Mirrors
+   * `bulkBumpPaymentTTLs`.
+   *
+   * Permissionless (TTL bumps only extend lifetime). Stream IDs that don't
+   * resolve to a stored stream are silently skipped; batches larger than 50 are
+   * rejected with a mapped `BatchTooLarge` error. Returns the number of streams
+   * whose TTL was bumped.
+   *
+   * Maps to `PaymentProcessor.bulk_bump_stream_ttls` on-chain.
+   */
+  async bulkBumpStreamTTLs(streamIds: string[]): Promise<number> {
+    const result = await withMappedContractError(() =>
+      (this.contract as any).bulk_bump_stream_ttls({ stream_ids: streamIds }),
+    );
+    const value = (result as { result?: unknown }).result ?? result;
+    return Number(value as number | bigint);
   }
 
   /**

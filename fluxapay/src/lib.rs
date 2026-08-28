@@ -632,6 +632,10 @@ pub struct TreasuryWithdrawal {
 /// Maximum number of withdrawal records retained in `TreasuryWithdrawalHistory`.
 pub const TREASURY_WITHDRAWAL_HISTORY_CAP: u32 = 100;
 
+/// Issue #628: Maximum number of entries `get_top_merchants` will return,
+/// keeping the ledger-read budget bounded regardless of the caller's `limit`.
+pub const TOP_MERCHANTS_MAX_LIMIT: u32 = 100;
+
 /// Issue #666: Record of a single settlement's platform-fee collection,
 /// appended to `DataKey::FeeCollectionHistory` from `settle_payment`.
 /// `get_platform_fee_report` sums the records whose `collected_at` falls
@@ -1093,6 +1097,13 @@ pub enum DataKey {
     /// Issue #667: Arbitrary on-chain contract metadata (description, deployment notes,
     /// audit commit hash, etc.), keyed by an admin-chosen Symbol.
     ContractMetadata(Symbol),
+    /// Issue #628: Cumulative gross payment volume per merchant (sum of `amount`
+    /// over every payment ever created for the merchant). Read by
+    /// `get_top_merchants` to rank merchants without scanning payment records.
+    MerchantGrossVolume(Address),
+    /// Issue #628: Append-only list of every merchant address that has had at
+    /// least one payment created, for `get_top_merchants` enumeration.
+    TrackedMerchants,
 }
 
 /// Default initial contract version string.
@@ -1137,6 +1148,18 @@ pub struct MerchantAnalytics {
     pub dispute_count: u32,
     pub refund_count: u32,
     pub net_settled_volume: i128,
+}
+
+/// Issue #628: A single merchant's ranking entry in `get_top_merchants`,
+/// ordered by cumulative gross payment volume across the whole platform.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantRanking {
+    pub merchant_id: Address,
+    /// Sum of `amount` over every payment created for this merchant.
+    pub total_volume: i128,
+    /// Number of payments created for this merchant (the `MerchantPaymentCount` index).
+    pub payment_count: u64,
 }
 
 #[contracttype]
@@ -7091,6 +7114,10 @@ impl PaymentProcessor {
             .set(&count_key, &(count + 1));
         Self::bump_ttl(&env, &count_key, LONG_LIVE_TTL);
 
+        // Issue #628: maintain the per-merchant gross-volume index and the
+        // tracked-merchant list so `get_top_merchants` can rank without scanning.
+        Self::record_merchant_volume(&env, &args.merchant_id, args.amount);
+
         // Issue #284: Normalised 2-tuple topic; merchant_id and metadata included in payload.
         env.events().publish(
             (
@@ -8009,6 +8036,101 @@ impl PaymentProcessor {
         while idx < capped_limit {
             if let Some(profile) = sorted.get(idx) {
                 result.push_back(profile);
+            }
+            idx += 1;
+        }
+        result
+    }
+
+    /// Issue #628: Record a payment's `amount` against the merchant's cumulative
+    /// gross-volume index and register the merchant in the tracked-merchant list
+    /// (idempotently) so `get_top_merchants` can rank merchants without scanning
+    /// individual payment records.
+    fn record_merchant_volume(env: &Env, merchant_id: &Address, amount: i128) {
+        let volume_key = DataKey::MerchantGrossVolume(merchant_id.clone());
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&volume_key)
+            .unwrap_or(0i128);
+        env.storage()
+            .persistent()
+            .set(&volume_key, &current.saturating_add(amount));
+        Self::bump_ttl(env, &volume_key, LONG_LIVE_TTL);
+
+        let list_key = DataKey::TrackedMerchants;
+        let mut merchants: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or_else(|| vec![env]);
+        if !merchants.contains(merchant_id) {
+            merchants.push_back(merchant_id.clone());
+            env.storage().persistent().set(&list_key, &merchants);
+            Self::bump_ttl(env, &list_key, LONG_LIVE_TTL);
+        }
+    }
+
+    /// Issue #628: Rank merchants by cumulative gross payment volume (descending).
+    ///
+    /// Reads only the per-merchant `MerchantGrossVolume` / `MerchantPaymentCount`
+    /// indexes plus the `TrackedMerchants` list — it never iterates payment
+    /// records. `limit` is capped at [`TOP_MERCHANTS_MAX_LIMIT`] (100); a
+    /// `limit` of 0 is treated as the cap.
+    pub fn get_top_merchants(env: Env, limit: u32) -> Vec<MerchantRanking> {
+        let capped_limit = if limit == 0 {
+            TOP_MERCHANTS_MAX_LIMIT
+        } else {
+            limit.min(TOP_MERCHANTS_MAX_LIMIT)
+        };
+
+        let merchants: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrackedMerchants)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut rankings: Vec<MerchantRanking> = vec![&env];
+        for merchant_id in merchants.iter() {
+            let total_volume: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::MerchantGrossVolume(merchant_id.clone()))
+                .unwrap_or(0i128);
+            let payment_count: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::MerchantPaymentCount(merchant_id.clone()))
+                .unwrap_or(0u64);
+            rankings.push_back(MerchantRanking {
+                merchant_id,
+                total_volume,
+                payment_count,
+            });
+        }
+
+        // Selection sort by total_volume descending (mirrors get_top_customers).
+        let mut i = 0;
+        while i < rankings.len() {
+            let mut j = i + 1;
+            while j < rankings.len() {
+                if let (Some(a), Some(b)) = (rankings.get(i), rankings.get(j)) {
+                    if b.total_volume > a.total_volume {
+                        rankings.set(i, b.clone());
+                        rankings.set(j, a.clone());
+                    }
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+
+        let end = capped_limit.min(rankings.len());
+        let mut result: Vec<MerchantRanking> = vec![&env];
+        let mut idx = 0u32;
+        while idx < end {
+            if let Some(ranking) = rankings.get(idx) {
+                result.push_back(ranking);
             }
             idx += 1;
         }
@@ -10105,6 +10227,17 @@ impl PaymentProcessor {
         PaymentStreaming::trigger_withdrawal(env, stream_id)
     }
 
+    /// Issue #627: Bulk-extend the TTL of many stream entries in one call
+    /// (permissionless). Delegates to `PaymentStreaming::bulk_bump_stream_ttls`;
+    /// non-existent stream IDs are silently skipped and the count of bumped
+    /// streams is returned.
+    pub fn bulk_bump_stream_ttls(
+        env: Env,
+        stream_ids: Vec<String>,
+    ) -> Result<u32, StreamError> {
+        PaymentStreaming::bulk_bump_stream_ttls(env, stream_ids)
+    }
+
     pub fn set_stream_destination(
         env: Env,
         recipient: Address,
@@ -10762,3 +10895,5 @@ mod router_allowlist_test;
 mod batch_payment_test;
 #[cfg(test)]
 mod escalate_disputes_test;
+#[cfg(test)]
+mod merchant_ranking_test;

@@ -118,6 +118,7 @@ document on every CI run to catch drift between them.
 | 12 | `RateBelowMinimum` | New rate is below the minimum allowed rate for this stream. | Decreasing the rate past the configured `min_rate_per_second` floor. | Choose a rate ≥ the stream's minimum (DoS-protection floor). |
 | 13 | `StreamNotPaused` | Stream is not paused. | Resuming a stream that was never paused. | Confirm stream status before calling resume. |
 | 14 | `InvalidReceiver` | Receiver address cannot equal the sender address. | Creating a stream that pays back to its own sender. | Use a different address for the receiver. |
+| 15 | `BatchTooLarge` | A bulk operation was passed more stream IDs than the per-call cap (50). | Calling `bulk_bump_stream_ttls` with more than 50 IDs. | Split the IDs into batches of ≤ 50. |
 
 ## `FXOracleError` (`fluxapay/src/fx_oracle.rs`)
 
