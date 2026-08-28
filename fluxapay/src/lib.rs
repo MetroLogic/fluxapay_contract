@@ -8465,7 +8465,7 @@ impl PaymentProcessor {
                         fee,
                         refund_amount,
                         status: payment.status.clone(),
-                        settled_at: payment.confirmed_at,
+                        settled_at: payment.confirmed_at.unwrap_or(0),
                     };
 
                     payments_in_period.push_back(summary.clone());
