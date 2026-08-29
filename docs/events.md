@@ -49,6 +49,18 @@ Emitted by `settle_payment` when funds are released to the merchant.
 
 ---
 
+### PAYMENT / CANCELLED
+
+Emitted by `cancel_payment`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `payment_id` | `String` | Payment identifier |
+| `merchant_id` | `Address` | Merchant receiving the payment |
+| `cancelled_by` | `Address` | Address that authorized the cancellation |
+
+---
+
 ### PAYMENT / EXPIRED
 
 Emitted by `expire_payment`.
@@ -209,6 +221,7 @@ Emitted by `register_merchant`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `merchant_id` | `Address` | Merchant address |
+| `reason` | `String` | Suspension reason |
 
 ---
 
@@ -217,6 +230,7 @@ Emitted by `register_merchant`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `merchant_id` | `Address` | Merchant address |
+| `reinstated_by` | `Address` | Admin address that reinstated the merchant |
 
 ---
 
@@ -470,17 +484,39 @@ Emitted by `update_rate`.
 
 ---
 
-## KYC
+## INVOICE
 
-### KYC / TIER_UPGRADED
+### INVOICE / CREATED
 
-Emitted when a merchant's KYC tier is automatically upgraded via cumulative payment volume.
+Emitted by `create_invoice` and `create_payment_link_invoice`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `merchant_id` | `Address` | Merchant account address |
-| `old_tier` | `KycTier` | Previous KYC tier |
-| `new_tier` | `KycTier` | Upgraded KYC tier |
+| `invoice_id` | `String` | Unique invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+| `amount` | `i128` | Total invoice amount |
+
+---
+
+### INVOICE / PAID
+
+Emitted by `mark_invoice_paid`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+
+---
+
+### INVOICE / OVERDUE
+
+Emitted when an invoice is marked overdue.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
 
 ---
 
