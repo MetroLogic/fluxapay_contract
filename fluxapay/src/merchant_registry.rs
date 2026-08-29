@@ -949,9 +949,10 @@ impl MerchantRegistry {
         }
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        let old_tier = merchant.kyc_tier.clone();
 
         let is_promotion = matches!(
-            (&merchant.kyc_tier, &new_tier),
+            (&old_tier, &new_tier),
             (KycTier::Unverified, KycTier::Basic)
                 | (KycTier::Basic, KycTier::Full)
                 | (KycTier::Full, KycTier::Business)
@@ -961,7 +962,7 @@ impl MerchantRegistry {
             return Err(MerchantError::Unauthorized);
         }
 
-        merchant.kyc_tier = new_tier;
+        merchant.kyc_tier = new_tier.clone();
 
         env.storage()
             .persistent()
@@ -972,8 +973,10 @@ impl MerchantRegistry {
                 Symbol::new(&env, "MERCHANT"),
                 Symbol::new(&env, "KYC_UPGRADED"),
             ),
-            merchant_id,
+            merchant_id.clone(),
         );
+
+        crate::events::emit_kyc_tier_upgraded(&env, &merchant_id, &old_tier, &new_tier);
 
         Ok(())
     }

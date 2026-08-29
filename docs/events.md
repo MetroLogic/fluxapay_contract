@@ -470,6 +470,20 @@ Emitted by `update_rate`.
 
 ---
 
+## KYC
+
+### KYC / TIER_UPGRADED
+
+Emitted when a merchant's KYC tier is automatically upgraded via cumulative payment volume.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `merchant_id` | `Address` | Merchant account address |
+| `old_tier` | `KycTier` | Previous KYC tier |
+| `new_tier` | `KycTier` | Upgraded KYC tier |
+
+---
+
 ## Topic Format Reference
 
 Every event uses a **2-tuple** topic:
@@ -482,3 +496,4 @@ env.events().publish(
 ```
 
 This ensures consistent indexing and filtering by off-chain listeners via the Stellar Horizon API `?topic[]=...` filter parameter.
+

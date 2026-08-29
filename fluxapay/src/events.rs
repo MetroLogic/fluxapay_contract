@@ -17,6 +17,7 @@
 //! ```
 
 use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
+use crate::merchant_registry::KycTier;
 
 // ============================================================================
 // Payment Events
@@ -122,6 +123,23 @@ pub struct KycTierUpgraded {
     pub merchant_id: Address,
     pub old_tier: String,
     pub new_tier: String,
+}
+
+/// Issue #611: Emit a `KYC/TIER_UPGRADED` event when auto_upgrade_kyc_tier advances a merchant.
+#[allow(deprecated)]
+pub fn emit_kyc_tier_upgraded(
+    env: &Env,
+    merchant_id: &Address,
+    old_tier: &KycTier,
+    new_tier: &KycTier,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "KYC"),
+            Symbol::new(env, "TIER_UPGRADED"),
+        ),
+        (merchant_id.clone(), old_tier.clone(), new_tier.clone()),
+    );
 }
 
 // ============================================================================

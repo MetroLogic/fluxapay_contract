@@ -132,6 +132,11 @@ Emitted when a merchant's profile or configuration is updated.
 - **Topics**: `(MERCHANT, UPDATED)`
 - **Data**: `merchant_id: Address`
 
+### KYC/TIER_UPGRADED
+Emitted when a merchant's KYC tier is automatically upgraded.
+- **Topics**: `(KYC, TIER_UPGRADED)`
+- **Data**: `(merchant_id: Address, old_tier: KycTier, new_tier: KycTier)`
+
 ---
 
 ## Payment Link Events
