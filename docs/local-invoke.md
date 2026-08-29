@@ -252,6 +252,124 @@ Returns the full `PaymentCharge` object with current status:
 
 ---
 
+## Stream Functions
+
+### 4. Create Stream
+
+Create a time-based payout stream. The sender funds the contract with an upfront deposit and chooses a rate in tokens per second.
+
+#### Invoke Command
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $SENDER_ADDRESS \
+  -- create_stream \
+  --sender $SENDER_ADDRESS \
+  --receiver $RECEIVER_ADDRESS \
+  --token $USDC_TOKEN_ADDRESS \
+  --rate_per_second 100 \
+  --deposit 1000000 \
+  --stream_id "stream_001"
+```
+
+#### Expected Output
+
+Returns the stream record:
+
+```json
+{
+  "stream_id": "stream_001",
+  "sender": "G...",
+  "receiver": "G...",
+  "destination": null,
+  "token": "C...",
+  "rate_per_second": 100,
+  "min_rate_per_second": 1,
+  "remaining_deposit": 1000000,
+  "last_checkpoint_at": 1711776000,
+  "accrued_at_checkpoint": 0,
+  "status": "Active",
+  "milestones_approved": false
+}
+```
+
+#### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Unauthorized` | Sender is not the account signing the transaction | Use the stream sender as `--source` |
+| `InvalidRate` | `rate_per_second <= 0` | Set a positive rate |
+| `InvalidDeposit` | `deposit <= 0` | Set a positive deposit |
+| `StreamAlreadyExists` | A stream with the same ID already exists | Use a unique `--stream_id` |
+
+---
+
+### 5. Withdraw All For Recipient
+
+Withdraw all currently accrued funds from active streams owned by a recipient, limited to `max_streams` in one call.
+
+#### Invoke Command
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $RECEIVER_ADDRESS \
+  -- withdraw_all_for_recipient \
+  --recipient $RECEIVER_ADDRESS \
+  --max_streams 5
+```
+
+#### Expected Output
+
+Returns a vector of processed stream IDs:
+
+```json
+["stream_001", "stream_003"]
+```
+
+#### Notes
+
+- The recipient must have a matching `receiver` on each stream.
+- Streams with `milestones_approved = false` are skipped until the sender approves the milestone.
+- The call stops once it processes `max_streams` eligible streams.
+
+---
+
+### 6. Cancel Stream
+
+Cancel an active stream and refund any unaccrued deposit back to the sender while paying the accrued amount to the receiver.
+
+#### Invoke Command
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $SENDER_ADDRESS \
+  -- cancel_stream \
+  --sender $SENDER_ADDRESS \
+  --stream_id "stream_001"
+```
+
+#### Expected Output
+
+```json
+null
+```
+
+#### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Unauthorized` | Caller is not the original stream sender | Use the original sender address |
+| `StreamNotFound` | The stream ID does not exist | Verify the stream ID |
+| `StreamNotActive` | The stream is paused, cancelled, or exhausted | Use an active stream or create a new one |
+
+---
+
 ## Refund Functions
 
 ### 4. Create Refund

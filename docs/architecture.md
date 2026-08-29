@@ -393,3 +393,5 @@ reference table, including common causes and remediation: see
 
 - [ADR-0001: Access Control Split](ADR-0001-access-control-split.md)
 - [ADR-0002: Payment Stream Design](ADR-0002-payment-stream-design.md)
+- [ADR-0003: KYC Tier System](ADR-0003-kyc-tier-system.md)
+- [ADR-0004: Multi-Sig Admin Governance](ADR-0004-multisig-admin-governance.md)

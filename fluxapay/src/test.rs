@@ -3957,6 +3957,335 @@ fn test_settle_payment_zero_fee_rate_no_deduction_no_event() {
     );
 }
 
+#[test]
+fn test_fee_waiver_applied_on_settle_zero_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    client.set_fee_rate(&admin, &1_000i128);
+
+    let code = String::from_str(&env, "LAUNCH2026");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    client.add_fee_waiver_code(&admin, &code, &expires_at, &2u32);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let payment_id = String::from_str(&env, "waiver_zero_fee");
+    let amount = 10_000i128;
+    let mut args = create_payment_args(&env, &payment_id, &merchant, amount);
+    args.fee_waiver_code = Some(code.clone());
+    client.create_payment(&args);
+    client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(client.get_payment(&payment_id).status, PaymentStatus::Settled);
+    assert_eq!(client.get_treasury_balance(), 0i128);
+
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        let record = env
+            .storage()
+            .persistent()
+            .get::<DataKey, FeeWaiverCodeRecord>(&DataKey::FeeWaiverCode(code.clone()))
+            .expect("waiver code should exist");
+        assert_eq!(record.remaining_uses, 1u32);
+    });
+}
+
+#[test]
+fn test_fee_waiver_code_max_uses_decremented() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    client.set_fee_rate(&admin, &1_000i128);
+
+    let code = String::from_str(&env, "WAIVER_MAX_USES");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    client.add_fee_waiver_code(&admin, &code, &expires_at, &3u32);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let payment_id = String::from_str(&env, "waiver_max_uses");
+    let amount = 10_000i128;
+    let mut args = create_payment_args(&env, &payment_id, &merchant, amount);
+    args.fee_waiver_code = Some(code.clone());
+    client.create_payment(&args);
+    client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        let record = env
+            .storage()
+            .persistent()
+            .get::<DataKey, FeeWaiverCodeRecord>(&DataKey::FeeWaiverCode(code.clone()))
+            .expect("waiver code should exist");
+        assert_eq!(record.remaining_uses, 2u32);
+    });
+}
+
+#[test]
+fn test_fee_waiver_code_exhausted_not_applied() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    client.set_fee_rate(&admin, &1_000i128);
+
+    let code = String::from_str(&env, "WAIVER_EXHAUSTED");
+    client.add_fee_waiver_code(&admin, &code, &(env.ledger().timestamp() + 3_600), &1u32);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let first_id = String::from_str(&env, "waiver_exhausted_first");
+    let first_amount = 10_000i128;
+    let mut first_args = create_payment_args(&env, &first_id, &merchant, first_amount);
+    first_args.fee_waiver_code = Some(code.clone());
+    client.create_payment(&first_args);
+    client.verify_payment(
+        &oracle,
+        &first_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &first_amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    let first_splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            first_amount,
+        },
+    ];
+    client.settle_payment(&operator, &first_id, &first_splits);
+
+    let second_id = String::from_str(&env, "waiver_exhausted_second");
+    let second_amount = 10_000i128;
+    let mut second_args = create_payment_args(&env, &second_id, &merchant, second_amount);
+    second_args.fee_waiver_code = Some(code.clone());
+    client.create_payment(&second_args);
+    client.verify_payment(
+        &oracle,
+        &second_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &second_amount,
+        &None::<u64>,
+    );
+
+    let second_splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            second_amount,
+        },
+    ];
+    client.settle_payment(&operator, &second_id, &second_splits);
+
+    assert_eq!(client.get_treasury_balance(), 1_000i128);
+}
+
+#[test]
+fn test_fee_waiver_expired_code_not_applied() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    client.set_fee_rate(&admin, &1_000i128);
+
+    let code = String::from_str(&env, "WAIVER_EXPIRED");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    client.add_fee_waiver_code(&admin, &code, &expires_at, &5u32);
+
+    env.ledger().set_timestamp(expires_at + 1);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let payment_id = String::from_str(&env, "waiver_expired");
+    let amount = 10_000i128;
+    let mut args = create_payment_args(&env, &payment_id, &merchant, amount);
+    args.fee_waiver_code = Some(code);
+    client.create_payment(&args);
+    client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(client.get_treasury_balance(), 1_000i128);
+}
+
+#[test]
+fn test_fee_waiver_unknown_code_not_applied() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    client.set_fee_rate(&admin, &1_000i128);
+
+    let code = String::from_str(&env, "WAIVER_UNKNOWN");
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let payment_id = String::from_str(&env, "waiver_unknown");
+    let amount = 10_000i128;
+    let mut args = create_payment_args(&env, &payment_id, &merchant, amount);
+    args.fee_waiver_code = Some(code);
+    client.create_payment(&args);
+    client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(client.get_treasury_balance(), 1_000i128);
+}
+
+#[test]
+fn test_fee_waiver_per_merchant_not_global() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    client.set_fee_rate(&admin, &1_000i128);
+
+    let code = String::from_str(&env, "MERCHANT_ONLY");
+    client.add_fee_waiver_code(&admin, &code, &(env.ledger().timestamp() + 3_600), &5u32);
+
+    let merchant_a = Address::generate(&env);
+    let merchant_b = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_a);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_b);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let first_id = String::from_str(&env, "waiver_merchant_a");
+    let first_amount = 10_000i128;
+    let mut first_args = create_payment_args(&env, &first_id, &merchant_a, first_amount);
+    first_args.fee_waiver_code = Some(code.clone());
+    client.create_payment(&first_args);
+    client.verify_payment(
+        &oracle,
+        &first_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &first_amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    let first_splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            first_amount,
+        },
+    ];
+    client.settle_payment(&operator, &first_id, &first_splits);
+    assert_eq!(client.get_treasury_balance(), 0i128);
+
+    let second_id = String::from_str(&env, "waiver_merchant_b");
+    let second_amount = 10_000i128;
+    let mut second_args = create_payment_args(&env, &second_id, &merchant_b, second_amount);
+    second_args.fee_waiver_code = Some(code.clone());
+    client.create_payment(&second_args);
+    client.verify_payment(
+        &oracle,
+        &second_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &second_amount,
+        &None::<u64>,
+    );
+
+    let second_splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            second_amount,
+        },
+    ];
+    client.settle_payment(&operator, &second_id, &second_splits);
+    assert_eq!(client.get_treasury_balance(), 1_000i128);
+}
+
 /// Only admin can call set_fee_rate; non-admin gets Unauthorized.
 #[test]
 fn test_set_fee_rate_requires_admin() {
