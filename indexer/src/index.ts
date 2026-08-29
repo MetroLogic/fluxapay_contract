@@ -1,52 +1,107 @@
 /**
  * FluxaPay Soroban Event Consumer
- * Subscribes to contract events via stellar-sdk and persists to PostgreSQL
- * Implements at-least-once delivery with idempotency (event_id dedup)
+ * Subscribes to contract events via stellar-sdk from multiple contracts simultaneously,
+ * persists events to PostgreSQL, exposes dead-letter queue retry, and starts the REST API.
  */
 
-import {
-  Server,
-  EventFilter,
-  GetEventsRequest,
-  ContractEventFilter,
-} from "stellar-sdk";
+import { rpc } from "stellar-sdk";
 import { Database } from "./database";
 import { ContractEvent, AnyEvent } from "./types";
+import { startServer } from "./server";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
-interface EventSubscriptionConfig {
+export interface EventSubscriptionConfig {
   rpcUrl: string;
-  contractId: string;
+  contractIds: string[];
   dbConnectionString: string;
   pollInterval: number;
   startLedger: number;
+  dlqRetryIntervalMs: number;
+  dlqMinAgeSeconds: number;
+  apiPort: number;
 }
 
-class EventSubscriber {
-  private server: Server;
+export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): EventSubscriptionConfig {
+  const contractIdsSet = new Set<string>();
+
+  // 1. Check individual contract environment variables
+  const individualVars = [
+    env.PAYMENT_PROCESSOR_CONTRACT_ID,
+    env.REFUND_MANAGER_CONTRACT_ID,
+    env.MERCHANT_REGISTRY_CONTRACT_ID,
+    env.FX_ORACLE_CONTRACT_ID,
+    env.PAYMENT_LINK_MANAGER_CONTRACT_ID,
+  ];
+  for (const val of individualVars) {
+    if (val && val.trim()) {
+      contractIdsSet.add(val.trim());
+    }
+  }
+
+  // 2. Check CONTRACT_IDS (comma-separated)
+  if (env.CONTRACT_IDS && env.CONTRACT_IDS.trim()) {
+    env.CONTRACT_IDS.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((id) => contractIdsSet.add(id));
+  }
+
+  // 3. Fallback migration for legacy single FLUXAPAY_CONTRACT_ID
+  if (env.FLUXAPAY_CONTRACT_ID && env.FLUXAPAY_CONTRACT_ID.trim()) {
+    contractIdsSet.add(env.FLUXAPAY_CONTRACT_ID.trim());
+  }
+
+  const contractIds = Array.from(contractIdsSet);
+
+  if (contractIds.length === 0) {
+    throw new Error(
+      "No contract IDs configured. Please set contract IDs in environment variables " +
+      "(PAYMENT_PROCESSOR_CONTRACT_ID, REFUND_MANAGER_CONTRACT_ID, MERCHANT_REGISTRY_CONTRACT_ID, " +
+      "FX_ORACLE_CONTRACT_ID, PAYMENT_LINK_MANAGER_CONTRACT_ID, CONTRACT_IDS, or FLUXAPAY_CONTRACT_ID)."
+    );
+  }
+
+  return {
+    rpcUrl: env.SOROBAN_RPC_URL || "http://localhost:8000/soroban/rpc",
+    contractIds,
+    dbConnectionString:
+      env.DATABASE_URL || "postgres://postgres:password@localhost:5432/fluxapay",
+    pollInterval: parseInt(env.POLL_INTERVAL_MS || "5000", 10),
+    startLedger: parseInt(env.START_LEDGER || "1", 10),
+    dlqRetryIntervalMs: parseInt(env.DLQ_RETRY_INTERVAL_MS || "60000", 10),
+    dlqMinAgeSeconds: parseInt(env.DLQ_MIN_AGE_SECONDS || "60", 10),
+    apiPort: parseInt(env.PORT || env.INDEXER_API_PORT || "3001", 10),
+  };
+}
+
+export class EventSubscriber {
+  private server: rpc.Server;
   private database: Database;
   private config: EventSubscriptionConfig;
   private currentLedger: number;
+  private pollTimer: NodeJS.Timeout | null = null;
+  private dlqRetryTimer: NodeJS.Timeout | null = null;
 
-  constructor(config: EventSubscriptionConfig) {
+  constructor(config: EventSubscriptionConfig, database?: Database) {
     this.config = config;
-    this.server = new Server(config.rpcUrl);
-    this.database = new Database(config.dbConnectionString);
+    const allowHttp = config.rpcUrl.startsWith("http://");
+    this.server = new rpc.Server(config.rpcUrl, { allowHttp });
+    this.database = database || new Database(config.dbConnectionString);
     this.currentLedger = config.startLedger;
   }
 
   async initialize(): Promise<void> {
     await this.database.initialize();
-    console.log("Event subscriber initialized");
+    console.log(`Event subscriber initialized with ${this.config.contractIds.length} contract ID(s): ${this.config.contractIds.join(", ")}`);
   }
 
   async start(): Promise<void> {
     console.log(`Starting event subscription from ledger ${this.currentLedger}`);
 
     // Main subscription loop
-    const subscriptionLoop = setInterval(async () => {
+    this.pollTimer = setInterval(async () => {
       try {
         await this.pollEvents();
       } catch (error) {
@@ -54,21 +109,29 @@ class EventSubscriber {
       }
     }, this.config.pollInterval);
 
+    // Auto-retry DLQ loop
+    this.dlqRetryTimer = setInterval(async () => {
+      try {
+        await this.retryDLQEvents(false);
+      } catch (error) {
+        console.error("Error retrying DLQ events:", error);
+      }
+    }, this.config.dlqRetryIntervalMs);
+
     // Graceful shutdown
     process.on("SIGINT", async () => {
-      clearInterval(subscriptionLoop);
       await this.shutdown();
     });
   }
 
-  private async pollEvents(): Promise<void> {
+  async pollEvents(): Promise<void> {
     try {
-      const request: GetEventsRequest = {
+      const request: Parameters<rpc.Server["getEvents"]>[0] = {
         filters: [
           {
             type: "contract",
-            contractIds: [this.config.contractId],
-          } as ContractEventFilter,
+            contractIds: this.config.contractIds,
+          },
         ],
         startLedger: this.currentLedger,
         limit: 100,
@@ -77,30 +140,34 @@ class EventSubscriber {
       const response = await this.server.getEvents(request);
 
       if (!response.events || response.events.length === 0) {
-        // No new events, update ledger to avoid re-fetching
         if (response.latestLedger) {
           this.currentLedger = response.latestLedger;
         }
         return;
       }
 
-      console.log(`Found ${response.events.length} events`);
+      console.log(`Found ${response.events.length} events across configured contracts`);
 
       for (const event of response.events) {
+        const eventId = `${event.ledger}-${event.txHash}-${event.id || Date.now()}`;
         try {
           const parsedEvent = this.parseEvent(event);
           if (parsedEvent) {
             const stored = await this.database.storeEvent(parsedEvent);
             if (stored) {
-              console.log(`✓ Stored event: ${parsedEvent.id}`);
+              console.log(`✓ Stored event ${parsedEvent.id} from contract ${parsedEvent.contractId}`);
             }
           }
-        } catch (error) {
-          console.error(`Error processing event:`, error);
+        } catch (error: any) {
+          console.error(`Error processing event ${eventId}:`, error);
+          await this.database.storeDeadLetterEvent(
+            eventId,
+            event,
+            error.message || String(error)
+          );
         }
       }
 
-      // Update current ledger for next poll
       if (response.latestLedger) {
         this.currentLedger = response.latestLedger + 1;
       }
@@ -109,26 +176,23 @@ class EventSubscriber {
     }
   }
 
-  private parseEvent(event: any): AnyEvent | null {
+  parseEvent(event: any): AnyEvent | null {
     try {
-      // Extract event metadata
       const eventId = `${event.ledger}-${event.txHash}-${event.id}`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const ledger = parseInt(event.ledger);
+      const timestamp = event.timestamp || Math.floor(Date.now() / 1000);
+      const ledger = typeof event.ledger === "number" ? event.ledger : parseInt(event.ledger, 10);
       const txHash = event.txHash || "";
+      const contractId = event.contractId || event.contract_id || "";
 
-      // Parse topics (should be array of strings)
       const topics = Array.isArray(event.topic) ? event.topic : [];
       if (topics.length < 2) {
         console.warn("Invalid event topics:", topics);
         return null;
       }
 
-      // Parse value (should be contract value)
       let value: Record<string, unknown> = {};
       if (event.value) {
         try {
-          // stellar-sdk returns values as ScVal objects; we need to convert them
           value = this.scValToObject(event.value);
         } catch (e) {
           console.warn("Could not parse event value:", e);
@@ -140,12 +204,11 @@ class EventSubscriber {
         timestamp,
         ledger,
         txHash,
-        contractId: event.contractId || "",
+        contractId,
         topic: topics,
         value,
       };
 
-      // Return as typed event based on topic
       return baseEvent as AnyEvent;
     } catch (error) {
       console.error("Error parsing event:", error);
@@ -153,18 +216,11 @@ class EventSubscriber {
     }
   }
 
-  private scValToObject(scval: any): Record<string, unknown> {
-    // Basic conversion of Stellar ScVal to JavaScript object
-    // This is a simplified implementation; a full implementation would handle
-    // all ScVal types (map, vec, contract, etc.)
-    if (typeof scval === "string") {
-      return { value: scval };
-    }
-    if (typeof scval === "number") {
+  scValToObject(scval: any): Record<string, unknown> {
+    if (typeof scval === "string" || typeof scval === "number") {
       return { value: scval };
     }
     if (scval && typeof scval === "object") {
-      // If it's already a plain object, return it
       if (scval.constructor === Object) {
         return scval;
       }
@@ -172,32 +228,58 @@ class EventSubscriber {
     return { raw: scval };
   }
 
-  private async shutdown(): Promise<void> {
+  async retryDLQEvents(forceAll = false): Promise<{ attempted: number; succeeded: number; failed: number }> {
+    const records = forceAll
+      ? await this.database.getAllDLQEvents(100)
+      : await this.database.getEligibleDLQEvents(this.config.dlqMinAgeSeconds, 100);
+
+    let attempted = 0;
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const record of records) {
+      attempted++;
+      try {
+        const parsedEvent = this.parseEvent(record.raw_data);
+        if (!parsedEvent) {
+          throw new Error("Unable to parse DLQ raw_data into valid event");
+        }
+        await this.database.storeEvent(parsedEvent);
+        await this.database.removeDeadLetterEvent(record.event_id);
+        succeeded++;
+        console.log(`✓ Replayed DLQ event: ${record.event_id}`);
+      } catch (err: any) {
+        failed++;
+        await this.database.incrementDLQRetryCount(record.event_id, err.message || String(err));
+        console.error(`✗ DLQ replay failed for ${record.event_id}:`, err);
+      }
+    }
+
+    return { attempted, succeeded, failed };
+  }
+
+  async shutdown(): Promise<void> {
     console.log("Shutting down event subscriber...");
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.dlqRetryTimer) clearInterval(this.dlqRetryTimer);
     await this.database.close();
-    process.exit(0);
   }
 }
 
 async function main(): Promise<void> {
-  const config: EventSubscriptionConfig = {
-    rpcUrl: process.env.SOROBAN_RPC_URL || "http://localhost:8000/soroban/rpc",
-    contractId:
-      process.env.FLUXAPAY_CONTRACT_ID ||
-      "CBNR5IXY5K7KCJ63PY3ZFYHG4U6F5C5I2PZ2ZQXDMQQNC6ZF63K65QQ", // placeholder
-    dbConnectionString:
-      process.env.DATABASE_URL ||
-      "postgres://postgres:password@localhost:5432/fluxapay",
-    pollInterval: parseInt(process.env.POLL_INTERVAL_MS || "5000"),
-    startLedger: parseInt(process.env.START_LEDGER || "1"),
-  };
-
+  const config = loadConfigFromEnv();
   const subscriber = new EventSubscriber(config);
   await subscriber.initialize();
   await subscriber.start();
+
+  // Start REST API Server alongside subscriber
+  const database = (subscriber as any).database;
+  await startServer(database, config.apiPort, () => subscriber.retryDLQEvents(true));
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error("Fatal error:", error);
+    process.exit(1);
+  });
+}

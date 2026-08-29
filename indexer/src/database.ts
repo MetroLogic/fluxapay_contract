@@ -1,10 +1,20 @@
 /**
  * FluxaPay Indexer Database Module
- * Handles PostgreSQL connections and event persistence with idempotency
+ * Handles PostgreSQL connections, event persistence, dispute status updates,
+ * dead-letter queue operations, and REST API queries.
  */
 
 import { Pool } from "pg";
-import { ContractEvent, AnyEvent } from "./types";
+import { AnyEvent } from "./types";
+
+export interface DLQRecord {
+  id: number;
+  event_id: string;
+  raw_data: any;
+  error: string;
+  retry_count: number;
+  created_at: Date;
+}
 
 export class Database {
   private pool: Pool;
@@ -32,6 +42,8 @@ export class Database {
 
     const client = await this.pool.connect();
     try {
+      await client.query("BEGIN");
+
       // Check if event already exists (idempotency)
       const existingEvent = await client.query(
         "SELECT id FROM contract_events WHERE event_id = $1",
@@ -40,6 +52,7 @@ export class Database {
 
       if (existingEvent.rows.length > 0) {
         console.log(`Event ${event.id} already processed, skipping...`);
+        await client.query("ROLLBACK");
         return false;
       }
 
@@ -49,8 +62,8 @@ export class Database {
 
       // Store in contract_events (dedup table)
       await client.query(
-        `INSERT INTO contract_events (event_id, event_type, ledger, tx_hash, timestamp, data)
-         VALUES ($1, $2, $3, $4, to_timestamp($5), $6)
+        `INSERT INTO contract_events (event_id, event_type, ledger, tx_hash, timestamp, data, contract_id)
+         VALUES ($1, $2, $3, $4, to_timestamp($5), $6, $7)
          ON CONFLICT (event_id) DO NOTHING`,
         [
           event.id,
@@ -59,6 +72,7 @@ export class Database {
           event.txHash,
           event.timestamp,
           JSON.stringify(event.value),
+          event.contractId || null,
         ]
       );
 
@@ -115,20 +129,57 @@ export class Database {
         );
         break;
 
-      case "disputes":
-        await client.query(
-          `INSERT INTO disputes (dispute_id, payment_id, amount, status, created_at)
-           VALUES ($1, $2, $3, $4, to_timestamp($5))
-           ON CONFLICT (dispute_id) DO UPDATE SET status = $4`,
-          [
-            value.dispute_id,
-            value.payment_id,
-            value.amount,
-            event.topic[1],
-            event.timestamp,
-          ]
-        );
+      case "disputes": {
+        // Issue #615: Persist dispute status updates for RESOLVED, REJECTED, and ESCALATED events
+        const subtype = event.topic[1];
+        if (subtype === "RESOLVED") {
+          const res = await client.query(
+            `UPDATE disputes
+             SET status = 'Resolved', resolved_at = to_timestamp($2), updated_at = CURRENT_TIMESTAMP
+             WHERE dispute_id = $1`,
+            [value.dispute_id, event.timestamp]
+          );
+          if (res.rowCount === 0) {
+            console.warn(`[DisputeUpdate] Dispute ID ${value.dispute_id} not found for RESOLVED event`);
+          }
+        } else if (subtype === "REJECTED") {
+          const res = await client.query(
+            `UPDATE disputes
+             SET status = 'Rejected', updated_at = CURRENT_TIMESTAMP
+             WHERE dispute_id = $1`,
+            [value.dispute_id]
+          );
+          if (res.rowCount === 0) {
+            console.warn(`[DisputeUpdate] Dispute ID ${value.dispute_id} not found for REJECTED event`);
+          }
+        } else if (subtype === "ESCALATED") {
+          const res = await client.query(
+            `UPDATE disputes
+             SET escalated = true, status = 'Escalated', updated_at = CURRENT_TIMESTAMP
+             WHERE dispute_id = $1`,
+            [value.dispute_id]
+          );
+          if (res.rowCount === 0) {
+            console.warn(`[DisputeUpdate] Dispute ID ${value.dispute_id} not found for ESCALATED event`);
+          }
+        } else {
+          // CREATED or default status insertion
+          const status = subtype === "CREATED" ? "Open" : subtype;
+          await client.query(
+            `INSERT INTO disputes (dispute_id, payment_id, amount, status, created_at, escalated)
+             VALUES ($1, $2, $3, $4, to_timestamp($5), false)
+             ON CONFLICT (dispute_id) DO UPDATE SET status = EXCLUDED.status`,
+            [
+              value.dispute_id,
+              value.payment_id,
+              value.amount,
+              status,
+              event.timestamp,
+            ]
+          );
+        }
         break;
+      }
 
       case "merchants":
         await client.query(
@@ -170,9 +221,6 @@ export class Database {
         break;
 
       case "dispute_bonds":
-        // Issue #677: bond lifecycle events (BOND_RETURNED / BOND_FORFEITED)
-        // carry a recipient + amount, not a payment_id/status update, so
-        // they're tracked separately from the `disputes` table.
         await client.query(
           `INSERT INTO dispute_bonds (dispute_id, recipient, amount, status, created_at)
            VALUES ($1, $2, $3, $4, to_timestamp($5))`,
@@ -204,8 +252,6 @@ export class Database {
   }
 
   private getTableName(eventType: string, eventSubtype?: string): string {
-    // Issue #677: dispute bond events route to a dedicated table since
-    // their shape (recipient + amount) doesn't fit the `disputes` row.
     if (eventType === "DISPUTE" && (eventSubtype === "BOND_RETURNED" || eventSubtype === "BOND_FORFEITED")) {
       return "dispute_bonds";
     }
@@ -222,7 +268,60 @@ export class Database {
     return tableMap[eventType] || "contract_events";
   }
 
-  // ── Read queries (Issue #672: REST API backing queries) ─────────────────
+  // ── Read queries (Issue #616 REST API Backing Queries) ─────────────────
+
+  async getPaymentById(paymentId: string): Promise<unknown | null> {
+    const { rows } = await this.pool.query(
+      `SELECT payment_id, merchant_id, amount, currency, status, created_at, updated_at
+       FROM payments WHERE payment_id = $1`,
+      [paymentId]
+    );
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  async getPaymentsByMerchantPaginated(
+    merchantId: string,
+    page = 1,
+    limit = 20,
+    status?: string
+  ): Promise<{
+    payments: unknown[];
+    pagination: { page: number; limit: number; total: number; totalPages: number };
+  }> {
+    const pageNum = Math.max(1, page);
+    const limitNum = Math.max(1, limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    let countSql = `SELECT COUNT(*)::int AS total FROM payments WHERE merchant_id = $1`;
+    let dataSql = `SELECT payment_id, merchant_id, amount, currency, status, created_at, updated_at
+                   FROM payments WHERE merchant_id = $1`;
+    const params: unknown[] = [merchantId];
+
+    if (status) {
+      countSql += ` AND status = $2`;
+      dataSql += ` AND status = $2`;
+      params.push(status);
+    }
+
+    dataSql += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+
+    const countResult = await this.pool.query(countSql, params);
+    const total = countResult.rows[0]?.total || 0;
+
+    const dataParams = [...params, limitNum, offset];
+    const dataResult = await this.pool.query(dataSql, dataParams);
+    const totalPages = Math.ceil(total / limitNum) || (total === 0 ? 0 : 1);
+
+    return {
+      payments: dataResult.rows,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages,
+      },
+    };
+  }
 
   async getPaymentsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
     const { rows } = await this.pool.query(
@@ -231,6 +330,32 @@ export class Database {
       [merchantId, limit]
     );
     return rows;
+  }
+
+  async getDisputesByMerchant(merchantId: string, status?: string): Promise<unknown[]> {
+    let sql = `SELECT d.dispute_id, d.payment_id, d.amount, d.status, d.escalated, d.resolved_at, d.created_at
+               FROM disputes d
+               JOIN payments p ON p.payment_id = d.payment_id
+               WHERE p.merchant_id = $1`;
+    const params: unknown[] = [merchantId];
+
+    if (status) {
+      sql += ` AND d.status = $2`;
+      params.push(status);
+    }
+
+    sql += ` ORDER BY d.created_at DESC`;
+    const { rows } = await this.pool.query(sql, params);
+    return rows;
+  }
+
+  async getRefundById(refundId: string): Promise<unknown | null> {
+    const { rows } = await this.pool.query(
+      `SELECT refund_id, payment_id, amount, status, created_at, updated_at
+       FROM refunds WHERE refund_id = $1`,
+      [refundId]
+    );
+    return rows.length > 0 ? rows[0] : null;
   }
 
   async getRefundsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
@@ -245,24 +370,98 @@ export class Database {
     return rows;
   }
 
-  async getDisputesByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
-    const { rows } = await this.pool.query(
-      `SELECT d.dispute_id, d.payment_id, d.amount, d.status, d.created_at
-       FROM disputes d
-       JOIN payments p ON p.payment_id = d.payment_id
-       WHERE p.merchant_id = $1
-       ORDER BY d.created_at DESC LIMIT $2`,
-      [merchantId, limit]
-    );
+  async getEventsFiltered(
+    type?: string,
+    fromLedger?: number,
+    toLedger?: number
+  ): Promise<unknown[]> {
+    let sql = `SELECT id, event_id, event_type, ledger, tx_hash, timestamp, data, contract_id, created_at
+               FROM contract_events WHERE 1=1`;
+    const params: unknown[] = [];
+
+    if (type) {
+      params.push(type);
+      sql += ` AND (event_type = $${params.length} OR event_type LIKE $${params.length} || '/%' OR data->>'topic' LIKE '%' || $${params.length} || '%')`;
+    }
+
+    if (fromLedger !== undefined && !isNaN(fromLedger)) {
+      params.push(fromLedger);
+      sql += ` AND ledger >= $${params.length}`;
+    }
+
+    if (toLedger !== undefined && !isNaN(toLedger)) {
+      params.push(toLedger);
+      sql += ` AND ledger <= $${params.length}`;
+    }
+
+    sql += ` ORDER BY ledger DESC, id DESC LIMIT 100`;
+    const { rows } = await this.pool.query(sql, params);
     return rows;
   }
 
-  /** Admin-only: event counts by type, across all merchants. */
+  async checkHealth(): Promise<{ healthy: boolean; database: string; details?: string }> {
+    try {
+      await this.pool.query("SELECT 1");
+      return { healthy: true, database: "connected" };
+    } catch (error: any) {
+      return { healthy: false, database: "disconnected", details: error.message || String(error) };
+    }
+  }
+
   async getAdminStats(): Promise<Record<string, number>> {
     const { rows } = await this.pool.query(
       `SELECT event_type, COUNT(*)::int AS count FROM contract_events GROUP BY event_type`
     );
     return Object.fromEntries(rows.map((r: { event_type: string; count: number }) => [r.event_type, r.count]));
+  }
+
+  // ── Dead-Letter Queue Operations (Issue #617) ──────────────────────────
+
+  async storeDeadLetterEvent(eventId: string, rawData: unknown, error: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO dead_letter_events (event_id, raw_data, error, created_at, retry_count)
+       VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 0)
+       ON CONFLICT (event_id) DO UPDATE SET
+         error = EXCLUDED.error,
+         created_at = CURRENT_TIMESTAMP`,
+      [eventId, JSON.stringify(rawData), error]
+    );
+  }
+
+  async getEligibleDLQEvents(minAgeSeconds = 60, limit = 100): Promise<DLQRecord[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, event_id, raw_data, error, retry_count, created_at
+       FROM dead_letter_events
+       WHERE created_at <= NOW() - ($1 || ' seconds')::INTERVAL
+       ORDER BY created_at ASC
+       LIMIT $2`,
+      [minAgeSeconds, limit]
+    );
+    return rows;
+  }
+
+  async getAllDLQEvents(limit = 100): Promise<DLQRecord[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, event_id, raw_data, error, retry_count, created_at
+       FROM dead_letter_events
+       ORDER BY created_at ASC
+       LIMIT $1`,
+      [limit]
+    );
+    return rows;
+  }
+
+  async incrementDLQRetryCount(eventId: string, error: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE dead_letter_events
+       SET retry_count = retry_count + 1, error = $2
+       WHERE event_id = $1`,
+      [eventId, error]
+    );
+  }
+
+  async removeDeadLetterEvent(eventId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM dead_letter_events WHERE event_id = $1`, [eventId]);
   }
 
   async close(): Promise<void> {
