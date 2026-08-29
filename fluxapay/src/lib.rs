@@ -11209,10 +11209,7 @@ impl PaymentProcessor {
             &merchant_invoices,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "CREATED")),
-            (invoice_id.clone(), merchant_id.clone(), total_amount),
-        );
+        events::emit_invoice_created(&env, &invoice_id, &merchant_id, total_amount);
 
         Ok(invoice_id)
     }
@@ -11293,10 +11290,7 @@ impl PaymentProcessor {
             &merchant_invoices,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "CREATED")),
-            (invoice_id.clone(), merchant_id.clone(), total_amount),
-        );
+        events::emit_invoice_created(&env, &invoice_id, &merchant_id, total_amount);
         env.events().publish(
             (
                 Symbol::new(&env, "INVOICE"),
@@ -11324,10 +11318,7 @@ impl PaymentProcessor {
             .persistent()
             .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
 
-        env.events().publish(
-            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "PAID")),
-            (invoice_id.clone(), invoice.merchant_id.clone()),
-        );
+        events::emit_invoice_paid(&env, &invoice_id, &invoice.merchant_id);
 
         Ok(())
     }

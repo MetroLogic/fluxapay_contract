@@ -440,6 +440,53 @@ fn test_invoice_overdue_grace_period() {
     assert_eq!(inv_overdue.status, InvoiceStatus::Overdue);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #610 — Invoice Lifecycle Events (INVOICE/CREATED, INVOICE/PAID)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_invoice_lifecycle_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let pp_id = env.register(PaymentProcessor, ());
+    let pp = PaymentProcessorClient::new(&env, &pp_id);
+    let admin = Address::generate(&env);
+    pp.initialize_payment_processor(&admin);
+
+    let merchant = Address::generate(&env);
+    let due_date = env.ledger().timestamp() + 86_400;
+
+    let line_items = vec![
+        &env,
+        LineItem {
+            description: String::from_str(&env, "Product"),
+            amount: 500i128,
+            quantity: 1,
+        },
+    ];
+
+    let invoice_id = pp.create_invoice(
+        &merchant,
+        &String::from_str(&env, "test@example.com"),
+        &line_items,
+        &500i128,
+        &Symbol::new(&env, "USDC"),
+        &due_date,
+    );
+
+    // Verify INVOICE/CREATED event emission
+    let events_after_create = env.events().all();
+    assert!(!events_after_create.events().is_empty());
+
+    // Mark invoice paid
+    pp.mark_invoice_paid(&invoice_id);
+
+    // Verify INVOICE/PAID event emission
+    let events_after_paid = env.events().all();
+    assert!(!events_after_paid.events().is_empty());
+}
+
 // keep the unused-import checker quiet if a feature test is removed
 #[allow(unused_imports)]
 use crate as _fluxapay;

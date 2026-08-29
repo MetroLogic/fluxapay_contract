@@ -881,3 +881,68 @@ pub struct SessionExecutedEvent {
     pub session_key: Address,
     pub payload_hash: BytesN<32>,
 }
+
+// ============================================================================
+// Invoice Events (Issue #610)
+// ============================================================================
+
+/// Emitted when an invoice is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InvoiceCreated {
+    pub invoice_id: String,
+    pub merchant_id: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an invoice is paid.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InvoicePaid {
+    pub invoice_id: String,
+    pub merchant_id: Address,
+}
+
+/// Emitted when an invoice is overdue.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InvoiceOverdue {
+    pub invoice_id: String,
+    pub merchant_id: Address,
+}
+
+/// Issue #610: Emit an `INVOICE/CREATED` event when an invoice is created.
+#[allow(deprecated)]
+pub fn emit_invoice_created(env: &Env, invoice_id: &String, merchant_id: &Address, amount: i128) {
+    env.events().publish(
+        (
+            Symbol::new(env, "INVOICE"),
+            Symbol::new(env, "CREATED"),
+        ),
+        (invoice_id.clone(), merchant_id.clone(), amount),
+    );
+}
+
+/// Issue #610: Emit an `INVOICE/PAID` event when an invoice is paid.
+#[allow(deprecated)]
+pub fn emit_invoice_paid(env: &Env, invoice_id: &String, merchant_id: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "INVOICE"),
+            Symbol::new(env, "PAID"),
+        ),
+        (invoice_id.clone(), merchant_id.clone()),
+    );
+}
+
+/// Issue #610: Emit an `INVOICE/OVERDUE` event when an invoice is marked overdue.
+#[allow(deprecated)]
+pub fn emit_invoice_overdue(env: &Env, invoice_id: &String, merchant_id: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "INVOICE"),
+            Symbol::new(env, "OVERDUE"),
+        ),
+        (invoice_id.clone(), merchant_id.clone()),
+    );
+}

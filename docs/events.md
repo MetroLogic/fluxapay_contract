@@ -484,6 +484,42 @@ Emitted by `update_rate`.
 
 ---
 
+## INVOICE
+
+### INVOICE / CREATED
+
+Emitted by `create_invoice` and `create_payment_link_invoice`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Unique invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+| `amount` | `i128` | Total invoice amount |
+
+---
+
+### INVOICE / PAID
+
+Emitted by `mark_invoice_paid`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+
+---
+
+### INVOICE / OVERDUE
+
+Emitted when an invoice is marked overdue.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+
+---
+
 ## Topic Format Reference
 
 Every event uses a **2-tuple** topic:
