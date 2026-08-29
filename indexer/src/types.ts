@@ -99,14 +99,52 @@ export interface FXOracleEvent extends ContractEvent {
   };
 }
 
-export interface PaymentLinkEvent extends ContractEvent {
-  topic: ["PAYMENT_LINK" | "LINK", "CREATED" | "UPDATED" | "DEACTIVATED" | "PAID"];
+export interface LinkCreatedEvent extends ContractEvent {
+  topic: ["LINK", "CREATED"];
   value: {
     link_id: string;
     merchant_id: string;
-    amount: number;
   };
 }
+
+export interface LinkUsedEvent extends ContractEvent {
+  topic: ["LINK", "USED"];
+  value: {
+    link_id: string;
+    payer: string;
+    amount: number;
+    payment_id: string;
+    metadata?: Record<string, string>;
+  };
+}
+
+export interface LinkDeactivatedEvent extends ContractEvent {
+  topic: ["LINK", "DEACTIVATED"];
+  value: {
+    link_id: string;
+  };
+}
+
+export interface LinkExpiredEvent extends ContractEvent {
+  topic: ["LINK", "EXPIRED"];
+  value: {
+    link_id: string;
+  };
+}
+
+export interface LinkViewedEvent extends ContractEvent {
+  topic: ["LINK", "VIEWED"];
+  value: {
+    link_id: string;
+  };
+}
+
+export type PaymentLinkEvent =
+  | LinkCreatedEvent
+  | LinkUsedEvent
+  | LinkDeactivatedEvent
+  | LinkExpiredEvent
+  | LinkViewedEvent;
 
 export type AnyEvent =
   | PaymentEvent

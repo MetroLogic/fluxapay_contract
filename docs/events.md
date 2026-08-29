@@ -243,22 +243,47 @@ Emitted by `create_link`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `link_id` | `String` | Link identifier |
-| `merchant_id` | `Address` | Owner |
+| `merchant_id` | `Address` | Merchant that owns the link |
 
 ---
 
 ### LINK / USED
 
+Emitted by `use_link` when a payer completes a payment from a link.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `link_id` | `String` | Link identifier |
 | `payer` | `Address` | Who used the link |
-| `amount` | `i128` | Amount paid |
+| `amount` | `i128` | Resolved USDC amount paid |
 | `payment_id` | `String` | Generated payment ID |
+| `metadata` | `Option<Map<String, String>>` | Optional link metadata copied to the payment |
 
 ---
 
 ### LINK / DEACTIVATED
+
+Emitted by `deactivate_link`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `link_id` | `String` | Link identifier |
+
+---
+
+### LINK / EXPIRED
+
+Emitted by `expire_link` when an expired, still-active link is auto-deactivated.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `link_id` | `String` | Link identifier |
+
+---
+
+### LINK / VIEWED
+
+Emitted by `record_link_view`.
 
 | Field | Type | Description |
 |-------|------|-------------|
