@@ -1076,6 +1076,8 @@ pub enum DataKey {
     Invoice(String),
     MerchantInvoices(Address),
     InvoiceCounter,
+    /// Configurable invoice overdue grace period in seconds (Issue #607).
+    InvoiceGracePeriodSecs,
     /// Issue #482: Payment retry chain tracking - maps original_id to list of retry payment IDs
     PaymentRetries(String),
     /// Issue #478: FX oracle max rate deviation per currency pair in basis points
@@ -8787,15 +8789,7 @@ impl PaymentProcessor {
         Self::remove_idempotency_key(&env, &payment_id);
         Self::remove_payment_from_expiry_bucket(&env, &payment_id, payment.expires_at);
 
-        // Issue #166: Optimize event topics
-        env.events().publish(
-            (
-                Symbol::new(&env, "PAYMENT"),
-                Symbol::new(&env, "CANCELLED"),
-                payment.merchant_id.clone(),
-            ),
-            (payment_id.clone(), payment.amount),
-        );
+        events::emit_payment_cancelled(&env, &payment_id, &payment.merchant_id, &authority);
 
         Ok(())
     }
@@ -11215,10 +11209,7 @@ impl PaymentProcessor {
             &merchant_invoices,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "CREATED")),
-            (invoice_id.clone(), merchant_id.clone(), total_amount),
-        );
+        events::emit_invoice_created(&env, &invoice_id, &merchant_id, total_amount);
 
         Ok(invoice_id)
     }
@@ -11299,10 +11290,7 @@ impl PaymentProcessor {
             &merchant_invoices,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "CREATED")),
-            (invoice_id.clone(), merchant_id.clone(), total_amount),
-        );
+        events::emit_invoice_created(&env, &invoice_id, &merchant_id, total_amount);
         env.events().publish(
             (
                 Symbol::new(&env, "INVOICE"),
@@ -11330,19 +11318,48 @@ impl PaymentProcessor {
             .persistent()
             .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
 
-        env.events().publish(
-            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "PAID")),
-            (invoice_id.clone(), invoice.merchant_id.clone()),
-        );
+        events::emit_invoice_paid(&env, &invoice_id, &invoice.merchant_id);
 
         Ok(())
     }
 
-    pub fn get_invoice(env: Env, invoice_id: String) -> Result<Invoice, Error> {
+    /// Admin-configurable invoice overdue grace period in seconds (Issue #607).
+    pub fn set_invoice_grace_period(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
         env.storage()
             .persistent()
+            .set(&DataKey::InvoiceGracePeriodSecs, &secs);
+
+        Ok(())
+    }
+
+    /// Returns the configured invoice overdue grace period in seconds (default: 0).
+    pub fn get_invoice_grace_period(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InvoiceGracePeriodSecs)
+            .unwrap_or(0)
+    }
+
+    pub fn get_invoice(env: Env, invoice_id: String) -> Result<Invoice, Error> {
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
             .get(&DataKey::Invoice(invoice_id))
-            .ok_or(Error::PaymentNotFound)
+            .ok_or(Error::PaymentNotFound)?;
+
+        if invoice.status == InvoiceStatus::Created {
+            let grace_period = Self::get_invoice_grace_period(env.clone());
+            if env.ledger().timestamp() >= invoice.due_date + grace_period {
+                invoice.status = InvoiceStatus::Overdue;
+            }
+        }
+
+        Ok(invoice)
     }
 
     pub fn get_merchant_invoices(env: Env, merchant_id: Address) -> Vec<String> {

@@ -14,7 +14,7 @@ export interface ContractEvent {
 }
 
 export interface PaymentEvent extends ContractEvent {
-  topic: ["PAYMENT", "CREATED" | "CONFIRMED" | "SETTLED" | "FAILED"];
+  topic: ["PAYMENT", "CREATED" | "CONFIRMED" | "SETTLED" | "FAILED" | "CANCELLED"];
   value: {
     payment_id: string;
     merchant_id: string;
@@ -56,7 +56,7 @@ export interface DisputeBondEvent extends ContractEvent {
 }
 
 export interface MerchantEvent extends ContractEvent {
-  topic: ["MERCHANT", "REGISTERED" | "VERIFIED" | "SUSPENDED"];
+  topic: ["MERCHANT", "REGISTERED" | "VERIFIED" | "SUSPENDED" | "REINSTATED"];
   value: {
     merchant_id: string;
     status: string;
