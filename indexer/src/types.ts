@@ -64,12 +64,14 @@ export interface MerchantEvent extends ContractEvent {
 }
 
 export interface StreamEvent extends ContractEvent {
-  topic: ["STREAM", "CREATED" | "CLOSED" | "PAUSED" | "RESUMED"];
+  topic: ["STREAM", "CREATED" | "CLOSED" | "PAUSED" | "RESUMED" | "CANCELLED" | "WITHDRAWN"];
   value: {
     stream_id: string;
-    sender: string;
-    receiver: string;
-    amount: number;
+    sender?: string;
+    receiver?: string;
+    recipient?: string;
+    amount?: number;
+    remaining_deposit?: number;
   };
 }
 

@@ -532,3 +532,4 @@ env.events().publish(
 ```
 
 This ensures consistent indexing and filtering by off-chain listeners via the Stellar Horizon API `?topic[]=...` filter parameter.
+

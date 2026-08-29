@@ -17,6 +17,7 @@
 //! ```
 
 use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
+use crate::merchant_registry::KycTier;
 
 // ============================================================================
 // Payment Events

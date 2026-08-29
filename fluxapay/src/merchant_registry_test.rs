@@ -1977,3 +1977,34 @@ fn test_whitelisted_payer_accepted() {
     registry_client.remove_from_customer_whitelist(&merchant, &payer);
     assert!(!registry_client.is_customer_whitelisted(&merchant, &payer));
 }
+
+#[test]
+fn test_auto_upgrade_kyc_tier_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+    let processor_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_payment_processor_address(&admin, &processor_id);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    // Auto upgrade from Unverified to Basic
+    client.auto_upgrade_kyc_tier(&processor_id, &merchant_id, &KycTier::Basic);
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert_eq!(merchant.kyc_tier, KycTier::Basic);
+}

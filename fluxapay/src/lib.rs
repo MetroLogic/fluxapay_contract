@@ -1,70 +1,17 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
-use crate::merchant_registry::KycTier;
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, map, token, vec, Address, BytesN, Env,
-    Map, MuxedAddress, String, Symbol, Vec,
-};
 
-pub const PAYMENT_TOLERANCE: i128 = 1;
-const SHORT_LIVE_TTL: u32 = 120_960; // ~1 week at 5s/ledger
-const LONG_LIVE_TTL: u32 = 18_921_600; // ~3 years at 5s/ledger
-const TTL_BUMP_THRESHOLD_DIVISOR: u32 = 5;
-const CREATE_PAYMENT_WINDOW_SECS: u64 = 60;
-const CREATE_PAYMENT_MAX_PER_WINDOW: u32 = 30;
-pub const DEFAULT_PAYMENT_DURATION_SECS: u64 = 3_600;
-const REFUND_FEE_BPS: i128 = 100;
-/// Cooldown period after payment confirmation before refunds can be requested (5 minutes in seconds).
-const REFUND_COOLDOWN_SECS: u64 = 300;
-/// Default refund request expiry period (30 days in seconds).
-const REFUND_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
-/// Issue #638: TTL (in ledgers, ~5s each) for a stored refund idempotency key —
-/// 30 days, matching the payment `client_token` retention window.
-const REFUND_IDEMPOTENCY_TTL_LEDGERS: u32 = (30 * 24 * 60 * 60) / 5;
-/// Issue #480: Minimum time between daily settlements (24 hours in seconds).
-const SETTLEMENT_DAILY_INTERVAL_SECS: u64 = 86_400;
-/// Issue #480: Minimum time between weekly settlements (7 days in seconds).
-const SETTLEMENT_WEEKLY_INTERVAL_SECS: u64 = 604_800;
-/// Issue #480: Minimum pending balance required to trigger a settlement.
-const SETTLEMENT_MIN_AMOUNT: i128 = 1_000_000; // 0.1 USDC (7 decimals)
-/// Fixed dispute bond in the contract's stablecoin denomination.
-const DISPUTE_BOND_AMOUNT: i128 = 100_000;
-/// Default threshold separating small and large disputes: 100 USDC (7 decimals).
-pub const DEFAULT_DISPUTE_DEADLINE_THRESHOLD_AMOUNT: i128 = 1_000_000_000;
-pub const SMALL_DISPUTE_DEADLINE_SECS: u64 = 3 * 24 * 60 * 60;
-pub const LARGE_DISPUTE_DEADLINE_SECS: u64 = 7 * 24 * 60 * 60;
+pub mod constants;
+pub mod data_keys;
+pub mod payment_processor;
+pub mod refund_manager;
+pub mod types;
 
-// Issue #167: Tiered refund fees based on merchant KYC tier
-const REFUND_FEE_BPS_BASIC: i128 = 100; // 1.0% for Basic tier
-const REFUND_FEE_BPS_FULL: i128 = 80; // 0.8% for Full tier
-const REFUND_FEE_BPS_BUSINESS: i128 = 50; // 0.5% for Business tier
-
-/// Default window (Issue #170) during which a pending refund may be processed,
-/// measured from `Refund::created_at`. Configurable via `set_refund_expiry`.
-pub const DEFAULT_REFUND_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
-// Issue #63: Monthly processing volume caps per KYC tier (in USDC stroops, 7 decimals)
-// Unverified: $500, Basic: $10,000, Full: $100,000, Business: unlimited (i128::MAX)
-const TIER_CAP_UNVERIFIED: i128 = 5_000_000_000; // $500
-const TIER_CAP_BASIC: i128 = 100_000_000_000; // $10,000
-const TIER_CAP_FULL: i128 = 1_000_000_000_000; // $100,000
-const TIER_CAP_BUSINESS: i128 = i128::MAX; // unlimited
-
-// Issue #207: Cumulative volume thresholds for automatic KYC tier upgrades (in USDC stroops)
-const TIER_UPGRADE_THRESHOLD_BASIC: i128 = TIER_CAP_UNVERIFIED; // $500 cumulative → Basic
-const TIER_UPGRADE_THRESHOLD_FULL: i128 = TIER_CAP_BASIC; // $10,000 cumulative → Full
-const TIER_UPGRADE_THRESHOLD_BUSINESS: i128 = TIER_CAP_FULL; // $100,000 cumulative → Business
-
-/// Maximum number of payment retries before a subscription is cancelled.
-pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
-/// Spacing between retry attempts in seconds (2 days).
-pub const SUBSCRIPTION_RETRY_INTERVAL_SECS: u64 = 2 * 24 * 60 * 60;
-
-// Issue #625: Maximum lengths for user-supplied string fields to prevent ledger bloat.
-const MAX_REASON_LEN: usize = 256;
-const MAX_EVIDENCE_LEN: usize = 512;
-const MAX_NOTES_LEN: usize = 512;
-pub(crate) const ZERO_CONTRACT_STRKEY: &str =
-    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+pub use constants::*;
+pub use data_keys::*;
+pub use payment_processor::*;
+pub use refund_manager::*;
+pub use types::*;
 
 mod access_control;
 pub mod account_abstraction;
@@ -73,14 +20,8 @@ pub mod events;
 pub mod fx_oracle;
 pub mod merchant_auth;
 mod payment_state_machine;
-use access_control::{
-    role_admin, role_arbitrator, role_merchant, role_oracle, role_settlement_operator,
-    AccessControl,
-};
-// Re-export for tests
-#[allow(unused_imports)]
+
 pub use access_control::AccessControlDataKey;
-#[allow(unused_imports)]
 pub use access_control::{AdminAction, AdminProposal};
 pub use dex_router::{DexRouter, DexRouterClient};
 pub use fx_oracle::{FXOracle, FXOracleClient, FXOracleError};
@@ -2662,28 +2603,16 @@ impl RefundManager {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
-        // Create the refund record (validates amount, checks totals)
-        let refund_id = Self::create_refund_internal(
-            &env,
-            payment_id,
-            refund_amount,
-            reason,
-            payment.payer_address.clone().ok_or(Error::Unauthorized)?,
-            None,
-            None,
-        )?;
+pub mod utils;
+pub use utils::{format_id, is_valid_cid, validate_id, validate_ipfs_multihash};
 
-        // Execute transfer immediately — no operator approval needed
-        let usdc_token_address: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::UsdcToken)
-            .ok_or(Error::Unauthorized)?;
-        let token_client = token::TokenClient::new(&env, &usdc_token_address);
+pub mod gas_estimator;
+pub use gas_estimator::{CostEstimate, GasEstimator, GasEstimatorClient, Operation};
 
-        let default_fee_bps = Self::get_refund_fee_bps_internal(&env);
-        let fee = refund_amount * default_fee_bps / 10_000;
-        let net_amount = refund_amount - fee;
+pub mod merchant_registry;
+pub use merchant_registry::{
+    FeeConfig, KycTier, MaybeFeeConfig, Merchant, MerchantError, MerchantRegistry, MerchantRegistryClient,
+};
 
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
         refund.status = RefundStatus::Completed;
@@ -11502,51 +11431,30 @@ pub use payment_link::{
     CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
     PaymentLinkManagerClient,
 };
-#[cfg(test)]
-mod feature_tests;
-#[cfg(test)]
-mod memo_test;
-#[cfg(test)]
-mod partial_overpaid_test;
-#[cfg(test)]
-mod pause_test;
-#[cfg(test)]
-mod payment_link_test;
-#[cfg(test)]
-mod payment_metadata_test;
-#[cfg(test)]
-mod test;
 
-// Payment streaming module (Issue #127)
-pub mod stream;
-pub use stream::{PaymentStream, PaymentStreaming, StreamError, StreamStatus};
-#[cfg(test)]
-mod stream_test;
-#[cfg(test)]
-mod subscription_test;
-
-pub mod utils;
-pub use utils::format_id;
-pub use utils::is_valid_cid;
-pub use utils::validate_id;
-pub use utils::validate_ipfs_multihash;
-
-pub mod gas_estimator;
-pub use gas_estimator::{CostEstimate, GasEstimator, GasEstimatorClient, Operation};
-
-#[cfg(test)]
-mod batch_payment_test;
-#[cfg(test)]
-mod escalate_disputes_test;
-#[cfg(test)]
-mod merchant_ranking_test;
-#[cfg(test)]
-mod mock_dex_router;
-#[cfg(test)]
-mod muxed_payer_test;
-#[cfg(test)]
-mod router_allowlist_test;
-#[cfg(test)]
-mod settlement_test;
-#[cfg(test)]
-mod swap_test;
+#[cfg(test)] mod test;
+#[cfg(test)] mod stream_test;
+#[cfg(test)] mod subscription_test;
+#[cfg(test)] mod arbitrage_test;
+#[cfg(test)] mod auth_test;
+#[cfg(test)] mod batch_payment_test;
+#[cfg(test)] mod dex_router_test;
+#[cfg(test)] mod dispute_test;
+#[cfg(test)] mod escalate_disputes_test;
+#[cfg(test)] mod feature_tests;
+#[cfg(test)] mod fx_oracle_test;
+#[cfg(test)] mod integration_test;
+#[cfg(test)] mod memo_test;
+#[cfg(test)] mod merchant_ranking_test;
+#[cfg(test)] mod merchant_registry_test;
+#[cfg(test)] mod mock_dex_router;
+#[cfg(test)] mod muxed_payer_test;
+#[cfg(test)] mod oracle_sanitization_test;
+#[cfg(test)] mod partial_overpaid_test;
+#[cfg(test)] mod pause_test;
+#[cfg(test)] mod payment_link_test;
+#[cfg(test)] mod payment_metadata_test;
+#[cfg(test)] mod proptests;
+#[cfg(test)] mod router_allowlist_test;
+#[cfg(test)] mod settlement_test;
+#[cfg(test)] mod swap_test;
