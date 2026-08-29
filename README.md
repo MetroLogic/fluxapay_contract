@@ -116,6 +116,33 @@ Fluxapay solves this by enabling _USDC-in → fiat-out_ payments with a merchant
 •⁠ ⁠Customer pays using Stellar USDC
 •⁠ ⁠Merchant is notified via dashboard + webhook/email (optional)
 
+### 3) Recurring billing with subscriptions
+
+•⁠ ⁠Merchant creates a subscription plan with a fixed amount and billing interval
+•⁠ ⁠Customer subscribes and is charged automatically on each cycle
+•⁠ ⁠Daemon retries failed charges through the grace-period workflow
+•⁠ ⁠Merchant monitors subscription lifecycle events via webhooks or dashboard alerts
+
+See the full guide: [docs/subscription-guide.md](docs/subscription-guide.md)
+
+### 4) Dispute handling and resolution
+
+•⁠ ⁠Customer raises a dispute against a confirmed payment with evidence and a bond
+•⁠ ⁠Operator reviews the case and resolves or rejects it
+•⁠ ⁠Time-based escalation and arbitrator voting protect the process from stalls
+•⁠ ⁠Bond return / forfeiture and merchant score impacts are enforced on-chain
+
+See the full guide: [docs/dispute-resolution-guide.md](docs/dispute-resolution-guide.md)
+
+### 5) Streaming payroll and milestone payouts
+
+•⁠ ⁠Sender funds a deposit and the contract releases tokens over time at a fixed rate
+•⁠ ⁠Receiver can withdraw accrued funds, pause or resume flow, or top up the deposit
+•⁠ ⁠Milestone approvals and destination-based withdrawals support governance-heavy payouts
+•⁠ ⁠Rate changes refund surplus deposit when the stream is slowed down
+
+See the full guide: [docs/payment-streams-guide.md](docs/payment-streams-guide.md)
+
 ## Tech Stack (Planned)
 
 •⁠ ⁠*Blockchain:* Stellar  
