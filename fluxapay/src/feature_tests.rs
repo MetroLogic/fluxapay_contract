@@ -375,6 +375,71 @@ fn create_payment_link_invoice_rejects_bad_link_atomically() {
     assert_eq!(pp.get_merchant_invoices(&merchant).len(), 0);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #607 — Configurable Invoice Grace Period
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_invoice_overdue_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let pp_id = env.register(PaymentProcessor, ());
+    let pp = PaymentProcessorClient::new(&env, &pp_id);
+    let admin = Address::generate(&env);
+    pp.initialize_payment_processor(&admin);
+
+    // Verify default grace period is 0
+    assert_eq!(pp.get_invoice_grace_period(), 0);
+
+    let merchant = Address::generate(&env);
+    let now = 1_000_000u64;
+    env.ledger().set_timestamp(now);
+    let due_date = now + 1_000;
+
+    let line_items = vec![
+        &env,
+        LineItem {
+            description: String::from_str(&env, "Item 1"),
+            amount: 100i128,
+            quantity: 1,
+        },
+    ];
+
+    let invoice_id = pp.create_invoice(
+        &merchant,
+        &String::from_str(&env, "customer@example.com"),
+        &line_items,
+        &100i128,
+        &Symbol::new(&env, "USDC"),
+        &due_date,
+    );
+
+    // Before due date -> Created status
+    env.ledger().set_timestamp(due_date - 1);
+    let inv = pp.get_invoice(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Created);
+
+    // At due date with default grace period (0) -> Overdue status
+    env.ledger().set_timestamp(due_date);
+    let inv_due = pp.get_invoice(&invoice_id);
+    assert_eq!(inv_due.status, InvoiceStatus::Overdue);
+
+    // Set grace period of 500 seconds by admin
+    pp.set_invoice_grace_period(&admin, &500u64);
+    assert_eq!(pp.get_invoice_grace_period(), 500);
+
+    // At due_date + 499 with grace period 500 -> Created status
+    env.ledger().set_timestamp(due_date + 499);
+    let inv_grace = pp.get_invoice(&invoice_id);
+    assert_eq!(inv_grace.status, InvoiceStatus::Created);
+
+    // At exactly due_date + 500 -> Overdue status
+    env.ledger().set_timestamp(due_date + 500);
+    let inv_overdue = pp.get_invoice(&invoice_id);
+    assert_eq!(inv_overdue.status, InvoiceStatus::Overdue);
+}
+
 // keep the unused-import checker quiet if a feature test is removed
 #[allow(unused_imports)]
 use crate as _fluxapay;

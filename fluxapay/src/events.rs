@@ -124,6 +124,24 @@ pub struct KycTierUpgraded {
     pub new_tier: String,
 }
 
+/// Issue #608: Emit a `PAYMENT/CANCELLED` event when a payment is cancelled.
+#[allow(deprecated)]
+pub fn emit_payment_cancelled(
+    env: &Env,
+    payment_id: &String,
+    merchant_id: &Address,
+    authority: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "PAYMENT"),
+            Symbol::new(env, "CANCELLED"),
+            merchant_id.clone(),
+        ),
+        (payment_id.clone(), authority.clone()),
+    );
+}
+
 // ============================================================================
 // Refund Events
 // ============================================================================
@@ -552,6 +570,30 @@ pub struct MerchantUpdated {
 pub struct MerchantPartialPaymentUpdated {
     pub merchant_id: Address,
     pub allowed: bool,
+}
+
+/// Issue #609: Emit a `MERCHANT/SUSPENDED` event when a merchant is suspended.
+#[allow(deprecated)]
+pub fn emit_merchant_suspended(env: &Env, merchant_id: &Address, reason: &String) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERCHANT"),
+            Symbol::new(env, "SUSPENDED"),
+        ),
+        (merchant_id.clone(), reason.clone()),
+    );
+}
+
+/// Issue #609: Emit a `MERCHANT/REINSTATED` event when a merchant is reinstated.
+#[allow(deprecated)]
+pub fn emit_merchant_reinstated(env: &Env, merchant_id: &Address, reinstated_by: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERCHANT"),
+            Symbol::new(env, "REINSTATED"),
+        ),
+        (merchant_id.clone(), reinstated_by.clone()),
+    );
 }
 
 // ============================================================================

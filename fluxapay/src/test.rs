@@ -852,6 +852,9 @@ fn test_cancel_pending_success() {
 
     let payment = client.get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Failed);
+
+    let events = env.events().all();
+    assert!(!events.events().is_empty());
 }
 
 #[test]

@@ -49,6 +49,18 @@ Emitted by `settle_payment` when funds are released to the merchant.
 
 ---
 
+### PAYMENT / CANCELLED
+
+Emitted by `cancel_payment`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `payment_id` | `String` | Payment identifier |
+| `merchant_id` | `Address` | Merchant receiving the payment |
+| `cancelled_by` | `Address` | Address that authorized the cancellation |
+
+---
+
 ### PAYMENT / EXPIRED
 
 Emitted by `expire_payment`.
@@ -209,6 +221,7 @@ Emitted by `register_merchant`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `merchant_id` | `Address` | Merchant address |
+| `reason` | `String` | Suspension reason |
 
 ---
 
@@ -217,6 +230,7 @@ Emitted by `register_merchant`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `merchant_id` | `Address` | Merchant address |
+| `reinstated_by` | `Address` | Admin address that reinstated the merchant |
 
 ---
 

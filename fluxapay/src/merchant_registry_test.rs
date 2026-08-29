@@ -468,6 +468,7 @@ fn test_suspend_merchant() {
     assert!(!merchant.active);
     assert_eq!(merchant.suspension_reason, Some(reason));
     assert!(merchant.suspended_at.is_some());
+    assert!(!env.events().all().events().is_empty());
 }
 
 #[test]
@@ -505,6 +506,7 @@ fn test_reinstate_merchant() {
     assert!(reinstated.active);
     assert_eq!(reinstated.suspension_reason, None);
     assert_eq!(reinstated.suspended_at, None);
+    assert!(!env.events().all().events().is_empty());
 }
 
 #[test]

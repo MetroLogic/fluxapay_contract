@@ -1015,13 +1015,7 @@ impl MerchantRegistry {
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
-        env.events().publish(
-            (
-                Symbol::new(&env, "MERCHANT"),
-                Symbol::new(&env, "SUSPENDED"),
-            ),
-            merchant_id,
-        );
+        crate::events::emit_merchant_suspended(&env, &merchant_id, &reason);
 
         Ok(())
     }
@@ -1183,13 +1177,7 @@ impl MerchantRegistry {
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
-        env.events().publish(
-            (
-                Symbol::new(&env, "MERCHANT"),
-                Symbol::new(&env, "REINSTATED"),
-            ),
-            merchant_id,
-        );
+        crate::events::emit_merchant_reinstated(&env, &merchant_id, &admin);
 
         Ok(())
     }
