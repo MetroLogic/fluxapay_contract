@@ -277,6 +277,17 @@ pub struct Dispute {
     pub payout_splits: Vec<SettlementSplit>,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeSummary {
+    pub open: u32,
+    pub under_review: u32,
+    pub resolved: u32,
+    pub rejected: u32,
+    pub escalated: u32,
+    pub older_than_7_days: u32,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -4296,6 +4307,46 @@ pub use merchant_registry::{
             }
         }
         Ok(disputes)
+    }
+
+    pub fn get_dispute_summary(env: Env) -> DisputeSummary {
+        let total_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeCounter)
+            .unwrap_or(0);
+
+        let mut summary = DisputeSummary {
+            open: 0,
+            under_review: 0,
+            resolved: 0,
+            rejected: 0,
+            escalated: 0,
+            older_than_7_days: 0,
+        };
+
+        let current_timestamp = env.ledger().timestamp();
+        let seven_days_secs: u64 = 7 * 86400;
+
+        for i in 1..=total_count {
+            let dispute_id = utils::format_id(&env, "dispute_", i);
+            if let Ok(dispute) = Self::get_dispute_internal(&env, &dispute_id) {
+                match dispute.status {
+                    DisputeStatus::Open => summary.open += 1,
+                    DisputeStatus::UnderReview => summary.under_review += 1,
+                    DisputeStatus::Resolved => summary.resolved += 1,
+                    DisputeStatus::Rejected => summary.rejected += 1,
+                }
+                if dispute.escalated {
+                    summary.escalated += 1;
+                }
+                if current_timestamp >= dispute.created_at.saturating_add(seven_days_secs) {
+                    summary.older_than_7_days += 1;
+                }
+            }
+        }
+
+        summary
     }
 
     /// Issue #178: Submit an arbitrator vote on a dispute resolution.
@@ -8445,7 +8496,6 @@ impl PaymentProcessor {
         offset: u32,
         limit: u32,
         status_filter: Option<PaymentStatus>,
-        token_address: Option<Address>,
     ) -> Vec<String> {
         let all = Self::get_merchant_payments_internal(&env, &merchant_id);
         if limit == 0 {
@@ -8464,12 +8514,7 @@ impl PaymentProcessor {
                     None => true,
                 };
 
-                let token_match = match &token_address {
-                    Some(token) => payment.token_address.as_ref() == Some(token),
-                    None => true,
-                };
-
-                if status_match && token_match {
+                if status_match {
                     filtered.push_back(id);
                 }
             }
@@ -9461,6 +9506,37 @@ impl PaymentProcessor {
                     env.storage()
                         .persistent()
                         .remove(&DataKey::Payment(payment_id.clone()));
+                    pruned_count = pruned_count.saturating_add(1);
+                }
+            }
+        }
+
+        Ok(pruned_count)
+    }
+
+    pub fn prune_expired_invoices(
+        env: Env,
+        operator: Address,
+        invoice_ids: Vec<String>,
+    ) -> Result<u32, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut pruned_count: u32 = 0;
+        let current_timestamp = env.ledger().timestamp();
+        let grace_period = Self::get_invoice_grace_period(env.clone());
+
+        for invoice_id in invoice_ids.iter() {
+            if let Ok(invoice) = Self::get_invoice(env.clone(), invoice_id.clone()) {
+                if invoice.status == InvoiceStatus::Overdue
+                    && current_timestamp > invoice.due_date.saturating_add(grace_period)
+                {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::Invoice(invoice_id.clone()));
                     pruned_count = pruned_count.saturating_add(1);
                 }
             }

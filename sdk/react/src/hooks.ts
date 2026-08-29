@@ -42,6 +42,8 @@ export interface UseMerchantPaymentsOptions {
   offset?: number;
   /** Max number of payments to return. Defaults to 20. */
   limit?: number;
+  /** Optional payment status filter. */
+  statusFilter?: PaymentStatus;
 }
 
 /**
@@ -55,6 +57,7 @@ export function useMerchantPayments(
   const client = useFluxapayClient();
   const offset = options?.offset ?? 0;
   const limit = options?.limit ?? 20;
+  const statusFilter = options?.statusFilter;
 
   return useAsync(
     async () => {
@@ -62,12 +65,13 @@ export function useMerchantPayments(
         merchant_id: merchantId as string,
         offset,
         limit,
+        status_filter: statusFilter ?? null,
       });
       const ids = (idsTx as unknown as { result: string[] }).result;
       const payments = await Promise.all(ids.map((id) => client.getPayment(id)));
       return payments as unknown as PaymentCharge[];
     },
-    [merchantId, offset, limit],
+    [merchantId, offset, limit, statusFilter],
     !!merchantId,
   );
 }

@@ -542,7 +542,13 @@ export interface Client {
       merchant_id,
       offset,
       limit,
-    }: { merchant_id: string; offset: u32; limit: u32 },
+      status_filter,
+    }: {
+      merchant_id: string;
+      offset: u32;
+      limit: u32;
+      status_filter?: PaymentStatus | null;
+    },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Array<string>>>;
 
