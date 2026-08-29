@@ -1,6 +1,6 @@
 /**
  * FluxaPay Indexer Event Types
- * Defines the structure of events emitted by the FluxaPay contract
+ * Defines the structure of events emitted by FluxaPay contracts
  */
 
 export interface ContractEvent {
@@ -33,7 +33,7 @@ export interface RefundEvent extends ContractEvent {
 }
 
 export interface DisputeEvent extends ContractEvent {
-  topic: ["DISPUTE", "CREATED" | "RESOLVED" | "ESCALATED"];
+  topic: ["DISPUTE", "CREATED" | "RESOLVED" | "REJECTED" | "ESCALATED"];
   value: {
     dispute_id: string;
     payment_id: string;
@@ -91,6 +91,23 @@ export interface InvoiceEvent extends ContractEvent {
   };
 }
 
+export interface FXOracleEvent extends ContractEvent {
+  topic: ["FX_ORACLE" | "ORACLE", "UPDATED" | "SET" | "REMOVED"];
+  value: {
+    asset: string;
+    rate: number;
+  };
+}
+
+export interface PaymentLinkEvent extends ContractEvent {
+  topic: ["PAYMENT_LINK" | "LINK", "CREATED" | "UPDATED" | "DEACTIVATED" | "PAID"];
+  value: {
+    link_id: string;
+    merchant_id: string;
+    amount: number;
+  };
+}
+
 export type AnyEvent =
   | PaymentEvent
   | RefundEvent
@@ -99,4 +116,6 @@ export type AnyEvent =
   | MerchantEvent
   | StreamEvent
   | SubscriptionEvent
-  | InvoiceEvent;
+  | InvoiceEvent
+  | FXOracleEvent
+  | PaymentLinkEvent;

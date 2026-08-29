@@ -9,6 +9,7 @@
     "start:api": "node dist/server.js",
     "dev:api": "ts-node src/server.ts",
     "build": "tsc",
+    "test": "ts-node test/indexer.test.ts",
     "migrate": "node dist/migrations/run.js",
     "watch": "tsc --watch"
   },

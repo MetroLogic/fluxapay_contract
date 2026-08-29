@@ -1,30 +1,39 @@
-# Mercury Indexer Configurations
+# FluxaPay Soroban Event Indexer
 
-This directory contains the configurations for the Mercury Indexer to sync FluxaPay smart contract events and data to the database.
+This directory contains the FluxaPay Soroban Event Indexer service that syncs events from all FluxaPay smart contracts into PostgreSQL and provides a read-only REST API.
 
-## Configs
-- `sync.yml`: Defines the DB sync configuration profiles (e.g., testnet_quick_sync, mainnet_full_sync, sandbox_local) and supports quick mappings for events to DB tables.
+## Features
 
-## Quick Mappings
-Quick mappings allow mapping contract events to database tables automatically.
-Enable `enable_quick_mappings` in the settings to use this feature.
+- **Multi-Contract Event Indexing (#618)**: Subscribes simultaneously to events across all 5 FluxaPay contracts (`PaymentProcessor`, `RefundManager`, `MerchantRegistry`, `FXOracle`, `PaymentLinkManager`).
+- **REST API Server (#616)**: HTTP API for querying payments, merchant payments (with pagination & status filter), disputes, refunds, events, and health status. Protected with API key authentication (`x-api-key` header or `Authorization: Bearer <API_KEY>`).
+- **Dead-Letter Queue & Automatic Retry (#617)**: Persists failed events to `dead_letter_events` with error tracking and retry counters. Includes an automatic retry worker and an authenticated `POST /admin/replay-dlq` manual replay endpoint.
+- **Dispute Lifecycle Persistence (#615)**: Persists dispute status transitions (`RESOLVED`, `REJECTED`, `ESCALATED`) with `resolved_at` timestamps, idempotency, and safe unknown dispute handling.
 
-## REST API Authentication (Issue #672)
+## Quick Start
 
-The indexer's REST API (`src/server.ts`, run via `npm run dev:api` /
-`npm run start:api`) authenticates requests with SEP-10 (Stellar Web
-Authentication) JWTs instead of a static API key — see
-[`README_SERVICE.md`](./README_SERVICE.md#authentication) for the full
-endpoint list and configuration.
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
 
-Quick summary:
-- Clients authenticate against `STELLAR_WEB_AUTH_ENDPOINT` (SEP-10 challenge
-  flow implemented in `sdk/src/sep10.ts`) to obtain a JWT, then send
-  `Authorization: Bearer <jwt>` on every request.
-- `GET /merchants/:merchantId/*` endpoints only return data for the
-  merchant the JWT's `sub` claim matches (or an admin account).
-- `GET /admin/*` endpoints require the caller's account to be listed in
-  `INDEXER_ADMIN_ACCOUNTS`.
-- Configure via `STELLAR_WEB_AUTH_ENDPOINT`, `STELLAR_HOME_DOMAIN`,
-  `STELLAR_SERVER_PUBLIC_KEY`, and `INDEXER_ADMIN_ACCOUNTS` (see
-  `.env.example`).
+2. Configure environment:
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Run migrations:
+   ```bash
+   npm run migrate
+   ```
+
+4. Start indexer & REST API:
+   ```bash
+   npm start
+   ```
+
+5. Run test suite:
+   ```bash
+   npm test
+   ```
+
+See [`README_SERVICE.md`](./README_SERVICE.md) for full configuration, API endpoint documentation, DLQ operations, and multi-contract routing details.
