@@ -227,8 +227,26 @@ PaymentLinkManager
 
 - **DEX Router**: Atomic token swaps for `swap_and_pay()` and swap-based refunds
 - **FX Oracle**: Optional multi-currency rate validation to prevent price slippage abuse
-- **Merchant Registry**: Verification, KYC tier tracking, merchant lookup
+- **Merchant Registry**: Verification, KYC tier tracking, merchant lookup (see [MerchantRegistry API Reference](merchant-registry-api-reference.md))
 - **Payment Link Manager**: Independent links with direct transfers and metadata validation
+
+---
+
+## MerchantRegistry API Reference
+
+For detailed entry point documentation, parameters, return types, authorization requirements, and emitted events for merchant management, see the dedicated reference document:
+
+👉 **[MerchantRegistry API Reference](merchant-registry-api-reference.md)**
+
+Key operations documented include:
+- `register_merchant` — Registration & initial tier assignment
+- `update_merchant` — Payout address and profile updates
+- `verify_merchant` / `verify_merchant_with_signature` — Verification flows
+- `set_kyc_tier` / `auto_upgrade_kyc_tier` — Tier management & automated upgrades
+- `set_fee_config` / `calculate_platform_fee` — Platform fee configurations
+- `add_to_whitelist` / `is_address_whitelisted` — Payer whitelist controls
+- `suspend_merchant` / `reinstate_merchant` — Lifecycle & suspension management
+- `get_all_merchants` — Paginated merchant catalog queries
 
 ---
 
