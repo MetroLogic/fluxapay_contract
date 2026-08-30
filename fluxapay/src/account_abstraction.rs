@@ -163,6 +163,31 @@ mod tests {
     }
 
     #[test]
+    fn test_register_session_key_expired_ledger_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let account = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        // expires_at in the past — registration succeeds (storage is permissive)
+        // but execution immediately fails with SessionExpired.
+        let expires_at = env.ledger().timestamp().saturating_sub(1);
+
+        let res = register_session_key(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+            expires_at,
+        );
+        assert!(res.is_ok(), "registration itself should succeed");
+
+        // Execute should immediately reject because the session is expired.
+        let payload = Bytes::from_slice(&env, b"test_payload");
+        let res = execute_with_session(env, account, session_key, payload);
+        assert_eq!(res, Err(AccountAbstractionError::SessionExpired));
+    }
+
+    #[test]
     fn test_execute_with_expired_session() {
         let env = Env::default();
         env.mock_all_auths();
@@ -220,6 +245,88 @@ mod tests {
 
         let payload = Bytes::from_slice(&env, b"test_payload");
         let res = execute_with_session(env, account, session_key, payload);
+        assert_eq!(res, Err(AccountAbstractionError::SessionNotFound));
+    }
+
+    #[test]
+    fn test_execute_with_session_revoked_key_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let account = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let expires_at = env.ledger().timestamp() + 3600;
+
+        let _ = register_session_key(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+            expires_at,
+        );
+
+        // Revoke, then attempt to execute — should get SessionNotFound.
+        let _ = revoke_session_key(env.clone(), account.clone(), session_key.clone());
+
+        let payload = Bytes::from_slice(&env, b"test_payload");
+        let res = execute_with_session(env, account, session_key, payload);
+        assert_eq!(res, Err(AccountAbstractionError::SessionNotFound));
+    }
+
+    #[test]
+    fn test_execute_with_empty_payload_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let account = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let expires_at = env.ledger().timestamp() + 3600;
+
+        let _ = register_session_key(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+            expires_at,
+        );
+
+        // Empty payload must be rejected.
+        let empty_payload = Bytes::new(&env);
+        let res = execute_with_session(env, account, session_key, empty_payload);
+        assert_eq!(res, Err(AccountAbstractionError::InvalidPayload));
+    }
+
+    #[test]
+    fn test_revoke_nonexistent_session_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let account = Address::generate(&env);
+        let session_key = Address::generate(&env);
+
+        // Revoking a key that was never registered must fail.
+        let res = revoke_session_key(env, account, session_key);
+        assert_eq!(res, Err(AccountAbstractionError::SessionNotFound));
+    }
+
+    #[test]
+    fn test_execute_with_session_wrong_account_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let account = Address::generate(&env);
+        let wrong_account = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let expires_at = env.ledger().timestamp() + 3600;
+
+        // Register key for `account`, then try to execute on behalf of `wrong_account`.
+        let _ = register_session_key(
+            env.clone(),
+            account,
+            session_key.clone(),
+            expires_at,
+        );
+
+        let payload = Bytes::from_slice(&env, b"test_payload");
+        let res = execute_with_session(env, wrong_account, session_key, payload);
         assert_eq!(res, Err(AccountAbstractionError::SessionNotFound));
     }
 }

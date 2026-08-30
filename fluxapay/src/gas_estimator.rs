@@ -414,4 +414,56 @@ mod tests {
             soroban_sdk::Symbol::new(&env, "swap_and_pay")
         );
     }
+
+    // ── Issue #588: expanded gas estimator test coverage ──────────────────────
+
+    #[test]
+    fn verify_payment_estimate_instructions_nonzero() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let est = c.estimate(&Operation::VerifyPayment);
+        assert!(
+            est.instructions > 0,
+            "verify_payment instructions must be > 0, got {}",
+            est.instructions
+        );
+        assert!(est.ledger_reads > 0, "verify_payment ledger_reads must be > 0");
+        assert!(est.ledger_writes > 0, "verify_payment ledger_writes must be > 0");
+    }
+
+    #[test]
+    fn all_operations_have_positive_resource_fee() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let all = c.estimate_all();
+        for est in all.iter() {
+            assert!(
+                est.resource_fee_stroops > 0,
+                "Operation {:?} has non-positive resource_fee_stroops: {}",
+                est.operation,
+                est.resource_fee_stroops
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_fields_are_consistent_for_all_operations() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let all = c.estimate_all();
+        for est in all.iter() {
+            let expected_fee = est.instructions * FEE_PER_10K_INSTRUCTIONS
+                + est.ledger_reads as i64 * FEE_PER_LEDGER_READ
+                + est.ledger_writes as i64 * FEE_PER_LEDGER_WRITE
+                + est.events as i64 * FEE_PER_EVENT;
+            assert_eq!(
+                est.resource_fee_stroops, expected_fee,
+                "Operation {:?}: resource_fee_stroops ({}) != computed sum ({})",
+                est.operation, est.resource_fee_stroops, expected_fee
+            );
+        }
+    }
 }
