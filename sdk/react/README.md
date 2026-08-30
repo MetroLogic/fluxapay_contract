@@ -36,7 +36,20 @@ export default function App({ children }: { children: React.ReactNode }) {
 Then use the hooks anywhere below the provider:
 
 ```tsx
-import { usePayment, useMerchant, useMerchantPayments, useCreatePayment, useRefund } from "@fluxapay/react";
+import {
+  usePayment,
+  useMerchant,
+  useMerchantPayments,
+  useCreatePayment,
+  useRefund,
+  useDispute,
+  usePaymentDisputes,
+  useMerchantAnalytics,
+  useCreateDispute,
+  type Dispute,
+  type DisputeStatus,
+  type MerchantAnalytics,
+} from "@fluxapay/react";
 
 function PaymentStatus({ paymentId }: { paymentId: string }) {
   const { data: payment, loading, error } = usePayment(paymentId);
@@ -66,6 +79,67 @@ function RecentPayments({ merchantId }: { merchantId: string }) {
 function RefundDetails({ refundId }: { refundId: string }) {
   const { data: refund, loading } = useRefund(refundId);
   return loading ? <p>Loading...</p> : <p>{refund?.reason}</p>;
+}
+
+function DisputeDetails({ disputeId }: { disputeId: string }) {
+  const { data: dispute, loading, error } = useDispute(disputeId);
+  if (loading) return <p>Loading dispute...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+  return <p>Status: {dispute?.status}</p>;
+}
+
+function PaymentDisputesList({ paymentId }: { paymentId: string }) {
+  const { data: disputes, loading } = usePaymentDisputes(paymentId);
+  if (loading) return <p>Loading disputes...</p>;
+  return (
+    <ul>
+      {disputes?.map((dispute) => (
+        <li key={dispute.dispute_id}>{dispute.dispute_id}: {dispute.reason}</li>
+      ))}
+    </ul>
+  );
+}
+
+function MerchantMetrics({ merchantId }: { merchantId: string }) {
+  const { data: analytics, loading, error } = useMerchantAnalytics(
+    merchantId,
+    Date.now() / 1000 - 30 * 24 * 60 * 60,
+    Date.now() / 1000,
+  );
+
+  if (loading) return <p>Loading analytics...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+
+  return (
+    <dl>
+      <dt>Total payments</dt>
+      <dd>{analytics?.totalPayments}</dd>
+      <dt>Total volume</dt>
+      <dd>{analytics?.totalVolume.toString()}</dd>
+    </dl>
+  );
+}
+
+function CreateDisputeForm({ paymentId }: { paymentId: string }) {
+  const { mutate, loading, status, error } = useCreateDispute();
+
+  const onSubmit = async () => {
+    const disputeId = await mutate({
+      paymentId,
+      amount: 5_000n,
+      reason: "Unauthorized charge",
+      evidence: "ipfs://example",
+      disputer: "G...",
+    });
+
+    console.log("Created dispute", disputeId);
+  };
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {status === "loading" ? "Creating dispute..." : "Create dispute"}
+    </button>
+  );
 }
 
 function CreatePaymentForm() {
@@ -156,6 +230,10 @@ the pattern used by React Query / SWR consumers.
 - `useMerchant(merchantId)` — fetch a single merchant.
 - `useMerchantPayments(merchantId, { offset?, limit? })` — fetch a merchant's paginated payments.
 - `useRefund(refundId)` — fetch a single refund.
+- `useDispute(disputeId)` — fetch a single dispute.
+- `usePaymentDisputes(paymentId)` — fetch all disputes for a payment.
+- `useMerchantAnalytics(merchantId, from, to)` — fetch merchant dashboard summary metrics for a date range.
+- `useCreateDispute()` — returns `{ mutate, data, status, loading, error }` for creating a dispute.
 - `useCreatePayment()` — returns `{ mutate, data, status, loading, error }` for creating a payment.
 - `useSubscriptionPlan(planId)` — fetch a subscription plan by ID.
 - `useCreateSubscriptionPlan()` — returns `{ mutate, data, status, loading, error }` for creating a plan.

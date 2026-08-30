@@ -1,6 +1,7 @@
 import * as React from "react";
 import type {
   PaymentCharge,
+  PaymentStatus,
   Merchant,
   Refund,
   CreatePaymentParams,
@@ -10,15 +11,39 @@ import type {
   InvoiceStatus,
   CreateInvoiceParams,
   PaymentLink,
+  Dispute,
+  DisputeStatus,
+  MerchantAnalytics,
+  FluxapayError,
 } from "@fluxapay/sdk";
 import { useFluxapayClient } from "./FluxapayProvider.js";
 import { useAsync, type AsyncState } from "./useAsync.js";
 
 export type { SubscriptionPlan } from "@fluxapay/sdk";
-export type { Invoice, LineItem, InvoiceStatus };
+export type { Invoice, LineItem, InvoiceStatus, Dispute, DisputeStatus, MerchantAnalytics };
+
+export interface CreateDisputeParams {
+  paymentId: string;
+  amount: bigint;
+  reason: string;
+  evidence: string;
+  disputer: string;
+}
+
+function toFluxapayError(error: unknown): FluxapayError {
+  if (error instanceof FluxapayError) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    return new FluxapayError(0, "UnknownFluxapayError", error.message, error);
+  }
+
+  return new FluxapayError(0, "UnknownFluxapayError", String(error), error);
+}
 
 /** Fetch a single payment by id. Re-fetches whenever `paymentId` changes. */
-export function usePayment(paymentId: string | undefined): AsyncState<PaymentCharge> {
+export function usePayment(paymentId: string | undefined): AsyncState<PaymentCharge, FluxapayError> {
   const client = useFluxapayClient();
   return useAsync(
     () => client.getPayment(paymentId as string) as unknown as Promise<PaymentCharge>,
@@ -28,7 +53,7 @@ export function usePayment(paymentId: string | undefined): AsyncState<PaymentCha
 }
 
 /** Fetch a single merchant by id. Re-fetches whenever `merchantId` changes. */
-export function useMerchant(merchantId: string | undefined): AsyncState<Merchant> {
+export function useMerchant(merchantId: string | undefined): AsyncState<Merchant, FluxapayError> {
   const client = useFluxapayClient();
   return useAsync(
     () => client.getMerchant(merchantId as string) as unknown as Promise<Merchant>,
@@ -38,22 +63,15 @@ export function useMerchant(merchantId: string | undefined): AsyncState<Merchant
 }
 
 export interface UseMerchantPaymentsOptions {
-  /** Number of payments to skip. Defaults to 0. */
   offset?: number;
-  /** Max number of payments to return. Defaults to 20. */
   limit?: number;
-  /** Optional payment status filter. */
   statusFilter?: PaymentStatus;
 }
 
-/**
- * Fetch the paginated list of payments for a merchant, resolving each
- * payment id returned by the contract into its full `PaymentCharge` record.
- */
 export function useMerchantPayments(
   merchantId: string | undefined,
   options?: UseMerchantPaymentsOptions,
-): AsyncState<PaymentCharge[]> {
+): AsyncState<PaymentCharge[], FluxapayError> {
   const client = useFluxapayClient();
   const offset = options?.offset ?? 0;
   const limit = options?.limit ?? 20;
@@ -77,24 +95,15 @@ export function useMerchantPayments(
 }
 
 export interface UseMerchantLinksOptions {
-  /** Number of links to skip. Defaults to 0. */
   offset?: number;
-  /** Max number of links to return (1..=100). Defaults to 100. */
   limit?: number;
-  /** When true, deactivated and expired links are excluded. Defaults to false. */
   activeOnly?: boolean;
 }
 
-/**
- * Issue #634: Fetch a merchant's payment links, paginated.
- *
- * Maps to `PaymentLinkManager.get_merchant_links` on-chain and re-fetches
- * whenever `merchantId` or any option changes.
- */
 export function useMerchantLinks(
   merchantId: string | undefined,
   options?: UseMerchantLinksOptions,
-): AsyncState<PaymentLink[]> {
+): AsyncState<PaymentLink[], FluxapayError> {
   const client = useFluxapayClient();
   const offset = options?.offset ?? 0;
   const limit = options?.limit ?? 100;
@@ -113,12 +122,46 @@ export function useMerchantLinks(
 }
 
 /** Fetch a single refund by id. Re-fetches whenever `refundId` changes. */
-export function useRefund(refundId: string | undefined): AsyncState<Refund> {
+export function useRefund(refundId: string | undefined): AsyncState<Refund, FluxapayError> {
   const client = useFluxapayClient();
   return useAsync(
     () => client.getRefund(refundId as string) as unknown as Promise<Refund>,
     [refundId],
     !!refundId,
+  );
+}
+
+/** Fetch a single dispute by id. Re-fetches whenever `disputeId` changes. */
+export function useDispute(disputeId: string | undefined): AsyncState<Dispute, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getDispute(disputeId as string) as unknown as Promise<Dispute>,
+    [disputeId],
+    !!disputeId,
+  );
+}
+
+/** Fetch all disputes for a payment. Re-fetches when `paymentId` changes. */
+export function usePaymentDisputes(paymentId: string | undefined): AsyncState<Dispute[], FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getPaymentDisputes(paymentId as string) as unknown as Promise<Dispute[]>,
+    [paymentId],
+    !!paymentId,
+  );
+}
+
+/** Fetch merchant analytics over a timestamp range. Re-fetches when any input changes. */
+export function useMerchantAnalytics(
+  merchantId: string | undefined,
+  from: number,
+  to: number,
+): AsyncState<MerchantAnalytics, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getMerchantAnalytics(merchantId as string, from, to) as Promise<MerchantAnalytics>,
+    [merchantId, from, to],
+    !!merchantId,
   );
 }
 
@@ -129,15 +172,14 @@ export interface UseCreatePaymentResult {
   data: PaymentCharge | undefined;
   status: MutationStatus;
   loading: boolean;
-  error: Error | undefined;
+  error: FluxapayError | undefined;
 }
 
-/** Create a payment. Returns a `mutate` function and the current transaction status. */
 export function useCreatePayment(): UseCreatePaymentResult {
   const client = useFluxapayClient();
   const [data, setData] = React.useState<PaymentCharge | undefined>(undefined);
   const [status, setStatus] = React.useState<MutationStatus>("idle");
-  const [error, setError] = React.useState<Error | undefined>(undefined);
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
 
   const mutate = React.useCallback(
     async (params: CreatePaymentParams) => {
@@ -149,7 +191,7 @@ export function useCreatePayment(): UseCreatePaymentResult {
         setStatus("success");
         return payment;
       } catch (err) {
-        const normalized = err instanceof Error ? err : new Error(String(err));
+        const normalized = toFluxapayError(err);
         setError(normalized);
         setStatus("error");
         throw normalized;
@@ -161,16 +203,47 @@ export function useCreatePayment(): UseCreatePaymentResult {
   return { mutate, data, status, loading: status === "loading", error };
 }
 
-// -- Issue #679: Subscription plan hooks ---------------------------------------
+export interface UseCreateDisputeResult {
+  mutate: (params: CreateDisputeParams) => Promise<string>;
+  data: string | undefined;
+  status: MutationStatus;
+  loading: boolean;
+  error: FluxapayError | undefined;
+}
 
-/** Fetch a single subscription plan by ID. Re-fetches whenever `planId` changes. */
-export function useSubscriptionPlan(planId: string | undefined): AsyncState<SubscriptionPlan> {
+export function useCreateDispute(): UseCreateDisputeResult {
   const client = useFluxapayClient();
-  return useAsync(
-    () => client.getSubscriptionPlan(planId as string) as unknown as Promise<SubscriptionPlan>,
-    [planId],
-    !!planId,
+  const [data, setData] = React.useState<string | undefined>(undefined);
+  const [status, setStatus] = React.useState<MutationStatus>("idle");
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
+
+  const mutate = React.useCallback(
+    async (params: CreateDisputeParams) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        const result = await client.createDispute(params);
+        const disputeId =
+          typeof result === "string"
+            ? result
+            : ((result as { dispute_id?: string } | null)?.dispute_id ??
+              (result as { disputeId?: string } | null)?.disputeId ??
+              (result as { id?: string } | null)?.id ??
+              "");
+        setData(disputeId);
+        setStatus("success");
+        return disputeId;
+      } catch (err) {
+        const normalized = toFluxapayError(err);
+        setError(normalized);
+        setStatus("error");
+        throw normalized;
+      }
+    },
+    [client],
   );
+
+  return { mutate, data, status, loading: status === "loading", error };
 }
 
 export interface UseCreateSubscriptionPlanParams {
@@ -186,44 +259,27 @@ export interface UseCreateSubscriptionPlanParams {
 export interface UseCreateSubscriptionPlanResult {
   mutate: (params: UseCreateSubscriptionPlanParams) => Promise<void>;
   data: void;
-/** Fetch a single invoice by id. Re-fetches whenever `invoiceId` changes. */
-export function useInvoice(invoiceId: string | undefined): AsyncState<Invoice> {
-  const client = useFluxapayClient();
-  return useAsync(
-    () => client.getInvoice(invoiceId as string),
-    [invoiceId],
-    !!invoiceId,
-  );
-}
-
-/** Fetch the list of invoice ids for a merchant. Re-fetches whenever `merchantId` changes. */
-export function useMerchantInvoices(merchantId: string | undefined): AsyncState<string[]> {
-  const client = useFluxapayClient();
-  return useAsync(
-    () => client.getMerchantInvoices(merchantId as string),
-    [merchantId],
-    !!merchantId,
-  );
-}
-
-export interface UseCreateInvoiceResult {
-  mutate: (params: CreateInvoiceParams) => Promise<Invoice>;
-  data: Invoice | undefined;
   status: MutationStatus;
   loading: boolean;
-  error: Error | undefined;
+  error: FluxapayError | undefined;
 }
 
-/** Create a subscription plan. Returns a `mutate` function and current transaction status. */
+/** Fetch a single subscription plan by ID. Re-fetches whenever `planId` changes. */
+export function useSubscriptionPlan(planId: string | undefined): AsyncState<SubscriptionPlan, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getSubscriptionPlan(planId as string) as unknown as Promise<SubscriptionPlan>,
+    [planId],
+    !!planId,
+  );
+}
+
+/** Create a subscription plan. Returns a mutate function and the current status. */
 export function useCreateSubscriptionPlan(): UseCreateSubscriptionPlanResult {
   const client = useFluxapayClient();
-  const [data, setData] = React.useState<void>(undefined);
-/** Create an invoice. Returns a `mutate` function and the current mutation status. */
-export function useCreateInvoice(): UseCreateInvoiceResult {
-  const client = useFluxapayClient();
-  const [data, setData] = React.useState<Invoice | undefined>(undefined);
+  const [data, setData] = React.useState<void | undefined>(undefined);
   const [status, setStatus] = React.useState<MutationStatus>("idle");
-  const [error, setError] = React.useState<Error | undefined>(undefined);
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
 
   const mutate = React.useCallback(
     async (params: UseCreateSubscriptionPlanParams) => {
@@ -233,16 +289,8 @@ export function useCreateInvoice(): UseCreateInvoiceResult {
         await client.createSubscriptionPlan(params);
         setData(undefined);
         setStatus("success");
-    async (params: CreateInvoiceParams) => {
-      setStatus("loading");
-      setError(undefined);
-      try {
-        const invoice = await client.createInvoice(params);
-        setData(invoice);
-        setStatus("success");
-        return invoice;
       } catch (err) {
-        const normalized = err instanceof Error ? err : new Error(String(err));
+        const normalized = toFluxapayError(err);
         setError(normalized);
         setStatus("error");
         throw normalized;
@@ -263,22 +311,16 @@ export interface UseSubscribeToPlanParams {
 export interface UseSubscribeToPlanResult {
   mutate: (params: UseSubscribeToPlanParams) => Promise<void>;
   data: void;
-export interface UseMarkInvoicePaidResult {
-  mutate: (invoiceId: string) => Promise<void>;
   status: MutationStatus;
   loading: boolean;
-  error: Error | undefined;
+  error: FluxapayError | undefined;
 }
 
-/** Subscribe a payer to an existing subscription plan. */
 export function useSubscribeToPlan(): UseSubscribeToPlanResult {
   const client = useFluxapayClient();
-  const [data, setData] = React.useState<void>(undefined);
-/** Mark an invoice as paid. Returns a `mutate` function and the current mutation status. */
-export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
-  const client = useFluxapayClient();
+  const [data, setData] = React.useState<void | undefined>(undefined);
   const [status, setStatus] = React.useState<MutationStatus>("idle");
-  const [error, setError] = React.useState<Error | undefined>(undefined);
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
 
   const mutate = React.useCallback(
     async (params: UseSubscribeToPlanParams) => {
@@ -287,14 +329,9 @@ export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
       try {
         await client.subscribeToPlan(params);
         setData(undefined);
-    async (invoiceId: string) => {
-      setStatus("loading");
-      setError(undefined);
-      try {
-        await client.markInvoicePaid(invoiceId);
         setStatus("success");
       } catch (err) {
-        const normalized = err instanceof Error ? err : new Error(String(err));
+        const normalized = toFluxapayError(err);
         setError(normalized);
         setStatus("error");
         throw normalized;
@@ -305,3 +342,94 @@ export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
 
   return { mutate, data, status, loading: status === "loading", error };
 }
+
+/** Fetch a single invoice by id. Re-fetches whenever `invoiceId` changes. */
+export function useInvoice(invoiceId: string | undefined): AsyncState<Invoice, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getInvoice(invoiceId as string),
+    [invoiceId],
+    !!invoiceId,
+  );
+}
+
+/** Fetch the list of invoice ids for a merchant. Re-fetches whenever `merchantId` changes. */
+export function useMerchantInvoices(merchantId: string | undefined): AsyncState<string[], FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getMerchantInvoices(merchantId as string),
+    [merchantId],
+    !!merchantId,
+  );
+}
+
+export interface UseCreateInvoiceResult {
+  mutate: (params: CreateInvoiceParams) => Promise<Invoice>;
+  data: Invoice | undefined;
+  status: MutationStatus;
+  loading: boolean;
+  error: FluxapayError | undefined;
+}
+
+/** Create an invoice. Returns a mutate function and the current mutation status. */
+export function useCreateInvoice(): UseCreateInvoiceResult {
+  const client = useFluxapayClient();
+  const [data, setData] = React.useState<Invoice | undefined>(undefined);
+  const [status, setStatus] = React.useState<MutationStatus>("idle");
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
+
+  const mutate = React.useCallback(
+    async (params: CreateInvoiceParams) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        const invoice = await client.createInvoice(params);
+        setData(invoice);
+        setStatus("success");
+        return invoice;
+      } catch (err) {
+        const normalized = toFluxapayError(err);
+        setError(normalized);
+        setStatus("error");
+        throw normalized;
+      }
+    },
+    [client],
+  );
+
+  return { mutate, data, status, loading: status === "loading", error };
+}
+
+export interface UseMarkInvoicePaidResult {
+  mutate: (invoiceId: string) => Promise<void>;
+  status: MutationStatus;
+  loading: boolean;
+  error: FluxapayError | undefined;
+}
+
+/** Mark an invoice as paid. Returns a mutate function and the current mutation status. */
+export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
+  const client = useFluxapayClient();
+  const [status, setStatus] = React.useState<MutationStatus>("idle");
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
+
+  const mutate = React.useCallback(
+    async (invoiceId: string) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        await client.markInvoicePaid(invoiceId);
+        setStatus("success");
+      } catch (err) {
+        const normalized = toFluxapayError(err);
+        setError(normalized);
+        setStatus("error");
+        throw normalized;
+      }
+    },
+    [client],
+  );
+
+  return { mutate, status, loading: status === "loading", error };
+}
+
