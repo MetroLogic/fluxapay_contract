@@ -114,6 +114,12 @@ The following Soroban contracts and shared modules are fully in scope for securi
 - Multi-sig proposal threshold bypass
 - KYC tier cap bypass enabling volume over-limit
 
+## Governance and Admin Controls
+
+FluxaPay includes an on-chain multisig governance flow to require multiple approvals before high-risk administrative actions are executed. The design and rationale are documented in [docs/ADR-0004-multisig-admin-governance.md](docs/ADR-0004-multisig-admin-governance.md).
+
+The policy is intentionally scoped to the `AdminAction` proposal set in the `AccessControl` module: fee-rate changes, treasury-related risk configuration, dispute bond and tier-cap adjustments, and protected role-management actions all require the configured signer threshold to be met before execution. The same document also explains the nonce-based replay protection and the 48-hour expiry window for unexecuted proposals.
+
 ---
 
 ## ❌ Out of Scope
