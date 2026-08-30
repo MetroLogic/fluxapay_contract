@@ -349,6 +349,38 @@ const settlement = await client.getCollaborativeSettlement("dispute_001");
 An invalid or mismatched signature surfaces as a mapped `InvalidSettlementSignature`
 `FluxapayError` (see `docs/error-codes.md`).
 
+## Subscription Management
+
+Create a merchant plan, subscribe a payer, and let an authorized billing
+operator process charges when they become due:
+
+```typescript
+const planId = await client.createSubscriptionPlan({
+  merchant: "GMERCHANT...",
+  planId: "pro_monthly",
+  name: "Pro",
+  description: "Monthly Pro subscription",
+  amount: 2_000_000n,
+  currency: "USDC",
+  billingInterval: "Monthly",
+});
+
+const subscriptionId = await client.subscribe({
+  payer: "GPAYER...",
+  planId,
+  maxPayments: 12,
+});
+
+await client.chargeSubscription("GBILLING_OPERATOR...", subscriptionId);
+const subscription = await client.getSubscription(subscriptionId);
+// Pause, resume, or cancel from the payer (or merchant for cancellation).
+await client.pauseSubscription("GPAYER...", subscriptionId);
+```
+
+`getPayerSubscriptions(payer)` returns all subscriptions associated with a
+payer. Subscription charge failures surface the mapped
+`SubscriptionInGracePeriod` and `SubscriptionRetryExhausted` errors.
+
 ## Usage-Based Billing (Metered Subscriptions) (issue #664)
 
 For pay-per-use subscriptions, an operator (oracle or settlement-operator
