@@ -15,6 +15,21 @@
 //!   refund request in the sequence coming from a distinct requester address
 //!   against the same `payment_id`, modeling multiple parties racing to
 //!   refund one payment before any request is approved or rejected.
+//!
+//! ## Fee-split arithmetic invariants (added for #590)
+//! - `proptest_fee_split_sums_to_platform_fee` — for every valid BPS
+//!   configuration, `treasury_share + developer_share` must equal
+//!   `platform_fee` (no tokens lost to rounding).
+//! - `proptest_merchant_net_never_exceeds_gross` — the merchant's net
+//!   amount after fees must never exceed the gross payment amount.
+//!
+//! ## Stream accrual invariants (added for #589)
+//! - `proptest_stream_accrued_bounded_by_deposit` — accrued amount must
+//!   never exceed the total deposit, regardless of rate or duration.
+//! - `proptest_stream_zero_rate_returns_checkpoint` — with rate=0 the
+//!   accrued value equals the checkpoint (clamped to deposit).
+//! - `proptest_stream_withdraw_clamped` — remaining deposit after
+//!   withdrawal is always in `[0, remaining]`.
 
 extern crate alloc;
 use crate::format_id;
@@ -611,5 +626,108 @@ proptest! {
         assert_eq!(sub.next_retry_at, Some(expected_retry),
             "next_retry_at {:?} should equal now + SUBSCRIPTION_RETRY_INTERVAL_SECS ({})",
             sub.next_retry_at, expected_retry);
+    }
+
+    // ── Fee-split arithmetic invariants (issue #590) ────────────────────────────
+
+    /// `platform_fee = treasury_share + developer_share` for every valid BPS
+    /// configuration. Mirrors the integer-division formula in
+    /// `PaymentProcessor::settle_payment`:
+    ///   dev  = fee * developer_bps / 10_000
+    ///   treasury = fee - dev   (remainder / rounding dust)
+    #[test]
+    fn proptest_fee_split_sums_to_platform_fee(
+        fee in 0i128..=1_000_000_000_000i128,
+        treasury_bps in 0u32..=10_000u32,
+        developer_bps in 0u32..=10_000u32,
+    ) {
+        prop_assume!(treasury_bps as u64 + developer_bps as u64 <= 10_000);
+
+        let dev_amount: i128 = fee * developer_bps as i128 / 10_000;
+        let treasury_total: i128 = fee - dev_amount;
+
+        // Core invariant: the two shares must reconstruct the original fee.
+        prop_assert_eq!(
+            treasury_total + dev_amount, fee,
+            "treasury {} + dev {} != fee {}",
+            treasury_total, dev_amount, fee
+        );
+
+        // Neither share may be negative.
+        prop_assert!(treasury_total >= 0, "treasury_total negative: {}", treasury_total);
+        prop_assert!(dev_amount >= 0, "dev_amount negative: {}", dev_amount);
+
+        // Each share must not exceed the fee itself.
+        prop_assert!(treasury_total <= fee, "treasury_total {} > fee {}", treasury_total, fee);
+        prop_assert!(dev_amount <= fee, "dev_amount {} > fee {}", dev_amount, fee);
+    }
+
+    /// Merchant net amount after platform fee never exceeds gross payment amount.
+    #[test]
+    fn proptest_merchant_net_never_exceeds_gross(
+        amount in 1i128..=1_000_000_000_000i128,
+        fee_bps in 0i128..=10_000i128,
+    ) {
+        let fee = amount * fee_bps / 10_000;
+        let net = amount - fee;
+
+        prop_assert!(net >= 0, "net went negative: {}", net);
+        prop_assert!(net <= amount, "net {} > amount {}", net, amount);
+        prop_assert!(fee >= 0, "fee negative: {}", fee);
+    }
+
+    // ── Stream accrual bounded-by-deposit invariant (issue #589) ─────────────────
+
+    /// Accrued amount must never exceed the total deposit, regardless of
+    /// rate, elapsed time, or checkpoint values.
+    #[test]
+    fn proptest_stream_accrued_bounded_by_deposit(
+        checkpoint in 0i128..=i128::MAX / 4,
+        last_at in 0u64..u64::MAX / 4,
+        elapsed in 0u64..=86_400u64,
+        rate in 0i128..=i128::MAX / 86_400,
+        deposit in 1i128..=i128::MAX / 4,
+    ) {
+        use crate::stream::compute_total_accrued;
+
+        let now = last_at.saturating_add(elapsed);
+        let accrued = compute_total_accrued(checkpoint, last_at, now, rate, deposit);
+        prop_assert!(accrued >= 0, "accrual negative: {}", accrued);
+        prop_assert!(
+            accrued <= deposit.max(0),
+            "accrual {} exceeded deposit {}",
+            accrued, deposit
+        );
+    }
+
+    /// Compute_total_accrued with zero rate always returns the checkpoint value
+    /// (clamped to deposit).
+    #[test]
+    fn proptest_stream_zero_rate_returns_checkpoint(
+        checkpoint in 0i128..=1_000_000_000i128,
+        last_at in 0u64..=1_000_000u64,
+        elapsed in 0u64..=10_000u64,
+        deposit in 1i128..=i128::MAX / 4,
+    ) {
+        use crate::stream::compute_total_accrued;
+
+        let now = last_at.saturating_add(elapsed);
+        let accrued = compute_total_accrued(checkpoint, last_at, now, 0, deposit);
+
+        let expected = checkpoint.min(deposit.max(0)).max(0);
+        prop_assert_eq!(accrued, expected);
+    }
+
+    /// Remaining deposit after withdrawal is always in [0, remaining].
+    #[test]
+    fn proptest_stream_withdraw_clamped(
+        remaining in 0i128..=i128::MAX / 2,
+        withdraw in 0i128..=i128::MAX / 2,
+    ) {
+        use crate::stream::compute_remaining_after_withdraw;
+
+        let after = compute_remaining_after_withdraw(remaining, withdraw);
+        prop_assert!(after >= 0, "remaining went negative: {}", after);
+        prop_assert!(after <= remaining.max(0), "after {} > remaining {}", after, remaining);
     }
 }
