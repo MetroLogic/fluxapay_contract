@@ -5447,6 +5447,11 @@ impl PaymentProcessor {
             .get(&DataKey::Invoice(invoice_id.clone()))
             .ok_or(Error::PaymentNotFound)?;
 
+        // Idempotent: marking an already-paid invoice is a no-op (issue: invoice lifecycle tests).
+        if invoice.status == InvoiceStatus::Paid {
+            return Ok(());
+        }
+
         if invoice.status != InvoiceStatus::Created {
             return Err(Error::PaymentAlreadyProcessed);
         }

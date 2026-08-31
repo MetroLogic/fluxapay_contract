@@ -79,6 +79,10 @@ impl MerchantPreAuth {
     /// Customer grants a merchant permission to pull up to `limit_per_period`
     /// tokens per `period_secs`-second window.
     ///
+    /// A re-authorization for the same (customer, merchant) pair replaces any
+    /// prior grant: the pulled-budget counter resets and the new limit, token,
+    /// and period length take effect immediately.
+    ///
     /// # Parameters
     /// * `customer`         – Account granting the authorization; must sign.
     /// * `merchant`         – Merchant address that may pull funds.
@@ -103,17 +107,6 @@ impl MerchantPreAuth {
         }
 
         let key = MerchantAuthDataKey::Authorization(customer.clone(), merchant.clone());
-
-        // Reject if an active authorization already exists — customer must revoke first.
-        if let Some(existing) = env
-            .storage()
-            .persistent()
-            .get::<MerchantAuthDataKey, MerchantAuthorization>(&key)
-        {
-            if existing.active {
-                return Err(MerchantAuthError::AuthorizationAlreadyExists);
-            }
-        }
 
         let now = env.ledger().timestamp();
         let auth = MerchantAuthorization {
