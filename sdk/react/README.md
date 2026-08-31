@@ -287,6 +287,7 @@ the pattern used by React Query / SWR consumers.
 - `useCreateDispute()` — returns `{ mutate, data, status, loading, error }` for creating a dispute.
 - `useCreatePayment()` — returns `{ mutate, data, status, loading, error }` for creating a payment.
 - `useSubscriptionPlan(planId)` — fetch a subscription plan by ID.
+- `useSubscription(subscriptionId)` — fetch a subscription by ID.
 - `useCreateSubscriptionPlan()` — returns `{ mutate, data, status, loading, error }` for creating a plan.
 - `useSubscribeToPlan()` — returns `{ mutate, data, status, loading, error }` for subscribing a payer to a plan.
 

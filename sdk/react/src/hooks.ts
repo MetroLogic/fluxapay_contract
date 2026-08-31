@@ -7,6 +7,7 @@ import type {
   Refund,
   CreatePaymentParams,
   SubscriptionPlan,
+  Subscription,
   Invoice,
   LineItem,
   InvoiceStatus,
@@ -337,6 +338,18 @@ export function useSubscriptionPlan(planId: string | undefined): AsyncState<Subs
   );
 }
 
+/** Fetch a single subscription by ID. Re-fetches whenever `subscriptionId` changes. */
+export function useSubscription(
+  subscriptionId: string | undefined,
+): AsyncState<Subscription, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getSubscription(subscriptionId as string) as Promise<Subscription>,
+    [subscriptionId],
+    !!subscriptionId,
+  );
+}
+
 /** Create a subscription plan. Returns a mutate function and the current status. */
 export function useCreateSubscriptionPlan(): UseCreateSubscriptionPlanResult {
   const client = useFluxapayClient();
@@ -495,4 +508,3 @@ export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
 
   return { mutate, status, loading: status === "loading", error };
 }
-

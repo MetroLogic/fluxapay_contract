@@ -201,6 +201,88 @@ export interface SubscriptionPlan {
   active: boolean;
 }
 
+/** Mirrors the on-chain `Subscription` struct in `fluxapay/src/types.rs`. */
+export interface Subscription {
+  subscriptionId: string;
+  merchantId: string;
+  payerAddress: string;
+  planId: string;
+  amount: bigint;
+  currency: string;
+  intervalSecs: bigint;
+  nextPaymentAt: bigint;
+  status: "Active" | "Paused" | "Cancelled" | "Expired";
+  createdAt: bigint;
+  lastPaymentAt: bigint | null;
+  totalPayments: number;
+  maxPayments: number | null;
+  retryCount: number;
+  nextRetryAt: bigint | null;
+  resumeAt: bigint | null;
+  affiliate: string | null;
+  affiliateFeeBps: number | null;
+}
+
+export interface CreatePlanParams {
+  merchant: string;
+  planId: string;
+  name: string;
+  description: string;
+  amount: bigint;
+  currency: string;
+  billingInterval: SubscriptionPlan["billingInterval"];
+}
+
+export interface SubscribeParams {
+  payer: string;
+  planId: string;
+  maxPayments?: number;
+  affiliate?: string;
+  affiliateFeeBps?: number;
+}
+
+function fromContractSubscription(raw: {
+  subscription_id: string;
+  merchant_id: string;
+  payer_address: string;
+  plan_id: string;
+  amount: bigint;
+  currency: string;
+  interval_secs: bigint;
+  next_payment_at: bigint;
+  status: Subscription["status"];
+  created_at: bigint;
+  last_payment_at?: bigint | null;
+  total_payments: number;
+  max_payments?: number | null;
+  retry_count: number;
+  next_retry_at?: bigint | null;
+  resume_at?: bigint | null;
+  affiliate?: string | null;
+  affiliate_fee_bps?: number | null;
+}): Subscription {
+  return {
+    subscriptionId: raw.subscription_id,
+    merchantId: raw.merchant_id,
+    payerAddress: raw.payer_address,
+    planId: raw.plan_id,
+    amount: raw.amount,
+    currency: raw.currency,
+    intervalSecs: raw.interval_secs,
+    nextPaymentAt: raw.next_payment_at,
+    status: raw.status,
+    createdAt: raw.created_at,
+    lastPaymentAt: raw.last_payment_at ?? null,
+    totalPayments: raw.total_payments,
+    maxPayments: raw.max_payments ?? null,
+    retryCount: raw.retry_count,
+    nextRetryAt: raw.next_retry_at ?? null,
+    resumeAt: raw.resume_at ?? null,
+    affiliate: raw.affiliate ?? null,
+    affiliateFeeBps: raw.affiliate_fee_bps ?? null,
+  };
+}
+
 export interface CreateStreamParams {
   sender: string;
   receiver: string;
@@ -426,6 +508,7 @@ export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
   59: "LinkMaxUsesReached",
   60: "DirectTransferNotDisputable",
   61: "MaxRetriesExceeded",
+  347: "RetryChainTooDeep",
   62: "InvalidStatusTransition",
   63: "RefundNotApproved",
   64: "RouterNotAllowed",
@@ -1264,7 +1347,6 @@ export class FluxapayClient {
   }) {
     return withMappedContractError(() =>
       (this.contract as any).generate_reconciliation_page({
-      (this.contract as any).reconciliation_report_page({
         merchant_id: params.merchantId,
         from_ts: params.fromTs,
         to_ts: params.toTs,
@@ -1536,6 +1618,9 @@ export class FluxapayClient {
       });
       return tx.result;
     });
+  }
+
+  /**
    * Issue #680: Resolve the configured backend API URL, throwing a clear
    * error if invoice methods are used without one.
    */
@@ -1822,22 +1907,14 @@ export class FluxapayClient {
    * Issue #679: Create a subscription plan (merchant only).
    * Maps to `PaymentProcessor.create_subscription_plan` on-chain.
    */
-  async createSubscriptionPlan(params: {
-    merchant: string;
-    planId: string;
-    name: string;
-    description: string;
-    amount: bigint;
-    currency: string;
-    billingInterval: "Daily" | "Weekly" | "Monthly" | "Annually";
-  }): Promise<void> {
+  async createSubscriptionPlan(params: CreatePlanParams): Promise<string> {
     const billingIntervalMap: Record<string, number> = {
       Daily: 0,
       Weekly: 1,
       Monthly: 2,
       Annually: 3,
     };
-    return withMappedContractError(() =>
+    await withMappedContractError(() =>
       (this.contract as any).create_subscription_plan({
         merchant: params.merchant,
         plan_id: params.planId,
@@ -1848,6 +1925,7 @@ export class FluxapayClient {
         billing_interval: billingIntervalMap[params.billingInterval] ?? 2,
       }),
     );
+    return params.planId;
   }
 
   /**
@@ -1855,7 +1933,7 @@ export class FluxapayClient {
    * Maps to `PaymentProcessor.get_subscription_plan` on-chain.
    */
   async getSubscriptionPlan(planId: string): Promise<SubscriptionPlan> {
-    const raw = await withMappedContractError(() =>
+    const raw: any = await withMappedContractError(() =>
       (this.contract as any).get_subscription_plan({ plan_id: planId }),
     );
     const p = raw.result;
@@ -1894,6 +1972,69 @@ export class FluxapayClient {
         payment_id: params.paymentId,
       }),
     );
+  }
+
+  /** Create a subscription and return its contract-generated ID. */
+  async subscribe(params: SubscribeParams): Promise<string> {
+    const raw: any = await withMappedContractError(() =>
+      (this.contract as any).subscribe({
+        payer: params.payer,
+        plan_id: params.planId,
+        max_payments: params.maxPayments ?? null,
+        affiliate: params.affiliate ?? null,
+        affiliate_fee_bps: params.affiliateFeeBps ?? null,
+      }),
+    );
+    return raw.result as string;
+  }
+
+  /**
+   * Charge a due subscription. This uses the contract's `process_subscription`
+   * entry point, which resolves the configured billing token internally.
+   */
+  async chargeSubscription(operator: string, subscriptionId: string): Promise<void> {
+    await withMappedContractError(() =>
+      (this.contract as any).process_subscription({
+        operator,
+        subscription_id: subscriptionId,
+      }),
+    );
+  }
+
+  async cancelSubscription(caller: string, subscriptionId: string): Promise<void> {
+    await withMappedContractError(() =>
+      (this.contract as any).cancel_subscription({
+        payer_or_merchant: caller,
+        subscription_id: subscriptionId,
+        refund_remaining: false,
+      }),
+    );
+  }
+
+  async pauseSubscription(caller: string, subscriptionId: string): Promise<void> {
+    await withMappedContractError(() =>
+      (this.contract as any).pause_subscription({ payer: caller, subscription_id: subscriptionId }),
+    );
+  }
+
+  async resumeSubscription(caller: string, subscriptionId: string): Promise<void> {
+    await withMappedContractError(() =>
+      (this.contract as any).resume_subscription({ payer: caller, subscription_id: subscriptionId }),
+    );
+  }
+
+  async getSubscription(subscriptionId: string): Promise<Subscription> {
+    const raw: any = await withMappedContractError(() =>
+      (this.contract as any).get_subscription({ subscription_id: subscriptionId }),
+    );
+    return fromContractSubscription(raw.result);
+  }
+
+  async getPayerSubscriptions(payer: string): Promise<Subscription[]> {
+    const raw: any = await withMappedContractError(() =>
+      (this.contract as any).get_payer_subscriptions({ payer }),
+    );
+    return (raw.result as Parameters<typeof fromContractSubscription>[0][]).map(fromContractSubscription);
   }
 
   /**
@@ -2134,6 +2275,3 @@ export {
   type GasEstimate,
   type GasOperation,
 } from "./contracts/gas-estimator.js";
-
-
-
