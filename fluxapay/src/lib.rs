@@ -11316,6 +11316,11 @@ impl PaymentProcessor {
             .get(&DataKey::Invoice(invoice_id.clone()))
             .ok_or(Error::PaymentNotFound)?;
 
+        // Idempotent: marking an already-paid invoice is a no-op (issue: invoice lifecycle tests).
+        if invoice.status == InvoiceStatus::Paid {
+            return Ok(());
+        }
+
         if invoice.status != InvoiceStatus::Created {
             return Err(Error::PaymentAlreadyProcessed);
         }
@@ -11536,3 +11541,5 @@ pub use payment_link::{
 #[cfg(test)] mod router_allowlist_test;
 #[cfg(test)] mod settlement_test;
 #[cfg(test)] mod swap_test;
+#[cfg(test)] mod invoice_test;
+#[cfg(test)] mod merchant_auth_test;
