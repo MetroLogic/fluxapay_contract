@@ -1536,6 +1536,9 @@ export class FluxapayClient {
       });
       return tx.result;
     });
+  }
+
+  /**
    * Issue #680: Resolve the configured backend API URL, throwing a clear
    * error if invoice methods are used without one.
    */
@@ -2134,6 +2137,12 @@ export {
   type GasEstimate,
   type GasOperation,
 } from "./contracts/gas-estimator.js";
+export {
+  AdminOpsClient,
+  type AdminOpsConfig,
+  type AdminAction,
+  type FeeSplitConfig,
+} from "./contracts/admin-ops.js";
 
 
 
