@@ -121,6 +121,123 @@ fn create_payment_args(
     }
 }
 
+fn create_expired_retryable_payment(
+    env: &Env,
+    client: &PaymentProcessorClient<'_>,
+    admin: &Address,
+    merchant: &Address,
+    payment_id: &str,
+) -> String {
+    client.grant_role(admin, &role_merchant(env), merchant);
+    let payment_id = String::from_str(env, payment_id);
+    let args = create_payment_args(env, &payment_id, merchant, 1_000);
+    client.create_payment(&args);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+    client.expire_payment(&payment_id);
+    payment_id
+}
+
+fn retry_expired_payment(
+    env: &Env,
+    client: &PaymentProcessorClient<'_>,
+    merchant: &Address,
+    payment_id: &String,
+) -> String {
+    client.retry_payment(merchant, payment_id, &(env.ledger().timestamp() + 3_600))
+}
+
+#[test]
+fn test_retry_payment_success_first_retry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    let original = create_expired_retryable_payment(&env, &client, &admin, &merchant, "retry_first");
+
+    let retry_id = retry_expired_payment(&env, &client, &merchant, &original);
+
+    assert_eq!(client.get_payment(&retry_id).status, PaymentStatus::Pending);
+}
+
+#[test]
+fn test_retry_payment_links_retry_of_payment_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    let original = create_expired_retryable_payment(&env, &client, &admin, &merchant, "retry_link");
+
+    let retry_id = retry_expired_payment(&env, &client, &merchant, &original);
+
+    assert_eq!(client.get_payment(&retry_id).retry_of_payment_id, Some(original));
+}
+
+#[test]
+fn test_retry_payment_chain_depth_3_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    let original = create_expired_retryable_payment(&env, &client, &admin, &merchant, "retry_depth_3");
+    let first = retry_expired_payment(&env, &client, &merchant, &original);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+    client.expire_payment(&first);
+    let second = retry_expired_payment(&env, &client, &merchant, &first);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+    client.expire_payment(&second);
+
+    let third = retry_expired_payment(&env, &client, &merchant, &second);
+
+    assert_eq!(client.get_payment(&third).retry_of_payment_id, Some(second));
+}
+
+#[test]
+fn test_retry_payment_chain_depth_4_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    let original = create_expired_retryable_payment(&env, &client, &admin, &merchant, "retry_depth_4");
+    let first = retry_expired_payment(&env, &client, &merchant, &original);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+    client.expire_payment(&first);
+    let second = retry_expired_payment(&env, &client, &merchant, &first);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+    client.expire_payment(&second);
+    let third = retry_expired_payment(&env, &client, &merchant, &second);
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+    client.expire_payment(&third);
+
+    let result = client.try_retry_payment(&merchant, &third, &(env.ledger().timestamp() + 3_600));
+
+    assert_eq!(result, Err(Ok(Error::RetryChainTooDeep)));
+}
+
+#[test]
+fn test_retry_payment_only_expired_or_failed_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+    let payment_id = String::from_str(&env, "confirmed_retry");
+    let args = create_payment_args(&env, &payment_id, &merchant, 1_000);
+    client.create_payment(&args);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+    client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &1_000,
+    );
+
+    let result = client.try_retry_payment(&merchant, &payment_id, &(env.ledger().timestamp() + 3_600));
+
+    assert_eq!(result, Err(Ok(Error::PaymentAlreadyProcessed)));
+}
+
 #[test]
 fn test_create_payment() {
     let env = Env::default();

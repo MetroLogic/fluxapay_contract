@@ -14,5 +14,6 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "types": ["node", "react"]
-  }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }
