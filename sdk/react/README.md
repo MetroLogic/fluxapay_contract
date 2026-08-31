@@ -45,10 +45,14 @@ import {
   useDispute,
   usePaymentDisputes,
   useMerchantAnalytics,
+  useStream,
+  useSenderStreams,
+  useCreateStream,
   useCreateDispute,
   type Dispute,
   type DisputeStatus,
   type MerchantAnalytics,
+  type PaymentStream,
 } from "@fluxapay/react";
 
 function PaymentStatus({ paymentId }: { paymentId: string }) {
@@ -117,6 +121,50 @@ function MerchantMetrics({ merchantId }: { merchantId: string }) {
       <dt>Total volume</dt>
       <dd>{analytics?.totalVolume.toString()}</dd>
     </dl>
+  );
+}
+
+function StreamDetails({ streamId }: { streamId: string }) {
+  const { data: stream, loading, error } = useStream(streamId);
+
+  if (loading) return <p>Loading stream...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+  return <p>Stream status: {stream?.status}</p>;
+}
+
+function SenderStreams({ sender }: { sender: string }) {
+  const { data: streams, loading } = useSenderStreams(sender, 0, 10);
+
+  if (loading) return <p>Loading streams...</p>;
+  return (
+    <ul>
+      {streams?.map((stream: PaymentStream) => (
+        <li key={stream.streamId}>{stream.streamId}: {stream.status}</li>
+      ))}
+    </ul>
+  );
+}
+
+function CreateStreamForm() {
+  const { mutate, loading, status } = useCreateStream();
+
+  const onSubmit = async () => {
+    const stream = await mutate({
+      sender: "G_SENDER...",
+      receiver: "G_RECEIVER...",
+      token: "USDC",
+      ratePerSecond: 100n,
+      deposit: 10_000_000n,
+      streamId: "stream_123",
+    });
+
+    console.log("Created stream", stream.streamId);
+  };
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {status === "loading" ? "Creating stream..." : "Create stream"}
+    </button>
   );
 }
 
@@ -233,6 +281,9 @@ the pattern used by React Query / SWR consumers.
 - `useDispute(disputeId)` — fetch a single dispute.
 - `usePaymentDisputes(paymentId)` — fetch all disputes for a payment.
 - `useMerchantAnalytics(merchantId, from, to)` — fetch merchant dashboard summary metrics for a date range.
+- `useStream(streamId)` — fetch a payment stream by ID.
+- `useSenderStreams(sender, offset?, limit?)` — fetch paginated streams for a sender address.
+- `useCreateStream()` — returns `{ mutate, data, status, loading, error }` for creating a payment stream.
 - `useCreateDispute()` — returns `{ mutate, data, status, loading, error }` for creating a dispute.
 - `useCreatePayment()` — returns `{ mutate, data, status, loading, error }` for creating a payment.
 - `useSubscriptionPlan(planId)` — fetch a subscription plan by ID.
