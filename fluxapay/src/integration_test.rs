@@ -1,8 +1,9 @@
 use crate::merchant_registry::MaybeFeeConfig;
 use crate::{
     merchant_registry::{KycTier, MerchantRegistry, MerchantRegistryClient},
-    ArbitratorVoteChoice, DataKey, DisputeStatus, Error, PaymentProcessor, PaymentProcessorClient,
-    PaymentStatus, RefundManager, RefundManagerClient, RefundStatus, SettlementSplit,
+    AdminAction, ArbitratorVoteChoice, DataKey, DisputeStatus, Error, PaymentProcessor,
+    PaymentProcessorClient, PaymentStatus, RefundManager, RefundManagerClient, RefundStatus,
+    SettlementSplit,
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
@@ -1524,4 +1525,135 @@ fn test_dispute_escalation_past_deadline() {
     let event_count_before = env.events().all().len();
     refund_client.check_dispute_deadline(&dispute_id);
     assert_eq!(env.events().all().len(), event_count_before);
+}
+
+// =============================================================================
+// Multi-sig admin proposal integration tests
+// =============================================================================
+
+/// Helper: set up a contract with a 2-of-3 multisig configuration.
+/// Returns (admin, signer2, signer3, payment_client).
+fn setup_multisig_integration(
+    env: &Env,
+    admin: &Address,
+    payment_client: &PaymentProcessorClient<'_>,
+) -> (Address, Address) {
+    let signer2 = Address::generate(env);
+    let signer3 = Address::generate(env);
+
+    let signers = vec![env, admin.clone(), signer2.clone(), signer3.clone()];
+    payment_client.set_multisig_config(admin, &2u32, &signers);
+
+    (signer2, signer3)
+}
+
+/// Full propose → vote → execute flow with a 2-of-3 multisig.
+#[test]
+fn test_admin_proposal_full_flow_2_of_3_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, _) = setup_integration(&env);
+    let (signer2, _signer3) = setup_multisig_integration(&env, &admin, &payment_client);
+
+    // Signer creates a proposal to raise the dispute bond.
+    let action = AdminAction::SetDisputeBond(300_000i128);
+    let nonce = payment_client.create_proposal(&signer2, &action);
+
+    // First signer vote (the creator) is implicit; second signer reaches threshold.
+    payment_client.vote_proposal(&admin, &nonce);
+
+    // Executor (admin) applies the change.
+    payment_client.execute_proposal(&admin, &nonce);
+
+    assert_eq!(payment_client.get_dispute_bond_amount(), 300_000i128);
+}
+
+/// Only 1 of 3 signers approves → execute returns an error and config is unchanged.
+#[test]
+fn test_proposal_rejected_before_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, _) = setup_integration(&env);
+    let (signer2, _signer3) = setup_multisig_integration(&env, &admin, &payment_client);
+
+    let action = AdminAction::SetDisputeBond(99_999i128);
+    let nonce = payment_client.create_proposal(&signer2, &action);
+
+    // Only 1 approval (the creator) out of a required 2.
+    let result = payment_client.try_execute_proposal(&admin, &nonce);
+    assert_eq!(result, Err(Ok(Error::AccessControlError)));
+
+    // Config is unchanged.
+    assert_eq!(payment_client.get_dispute_bond_amount(), 100_000i128);
+}
+
+/// A proposal past its 48-hour expiry cannot be executed.
+#[test]
+fn test_expired_proposal_cannot_be_executed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, _) = setup_integration(&env);
+    let (signer2, _signer3) = setup_multisig_integration(&env, &admin, &payment_client);
+
+    let action = AdminAction::SetDisputeBond(500_000i128);
+    let nonce = payment_client.create_proposal(&signer2, &action);
+    payment_client.vote_proposal(&admin, &nonce);
+
+    // Advance ledger past the 48-hour expiry window.
+    env.ledger().with_mut(|l| l.timestamp += 48 * 60 * 60 + 1);
+
+    let result = payment_client.try_execute_proposal(&admin, &nonce);
+    assert_eq!(result, Err(Ok(Error::AccessControlError)));
+
+    // Config is unchanged.
+    assert_eq!(payment_client.get_dispute_bond_amount(), 100_000i128);
+}
+
+/// A signer cannot vote on the same proposal twice.
+#[test]
+fn test_duplicate_vote_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, _) = setup_integration(&env);
+    let (signer2, _signer3) = setup_multisig_integration(&env, &admin, &payment_client);
+
+    let action = AdminAction::SetDisputeBond(200_000i128);
+    let nonce = payment_client.create_proposal(&signer2, &action);
+
+    let result = payment_client.try_vote_proposal(&signer2, &nonce);
+    assert_eq!(result, Err(Ok(Error::AccessControlError)));
+}
+
+/// A non-signer cannot vote on a proposal.
+#[test]
+fn test_non_signer_vote_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, _) = setup_integration(&env);
+    let (signer2, _signer3) = setup_multisig_integration(&env, &admin, &payment_client);
+
+    let outsider = Address::generate(&env);
+    let action = AdminAction::SetDisputeBond(200_000i128);
+    let nonce = payment_client.create_proposal(&signer2, &action);
+
+    let result = payment_client.try_vote_proposal(&outsider, &nonce);
+    assert_eq!(result, Err(Ok(Error::AccessControlError)));
+}
+
+/// Executed proposal applies the requested config change to persistent storage.
+#[test]
+fn test_proposal_executed_applies_config_change() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, _) = setup_integration(&env);
+    let (signer2, _signer3) = setup_multisig_integration(&env, &admin, &payment_client);
+
+    // Update the refund fee to 0.5% (50 bps).
+    let new_bps: i128 = 50;
+    let action = AdminAction::SetRefundFeeBps(new_bps);
+    let nonce = payment_client.create_proposal(&signer2, &action);
+    payment_client.vote_proposal(&admin, &nonce);
+    payment_client.execute_proposal(&admin, &nonce);
+
+    assert_eq!(payment_client.get_refund_fee_bps(), new_bps);
 }

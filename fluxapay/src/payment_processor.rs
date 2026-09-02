@@ -2345,7 +2345,7 @@ impl PaymentProcessor {
             current_id = retry_of.clone();
             depth = depth.saturating_add(1);
             if depth > 3 {
-                return Err(Error::MaxRetriesExceeded);
+                return Err(Error::RetryChainTooDeep);
             }
         }
 
@@ -5446,6 +5446,11 @@ impl PaymentProcessor {
             .persistent()
             .get(&DataKey::Invoice(invoice_id.clone()))
             .ok_or(Error::PaymentNotFound)?;
+
+        // Idempotent: marking an already-paid invoice is a no-op (issue: invoice lifecycle tests).
+        if invoice.status == InvoiceStatus::Paid {
+            return Ok(());
+        }
 
         if invoice.status != InvoiceStatus::Created {
             return Err(Error::PaymentAlreadyProcessed);

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { FluxapayError } from "@fluxapay/sdk";
 import type {
   PaymentCharge,
   PaymentStatus,
@@ -6,6 +7,7 @@ import type {
   Refund,
   CreatePaymentParams,
   SubscriptionPlan,
+  Subscription,
   Invoice,
   LineItem,
   InvoiceStatus,
@@ -14,12 +16,13 @@ import type {
   Dispute,
   DisputeStatus,
   MerchantAnalytics,
-  FluxapayError,
+  PaymentStream,
+  CreateStreamParams,
 } from "@fluxapay/sdk";
 import { useFluxapayClient } from "./FluxapayProvider.js";
 import { useAsync, type AsyncState } from "./useAsync.js";
 
-export type { SubscriptionPlan } from "@fluxapay/sdk";
+export type { SubscriptionPlan, PaymentStream, CreateStreamParams } from "@fluxapay/sdk";
 export type { Invoice, LineItem, InvoiceStatus, Dispute, DisputeStatus, MerchantAnalytics };
 
 export interface CreateDisputeParams {
@@ -165,6 +168,31 @@ export function useMerchantAnalytics(
   );
 }
 
+/** Fetch a single payment stream by id. Re-fetches whenever `streamId` changes. */
+export function useStream(streamId: string | undefined): AsyncState<PaymentStream, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getStream(streamId as string) as unknown as Promise<PaymentStream>,
+    [streamId],
+    !!streamId,
+  );
+}
+
+/** Fetch streams created by a sender, paginated by offset/limit. */
+export function useSenderStreams(
+  sender: string | undefined,
+  offset = 0,
+  limit = 100,
+): AsyncState<PaymentStream[], FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () =>
+      client.getSenderStreams(sender as string, offset, limit) as unknown as Promise<PaymentStream[]>,
+    [sender, offset, limit],
+    !!sender,
+  );
+}
+
 export type MutationStatus = "idle" | "loading" | "success" | "error";
 
 export interface UseCreatePaymentResult {
@@ -190,6 +218,42 @@ export function useCreatePayment(): UseCreatePaymentResult {
         setData(payment);
         setStatus("success");
         return payment;
+      } catch (err) {
+        const normalized = toFluxapayError(err);
+        setError(normalized);
+        setStatus("error");
+        throw normalized;
+      }
+    },
+    [client],
+  );
+
+  return { mutate, data, status, loading: status === "loading", error };
+}
+
+export interface UseCreateStreamResult {
+  mutate: (params: CreateStreamParams) => Promise<PaymentStream>;
+  data: PaymentStream | undefined;
+  status: MutationStatus;
+  loading: boolean;
+  error: FluxapayError | undefined;
+}
+
+export function useCreateStream(): UseCreateStreamResult {
+  const client = useFluxapayClient();
+  const [data, setData] = React.useState<PaymentStream | undefined>(undefined);
+  const [status, setStatus] = React.useState<MutationStatus>("idle");
+  const [error, setError] = React.useState<FluxapayError | undefined>(undefined);
+
+  const mutate = React.useCallback(
+    async (params: CreateStreamParams) => {
+      setStatus("loading");
+      setError(undefined);
+      try {
+        const stream = (await client.createStream(params)) as unknown as PaymentStream;
+        setData(stream);
+        setStatus("success");
+        return stream;
       } catch (err) {
         const normalized = toFluxapayError(err);
         setError(normalized);
@@ -271,6 +335,18 @@ export function useSubscriptionPlan(planId: string | undefined): AsyncState<Subs
     () => client.getSubscriptionPlan(planId as string) as unknown as Promise<SubscriptionPlan>,
     [planId],
     !!planId,
+  );
+}
+
+/** Fetch a single subscription by ID. Re-fetches whenever `subscriptionId` changes. */
+export function useSubscription(
+  subscriptionId: string | undefined,
+): AsyncState<Subscription, FluxapayError> {
+  const client = useFluxapayClient();
+  return useAsync(
+    () => client.getSubscription(subscriptionId as string) as Promise<Subscription>,
+    [subscriptionId],
+    !!subscriptionId,
   );
 }
 
@@ -432,4 +508,3 @@ export function useMarkInvoicePaid(): UseMarkInvoicePaidResult {
 
   return { mutate, status, loading: status === "loading", error };
 }
-

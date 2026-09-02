@@ -43,9 +43,11 @@ use soroban_sdk::{
 
 use crate::{
     access_control::{role_merchant, role_oracle, role_settlement_operator},
+    merchant_registry::KycTier,
     BillingInterval, Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
     RefundManagerClient, RefundStatus, SubscriptionStatus, PAYMENT_TOLERANCE,
-    SUBSCRIPTION_RETRY_INTERVAL_SECS,
+    SUBSCRIPTION_RETRY_INTERVAL_SECS, TIER_CAP_BASIC, TIER_CAP_BUSINESS, TIER_CAP_FULL,
+    TIER_CAP_UNVERIFIED,
 };
 
 fn setup_payment_processor(env: &Env) -> (Address, PaymentProcessorClient<'_>) {
@@ -483,6 +485,151 @@ proptest! {
             .map(|r| r.amount)
             .sum();
         prop_assert!(tracked_total <= payment_amount);
+    }
+
+    /// Issue #591: A merchant's running monthly volume must never exceed the
+    /// effective cap for their current KYC tier, regardless of payment count or
+    /// individual payment size.
+    #[test]
+    fn prop_monthly_volume_never_exceeds_tier_cap(
+        tier in prop_oneof![
+            Just(KycTier::Unverified),
+            Just(KycTier::Basic),
+            Just(KycTier::Full),
+            Just(KycTier::Business),
+        ],
+        amounts in prop::collection::vec(1i128..=10_000_000_000_000i128, 1..=50),
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+
+        let payment_contract = env.register(crate::PaymentProcessor, ());
+        let registry_contract = env.register(crate::merchant_registry::MerchantRegistry, ());
+
+        let payment_client = PaymentProcessorClient::new(&env, &payment_contract);
+        let registry_client = crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_contract);
+
+        let admin = Address::generate(&env);
+        payment_client.initialize_payment_processor(&admin);
+        registry_client.initialize(&admin);
+        payment_client.set_merchant_registry_address(&admin, &registry_contract);
+
+        let merchant = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+        payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+        registry_client.register_merchant(
+            &merchant,
+            &String::from_str(&env, "Prop Merchant"),
+            &String::from_str(&env, "USDC"),
+            &None::<Address>,
+            &None::<String>,
+            &crate::MaybeFeeConfig::None,
+        );
+
+        registry_client.set_kyc_tier_with_signature(
+            &admin,
+            &merchant,
+            &tier,
+            &Some(String::from_str(&env, "sig")),
+        );
+        payment_client.set_merchant_rate_limit(&admin, &merchant, &60u64, &100u32);
+
+        let cap = match &tier {
+            KycTier::Unverified => TIER_CAP_UNVERIFIED,
+            KycTier::Basic => TIER_CAP_BASIC,
+            KycTier::Full => TIER_CAP_FULL,
+            KycTier::Business => TIER_CAP_BUSINESS,
+        };
+
+        let deposit = Address::generate(&env);
+        let mut running_total: i128 = 0;
+
+        for (idx, &generated_amount) in amounts.iter().enumerate() {
+            // Unverified merchants have a separate $100 per-payment ceiling.
+            // Keep every generated payment valid so this property isolates the
+            // monthly-volume invariant rather than the per-payment limit.
+            let amount = match &tier {
+                KycTier::Unverified => generated_amount.min(1_000_000_000),
+                KycTier::Basic => generated_amount.min(TIER_CAP_BASIC),
+                KycTier::Full => generated_amount.min(TIER_CAP_FULL),
+                KycTier::Business => generated_amount,
+            };
+            let payment_id = format_id(
+                &env,
+                "prop_cap_",
+                nonce.wrapping_add(idx as u64),
+            );
+            // Payment creation requires a verified merchant. Create while the
+            // merchant is Basic, then restore the generated tier before the
+            // verification path applies its monthly cap.
+            registry_client.set_kyc_tier_with_signature(
+                &admin,
+                &merchant,
+                &KycTier::Basic,
+                &Some(String::from_str(&env, "sig")),
+            );
+            payment_client.create_payment(&crate::CreatePaymentArgs {
+                payment_id: payment_id.clone(),
+                merchant_id: merchant.clone(),
+                payer: None,
+                amount,
+                currency: Symbol::new(&env, "USDC"),
+                deposit_address: deposit.clone(),
+                expires_at: Some(env.ledger().timestamp() + 3600),
+                duration_secs: None,
+                memo: None,
+                memo_type: None,
+                token_address: None,
+                client_token: None,
+                metadata_hash: None,
+                metadata: None,
+                fee_waiver_code: None,
+                retry_of_payment_id: None,
+                payer_muxed_id: None,
+            });
+            registry_client.set_kyc_tier_with_signature(
+                &admin,
+                &merchant,
+                &tier,
+                &Some(String::from_str(&env, "sig")),
+            );
+
+            let result = payment_client.try_verify_payment(
+                &oracle,
+                &payment_id,
+                &BytesN::<32>::random(&env),
+                &Address::generate(&env),
+                &amount,
+                &None,
+            );
+
+            match result {
+                Ok(_) => {
+                    running_total = running_total.saturating_add(amount);
+                    prop_assert!(running_total <= cap,
+                        "tier {:?} exceeded cap {} with running total {} after amount {}",
+                        tier,
+                        cap,
+                        running_total,
+                        amount,
+                    );
+                }
+                Err(Ok(Error::TierVolumeLimitExceeded)) => {
+                    prop_assert!(
+                        running_total + amount > cap,
+                        "cap exceeded should be rejected only when {} + {} > {} (running_total={})",
+                        running_total,
+                        amount,
+                        cap,
+                        running_total,
+                    );
+                }
+                other => prop_assert!(false, "unexpected verification result for {:?}: {:?}", tier, other),
+            }
+        }
     }
 
     /// Issue #681: Subscription cannot be charged before the billing interval has elapsed.
