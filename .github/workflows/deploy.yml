@@ -136,7 +136,7 @@ jobs:
           echo "fx_oracle_id=$FX_ORACLE_ID"                 >> $GITHUB_OUTPUT
 
       - name: Upload .env.testnet artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: env-testnet-${{ github.sha }}
           path: .env.testnet
@@ -217,7 +217,7 @@ jobs:
           echo "======================================="
 
       - name: Upload deployment artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deployment-${{ inputs.environment_name }}-${{ github.sha }}
           path: target/wasm32-unknown-unknown/release/fluxapay.wasm
