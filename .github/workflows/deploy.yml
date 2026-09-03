@@ -180,7 +180,7 @@ jobs:
           npm publish --access public
 
       - name: Commit generated bindings
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: "chore: update contract bindings [${{ inputs.environment_name }}]"
           file_pattern: 'bindings/*'
