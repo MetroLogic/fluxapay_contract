@@ -41,7 +41,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache Stellar CLI
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: cache-stellar-cli
         with:
           path: ~/.cargo/bin/stellar
@@ -63,7 +63,7 @@ jobs:
         run: stellar --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
