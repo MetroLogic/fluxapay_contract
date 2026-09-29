@@ -283,7 +283,8 @@ Emitted by `expire_link` when an expired, still-active link is auto-deactivated.
 
 ### LINK / VIEWED
 
-Emitted by `record_link_view`.
+Emitted by `record_link_view`. The viewer must authorize the call and pass the
+per-viewer rate limit before the event is emitted.
 
 | Field | Type | Description |
 |-------|------|-------------|

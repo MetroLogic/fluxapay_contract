@@ -2785,13 +2785,16 @@ export class FluxapayClient {
   }
 
   /**
-   * Record a view of a payment link (permissionless).
+   * Record a view of a payment link.
    * Maps to `PaymentLinkManager.record_link_view` on-chain.
+   * The viewer must authorize (sign) the transaction; calls are rate-limited
+   * per viewer by the contract.
+   * @param viewer - The viewer's Stellar address
    * @param linkId - The payment link ID
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
-  async recordLinkView(linkId: string): Promise<void> {
-    return this.getPaymentLinkManager().recordLinkView(linkId);
+  async recordLinkView(viewer: string, linkId: string): Promise<void> {
+    return this.getPaymentLinkManager().recordLinkView(viewer, linkId);
   }
 
   /**

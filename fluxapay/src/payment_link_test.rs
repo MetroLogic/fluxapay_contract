@@ -887,6 +887,7 @@ fn test_record_link_view_increments_view_count() {
     env.mock_all_auths();
     let (_merchant, client) = setup_payment_link(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "view_link");
     client.create_link(
         &_merchant,
@@ -907,9 +908,9 @@ fn test_record_link_view_increments_view_count() {
     assert_eq!(link.view_count, 0);
 
     // Record 3 views
-    client.record_link_view(&link_id);
-    client.record_link_view(&link_id);
-    client.record_link_view(&link_id);
+    client.record_link_view(&viewer, &link_id);
+    client.record_link_view(&viewer, &link_id);
+    client.record_link_view(&viewer, &link_id);
 
     let link = client.get_link(&link_id);
     assert_eq!(link.view_count, 3);
@@ -961,6 +962,7 @@ fn test_get_link_analytics_conversion_rate() {
     let (merchant, client) = setup_payment_link(&env);
     let payer = Address::generate(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "analytics_link");
     let amount = 1000i128;
     client.create_link(
@@ -979,7 +981,7 @@ fn test_get_link_analytics_conversion_rate() {
 
     // Record 10 views
     for _ in 0..10 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
     }
 
     // Use the link once (1 conversion out of 10 views = 10%)
@@ -1035,6 +1037,7 @@ fn test_get_link_analytics_full_conversion() {
     let (merchant, client) = setup_payment_link(&env);
     let payer = Address::generate(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "full_conv_link");
     let amount = 1000i128;
     client.create_link(
@@ -1053,7 +1056,7 @@ fn test_get_link_analytics_full_conversion() {
 
     // 4 views, 4 uses → 100% conversion = 10000 bps
     for _ in 0..4 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
         let p = Address::generate(&env);
         client.use_link(&p, &link_id, &amount, &None);
     }
@@ -1072,6 +1075,7 @@ fn test_record_link_view_rejects_inactive_link() {
     env.mock_all_auths();
     let (merchant, client) = setup_payment_link(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "inactive_view_link");
     client.create_link(
         &merchant,
@@ -1089,7 +1093,39 @@ fn test_record_link_view_rejects_inactive_link() {
 
     client.deactivate_link(&merchant, &link_id);
     // Should fail because the link is no longer active
-    client.record_link_view(&link_id);
+    client.record_link_view(&viewer, &link_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_record_link_view_enforces_per_viewer_rate_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_link(&env);
+    client.initialize(&admin);
+    // Allow only 2 views per 60s for this viewer.
+    client.set_link_view_rate_limit(&admin, &2u32, &60u64);
+
+    let viewer = Address::generate(&env);
+    let link_id = String::from_str(&env, "rate_limited_view_link");
+    client.create_link(
+        &admin,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Rate Limited View"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    client.record_link_view(&viewer, &link_id);
+    client.record_link_view(&viewer, &link_id);
+    // Third view within the same window must be rejected.
+    client.record_link_view(&viewer, &link_id);
 }
 
 #[test]
@@ -1618,6 +1654,7 @@ fn test_link_analytics_revenue_and_conversion_rate() {
     let (merchant, client) = setup_payment_link(&env);
     let payer1 = Address::generate(&env);
     let payer2 = Address::generate(&env);
+    let viewer = Address::generate(&env);
 
     let link_id = String::from_str(&env, "revenue_link");
     client.create_link(
@@ -1636,7 +1673,7 @@ fn test_link_analytics_revenue_and_conversion_rate() {
 
     // Record 3 views
     for _ in 0..3 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
     }
 
     // Record 2 uses at 100 and 200 USDC
@@ -1701,6 +1738,7 @@ fn test_link_analytics_zero_uses() {
     env.mock_all_auths();
     let (merchant, client) = setup_payment_link(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "zero_uses_link");
     client.create_link(
         &merchant,
@@ -1718,7 +1756,7 @@ fn test_link_analytics_zero_uses() {
 
     // Record views but no uses
     for _ in 0..5 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
     }
 
     let analytics = client.get_link_analytics(&link_id).unwrap();
