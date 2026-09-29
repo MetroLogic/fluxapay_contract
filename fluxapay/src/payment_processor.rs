@@ -4,7 +4,6 @@ use crate::access_control::{
     role_admin, role_arbitrator, role_merchant, role_oracle, role_settlement_operator,
     AccessControl,
 };
-use crate::dex_router::{DexRouter, DexRouterClient};
 use crate::utils::{self, format_id, is_valid_cid, validate_id, validate_ipfs_multihash};
 use crate::*;
 use soroban_sdk::{
@@ -268,120 +267,6 @@ impl PaymentProcessor {
             .persistent()
             .get(&DataKey::AutoRefundOverpayment)
             .unwrap_or(true)
-    }
-
-    /// Admin: configure the DexRouter contract used for exact-output swap
-    /// settlement in `pay_charge_with_swap`.
-    pub fn set_dex_router(env: Env, admin: Address, dex_router: Address) -> Result<(), Error> {
-        admin.require_auth();
-
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::DexRouterAddress, &dex_router);
-        Ok(())
-    }
-
-    /// Public read of the configured DexRouter address, if any.
-    pub fn get_dex_router(env: Env) -> Option<Address> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::DexRouterAddress)
-    }
-
-    /// Settle a merchant charge by routing a customer-supplied payment token
-    /// through the configured DexRouter using an exact-output swap.
-    ///
-    /// The merchant receives exactly `amount_out` of `token_out`; any surplus
-    /// of `token_in` supplied by the customer is refunded atomically by the
-    /// router. The payment state machine is advanced to `Paid` on success and
-    /// a `SWAP_EXACT_SETTLED` event is emitted with hop paths, actual spend,
-    /// and delivered amount.
-    pub fn pay_charge_with_swap(
-        env: Env,
-        payer: Address,
-        payment_id: BytesN<32>,
-        token_in: Address,
-        token_out: Address,
-        amount_out: i128,
-        max_amount_in: i128,
-        path: Vec<Address>,
-        deadline: u64,
-    ) -> Result<i128, Error> {
-        payer.require_auth();
-
-        if Self::is_paused(env.clone()) {
-            return Err(Error::ContractPaused);
-        }
-        if amount_out <= 0 || max_amount_in <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-        if path.len() < 2 {
-            return Err(Error::InvalidPath);
-        }
-
-        let dex_router: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::DexRouterAddress)
-            .ok_or(Error::Unauthorized)?;
-
-        let mut payment: Payment = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Payment(payment_id.clone()))
-            .ok_or(Error::PaymentNotFound)?;
-
-        if payment.status != PaymentStatus::Pending {
-            return Err(Error::InvalidStatus);
-        }
-
-        let router = DexRouterClient::new(&env, &dex_router);
-        let amount_in = router.swap_tokens_for_exact_tokens(
-            &payer,
-            &token_in,
-            &token_out,
-            &amount_out,
-            &max_amount_in,
-            &path,
-            &payer,
-            &deadline,
-        );
-
-        // The router delivers `amount_out` of `token_out` to the merchant
-        // (payment.recipient). Verify the merchant balance delta matches the
-        // exact output guarantee before advancing state.
-        let merchant_balance = token::Client::new(&env, &token_out).balance(&payment.recipient);
-        if merchant_balance < amount_out {
-            return Err(Error::InsufficientBalance);
-        }
-
-        payment.status = PaymentStatus::Paid;
-        payment.paid_amount = amount_out;
-        payment.paid_at = env.ledger().timestamp();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
-
-        events::publish(
-            &env,
-            Symbol::new(&env, "SWAP_EXACT_SETTLED"),
-            map![
-                &env,
-                (Symbol::new(&env, "payment_id"), payment_id.clone()),
-                (Symbol::new(&env, "payer"), payer.clone()),
-                (Symbol::new(&env, "token_in"), token_in.clone()),
-                (Symbol::new(&env, "token_out"), token_out.clone()),
-                (Symbol::new(&env, "amount_in"), amount_in),
-                (Symbol::new(&env, "amount_out"), amount_out),
-                (Symbol::new(&env, "path"), path.clone()),
-            ],
-        );
-
-        Ok(amount_in)
     }
 
     /// Return the accumulated treasury balance collected via settlement fees
@@ -2277,6 +2162,121 @@ impl PaymentProcessor {
         );
 
         Ok(payment_ids)
+    }
+
+    /// Issue: exact-output multi-asset payment routing.
+    ///
+    /// Settles a pending `PaymentCharge` by routing the payer's input token
+    /// through the on-chain `DexRouter` using `swap_tokens_for_exact_tokens`.
+    /// The merchant receives exactly `payment.amount` of the settlement token,
+    /// the payer is charged only the computed `amount_in` (surplus refunded
+    /// atomically by the router), and the payment state machine is advanced to
+    /// `Confirmed` with the swap metadata recorded.
+    ///
+    /// # Arguments
+    /// * `payer` – Customer funding the swap; must authorize the call.
+    /// * `payment_id` – Target `PaymentCharge` (must be `Pending`).
+    /// * `dex_router` – Address of the deployed `DexRouter` contract.
+    /// * `path` – Hop path, e.g. `[XLM, USDC]` or `[BTC, XLM, USDC]`.
+    /// * `max_amount_in` – Slippage cap; reverts if the required input exceeds it.
+    /// * `deadline` – Unix timestamp after which the swap reverts.
+    #[allow(deprecated)]
+    pub fn pay_charge_with_swap(
+        env: Env,
+        payer: Address,
+        payment_id: String,
+        dex_router: Address,
+        path: Vec<Address>,
+        max_amount_in: i128,
+        deadline: u64,
+    ) -> Result<PaymentStatus, Error> {
+        Self::require_not_paused(&env)?;
+        payer.require_auth();
+        Self::require_not_blacklisted(&env, &payer)?;
+
+        if max_amount_in <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidExpiry);
+        }
+        if path.len() < 2 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut payment = Self::get_payment_internal(&env, &payment_id)?;
+        Self::require_not_blacklisted(&env, &payment.merchant_id)?;
+
+        if payment.status != PaymentStatus::Pending {
+            return Err(Error::PaymentAlreadyProcessed);
+        }
+        if env.ledger().timestamp() > payment.expires_at {
+            return Err(Error::PaymentExpired);
+        }
+
+        // The settlement token is the payment's token_address (or the default USDC).
+        let settlement_token = payment.token_address.clone().unwrap_or_else(|| {
+            env.storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::UsdcToken)
+                .unwrap_or_else(|| Address::from_str(&env, ZERO_CONTRACT_STRKEY))
+        });
+
+        // The final hop must deliver the settlement token the merchant expects.
+        let last_hop = path.get(path.len() - 1).ok_or(Error::InvalidAmount)?;
+        if last_hop != settlement_token {
+            return Err(Error::UnsupportedToken);
+        }
+
+        let router_client = crate::dex_router::DexRouterClient::new(&env, &dex_router);
+        let amounts = match router_client.try_swap_tokens_for_exact_tokens(
+            &payer,
+            &payment.amount,
+            &max_amount_in,
+            &path,
+            &payment.deposit_address,
+            &deadline,
+        ) {
+            Ok(Ok(amounts)) => amounts,
+            _ => return Err(Error::SwapFailed),
+        };
+
+        // `amounts[0]` is the actual input consumed; the router refunds any surplus.
+        let amount_in = amounts.get(0).ok_or(Error::SwapFailed)?;
+        if amount_in > max_amount_in {
+            return Err(Error::SlippageExceeded);
+        }
+
+        // Advance the payment state machine: exact output delivered.
+        payment.status = PaymentStatus::Confirmed;
+        payment.payer_address = Some(payer.clone());
+        payment.amount_received = Some(payment.amount);
+        payment.confirmed_at = Some(env.ledger().timestamp());
+        payment.swap_path = Some(path.clone());
+        payment.original_token = path.get(0);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id_to_key(&env, &payment_id)), &payment);
+        Self::record_payment_status(&env, &payment);
+        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "SWAP_EXACT_SETTLED"),
+                Symbol::new(&env, "SETTLED"),
+            ),
+            (
+                payment_id.clone(),
+                payer.clone(),
+                payment.merchant_id.clone(),
+                path.clone(),
+                amount_in,
+                payment.amount,
+            ),
+        );
+
+        Ok(payment.status)
     }
 
     #[allow(deprecated)]

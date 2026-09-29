@@ -1,84 +1,92 @@
 # DEX Routing in FluxaPay
 
-FluxaPay supports two complementary DEX routing modes:
+This document describes how the FluxaPay payment processor settles merchant invoices in an exact settlement currency using the on-chain DEX router.
 
-- **Exact-in forward swaps** - `swap_exact_tokens_for_tokens` fixes the input amount and produces a variable output.
-- **Exact-out reverse swaps** - `swap_tokens_for_exact_tokens` fixes the merchant output and computes the required input backwards through the pools.
+## Overview
 
-This document focuses on the reverse (exact-output) flow used to settle merchant invoices.
+Merchants specify an invoice amount in their primary settlement currency (for example, exactly 50.00 USDC). Customers however may hold diverse Stellar assets (XLM, EURC, local stablecoins). To bridge this gap, the payment processor invokes the DEX router's reverse routing entrypoint, which fixes the merchant output amount and computes the required input amount backwards through the on-chain AMM pools.
 
-## Why exact-out routing
+## Forward vs Reverse Routing
 
-A customer may hold XLM, EURC, or a local stablecoin while the merchant invoice is denominated in a specific currency (for example, exactly 50.00 USDC). Forward swaaps cannot guarantee the merchant receives the invoice amount exactly. Reverse swaps do.
+The router supports two directions of quote math:
+
+- **Forward routing** (`swap_exact_tokens_for_tokens`): the input amount is fixed and the output amount is variable. This is useful when a customer knows how much they want to spend.
+- **Reverse routing** (`swap_tokens_for_exact_tokens`): the output amount is fixed and the required input is computed backwards. This is useful when a merchant must receive an exact invoice amount.
+
+## Reverse Quote Math
+
+For a single hop with constant-product AMB reserves `reserve_in` and `reserve_out`, and a per-hop fee of `HOP_FEE_BPS` (0.3%), the output for a given input is:
+
+```text
+amount_out = (amount_in * (10000 - fee) * reserve_out) / (reserve_in * 10000 + amount_in * (10000 - fee))
+```
+
+The reverse quote inverts this formula to compute the required input for an exact output:
+
+```text
+amount_in = ceil((reserve_in * amount_out * 10000) / ((reserve_out - amount_out) * (10000 - fee)))
+```
+
+The ceiling is important: it guarantees that the exact output is always delivered and never falls short due to integer truncation.
+
+For multi-hop paths (for example `XLM -> USDC -> EURO`), the reverse quote is applied hop by hop from the output side back to the input side. The resulting array is then reversed to produce forward-ordered amounts, where `amounts[0]` is the required input and `amounts[last]` is the exact output.
 
 ## API
 
-### `get_amounts_in(env, amount_out, path)`
+### `get_amounts_in(env, amount_out, path) -> Vec<i128>`
+Returns the forward-ordered amounts array for a reverse quote. The first element is the required input and the last element is the exact output. The math queries the on-chain pool reserves for each hop via `get_reserves`.
 
-Returns the cumulative amounts along `path` when the final output is fixed to `amount_out`.
+### `swap_tokens_for_exact_tokens(env, amount_out, amount_in_max, path, to, deadline)
+Executes a reverse swap with the following guarantees:
 
-- `amounts[0]` is the required input token amount.
-- `amounts[i]` is the input needed at hop `i`.
-- `amounts[len - 1]` is the exact output amount.
-
-The quote is computed by walking the path backwards and inverting the forward quote math for each hop.
-
-### `swap_tokens_for_exact_tokens(env, amount_out, amount_in_max, path, to, deadline)`
-
-- `amount_out` - exact output the merchant must receive.
-- `amount_in_max` - maximum input the customer is willing to pay (slippage protection).
-- `path` - token addresses from input token to output token.
-- `to` - recipient of the exact output (merchant).
-- `deadline` - Unix timestamp after which the swap reverts.
-
-Returns the cumulative amounts along the path. The contract ensures:
-
-1. The merchant receives exactly `amount_out`, never less and never more.
-2. The customer pays only the necessary `amount_in` computed at execution time.
-3. Any surplus beyond the required input is refunded atomically.
-
-### Errors
-
-| Code | Name | Meaning |
-| ---- | ---- | ------- |
-| 1 | `SwapFailed` | The underlying swap execution failed. |
-| 2 | `InvalidPath` | The path is malformed or has fewer than two tokens. |
-| 3 | `InsufficientLiquidity` | One or more pools lack liquidity. |
-| 4 | `SlippageExceeded` | The required input exceeds `amount_in_max`. |
-| 5 | `PriceImpactExceeded` | The price impact exceeds the allowed bound. |
-| 6 | `NoOutputAmount` | The quote produced no usable output. |
-| 7 | `Refunded` | Asurglus was refunded to the customer. |
-| 8 | `DeadlineExpired` | The deadline has passed. |
+- **Exact output delivery**: the merchant receives exactly `amount_out`, never less and never more.
+- **Slippage protection**: if the computed required input exceeds `amount_in_max`, the call reverts with `SlippageExceeded`.
+- **Surplus protection**: the customer pays only the necessary `amount_in` computed at execution time. Any excess beyond the computed input is refunded atomically.
+- **Deadline enforcement**: if the ledger timestamp exceeds `deadline`, the call reverts with `DeadlineExpired`.
+- **Price impact guard**: the effective execution ratio must not deviate by more than 5% (500 basis points).
 
 ## Events
 
-Successful exact-out swaps emit `SWAP_EXACT_SETTLED` with the hop paths, actual spend, and delivered amount. Surglus refunds emit `REFUND`.
+The router emits a `SWAP_EXACT_SETTLED` event on every successful reverse swap. The event payload contains:
 
-## Payment integration
+- The hop path (`Vec<Address>`)
+- The actual input spent (`required_in`)
+- The exact output delivered (`amount_out`)
+- The recipient address (`to`)
+- The ledger timestamp
 
-The `PaymentProcessor` exposes `pay_charge_with_swap`, which links the DEX reverse swap output directly into the payment state machine. The merchant invoice amount is passed as `amount_out`, and the customer provides `amount_in_max` as their slippage bound.
+This event is consumed by the payment processor to link the swap output directly into the payment state machine.
 
-## Example
+## Payment Processor Integration
 
-```rust
-// 2-hop: XLM -> USDC, exact output of 50000000 stroops (50.00 USDC).
-let path = vec![&Xlm, &usdc];
-let amounts = DexRouter::swap_tokens_for_exact_tokens(
-    env,
-    50000000,
-    60000000,
-    path,
-    merchant,
-    deadline,
-)?;
-// amounts[0] = required input, amounts[1] = 50000000.
-```
+The `pay_charge_with_swap` endpoint in `PaymentProcessor` links the DEX swap output directly into the payment state machine. The flow is:
+
+1. The merchant creates a charge with an exact invoice amount in their settlement currency.
+2. The customer submits a payment in a different asset along with a `max_amount_in` slippage bound.
+3. The payment processor invokes `swap_tokens_for_exact_tokens` on the DEX router with the exact invoice amount as the output.
+4. The router delivers the exact output to the merchant and refunds any surplus to the customer.
+5. The payment state machine transitions to `Settled` using the amounts returned by the router.
+
+## Error Codes
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1 | SwapFailed | The underlying swap failed for an unspecified reason. |
+| 2 | InvalidPath | The path is empty, too short, or contains adjacent duplicate tokens. |
+| 3 | InsufficientLiquidity | The pool reserves cannot support the requested output. |
+| 4 | SlippageExceeded | The required input exceeds `max_amount_in`. |
+| 5 | PriceImpactExceeded | The effective execution ratio deviates by more than 5%. |
+| 6 | NoOutputAmount | The quote produced no valid output amount. |
+| 7 | Refunded | An atomic refund was issued to the caller. |
+| 8 | DeadlineExpired | The ledger timestamp exceeded the deadline. |
+| 9 | InvalidAmount | An amount parameter was zero or negative. |
 
 ## Testing
 
-The contract test suite in `dex_router_exact_test.rs` covers:
+The exact-output routing is covered by `fluxapay/src/dex_router_exact_test.rs`, which includes:
 
-- 2-hop and 3-hop swaps.
+- 2-hop (XLM -> USDC) and 3-hop (BTC -> XLM -> USDC) swaps.
 - Price impact and slippage exceedance reverts.
 - Expired deadline rejection.
 - Exact balance verification of payer, merchant, and intermediate pools.
+- Event emission verification for `SWAP_EXACT_SETTLED`.

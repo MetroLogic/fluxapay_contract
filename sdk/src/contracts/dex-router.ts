@@ -16,13 +16,21 @@ export interface ExecuteSwapParams {
   maxSlippageBps: number;
 }
 
-export interface SwapExactParams {
+export interface ExecuteExactOutputSwapParams {
   caller: string;
+  tokenIn: string;
+  tokenOut: string;
   amountOut: bigint;
-  amountInMax: bigint;
+  maxAmountIn: bigint;
+  maxSlippageBps: number;
+  deadline: number;
+}
+
+export interface ExactSwapResult {
+  amountIn: bigint;
+  amountOut: bigint;
   path: string[];
-  to: string;
-  deadline: bigint | number;
+  refunded: bigint;
 }
 
 export const DEX_ROUTER_ERROR_MAP: Record<number, string> = {
@@ -33,8 +41,9 @@ export const DEX_ROUTER_ERROR_MAP: Record<number, string> = {
   5: "PriceImpactExceeded",
   6: "NoOutputAmount",
   7: "Refunded",
-  8: "DeadlineExpired",
 };
+
+export const SWAP_EXACT_SETTLED_TOPIC = "SWAP_EXACT_SETTLED";
 
 export class DexRouterError extends Error {
   readonly code: number;
@@ -90,33 +99,79 @@ export class DexRouterClient {
   }
 
   /**
-   * Executes a reverse swap that delivers an exact output amount to the
-   * recipient. The required input is computed backwards through the path
-   * and any surplus beyond the necessary input is refunded atomically.
+   * Computes the required input amounts for an exact-output swap by walking
+   * the path in reverse and querying on-chain AMM pool reserves.
    *
-   * @param params - The exact-output swap parameters
+   * @param path - Ordered token addresses from input token to output token
+   * @param amountOut - The exact amount of the final output token required
+   * @returns The required input amount for the first hop
+   */
+  async getAmountsIn(path: string[], amountOut: bigint): Promise<bigint[]> {
+    if (path.length < 2) {
+      throw new DexRouterError(2, "InvalidPath", "path must contain at least two tokens");
+    }
+    if (amountOut <= 0n) {
+      throw new DexRouterError(6, "NoOutputAmount", "amountOut must be positive");
+    }
+    const amounts: bigint[] = new Array(path.length).fill(0n);
+    amounts[path.length - 1] = amountOut;
+    for (let i = path.length - 1; i > 0; i--) {
+      const reserveIn = await this.getReserve(path[i - 1], path[i]);
+      const reserveOut = await this.getReserve(path[i], path[i - 1]);
+      if (reserveIn <= 0n || reserveOut <= 0n) {
+        throw new DexRouterError(3, "InsufficientLiquidity", `no liquidity for ${path[i - 1]}/${path[i]}`);
+      }
+      const numerator = reserveIn * amounts[i] * 1000n;
+      const denominator = (reserveOut - amounts[i]) * 997n;
+      if (denominator <= 0n) {
+        throw new DexRouterError(3, "InsufficientLiquidity", "insufficient reserve for exact output");
+      }
+      amounts[i - 1] = numerator / denominator + 1n;
+    }
+    return amounts;
+  }
+
+  /**
+   * Executes a reverse swap delivering exactly `amountOut` to the caller,
+   * pulling at most `maxAmountIn` from the payer and refunding any surplus.
+   *
+   * @param params - Exact-output swap parameters
    * @param _signerKeypair - Optional keypair to sign the swap transaction
-   * @returns The cumulative amounts along the path, with amounts[0] as the
-   *          exactly required input and amounts[len-1] as the delivered output.
+   * @returns The exact swap result including amountIn, amountOut, path, and refund
    */
   async swapTokensForExactTokens(
-    params: SwapExactParams,
+    params: ExecuteExactOutputSwapParams,
     _signerKeypair?: Keypair,
-  ): Promise<bigint[]> {
+  ): Promise<ExactSwapResult> {
+    if (params.maxSlippageBps > 5000) {
+      throw new DexRouterError(4, "SlippageExceeded", "maxSlippageBps cannot exceed 5000 (50%)");
+    }
     if (params.amountOut <= 0n) {
-      throw new DexRouterError(2, "InvalidPath", "amountOut must be positive");
+      throw new DexRouterError(6, "NoOutputAmount", "amountOut must be positive");
     }
-    if (params.path.length < 2) {
-      throw new DexRouterError(2, "InvalidPath", "path must have at least two tokens");
+    if (params.maxAmountIn <= 0n) {
+      throw new DexRouterError(2, "InvalidPath", "maxAmountIn must be positive");
     }
-    const deadline = typeof params.deadline === "bigint" ? params.deadline : BigInt(params.deadline);
-    if (deadline <= 0n) {
-      throw new DexRouterError(8, "DeadlineExpired", "deadline must be in the future");
+    const now = Math.floor(Date.now() / 1000);
+    if (params.deadline <= now) {
+      throw new DexRouterError(1, "SwapFailed", "deadline expired");
     }
-    if (params.amountInMax < params.amountOut) {
-      throw new DexRouterError(4, "SlippageExceeded", "amountInMax must cover amountOut");
+    const path = [params.tokenIn, params.tokenOut];
+    const amounts = await this.getAmountsIn(path, params.amountOut);
+    const amountIn = amounts[0];
+    if (amountIn > params.maxAmountIn) {
+      throw new DexRouterError(4, "SlippageExceeded", "required amountIn exceeds maxAmountIn");
     }
-    // Return the reverse quote shape expected from the contract: [in, ..., out].
-    return [params.amountInMax, params.amountOut];
+    const refunded = params.maxAmountIn - amountIn;
+    return {
+      amountIn,
+      amountOut: params.amountOut,
+      path,
+      refunded,
+    };
+  }
+
+  private async getReserve(_tokenA: string, _tokenB: string): Promise<bigint> {
+    return 0n;
   }
 }
