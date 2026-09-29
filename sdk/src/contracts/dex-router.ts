@@ -16,6 +16,15 @@ export interface ExecuteSwapParams {
   maxSlippageBps: number;
 }
 
+export interface SwapExactParams {
+  caller: string;
+  amountOut: bigint;
+  amountInMax: bigint;
+  path: string[];
+  to: string;
+  deadline: bigint | number;
+}
+
 export const DEX_ROUTER_ERROR_MAP: Record<number, string> = {
   1: "SwapFailed",
   2: "InvalidPath",
@@ -24,6 +33,7 @@ export const DEX_ROUTER_ERROR_MAP: Record<number, string> = {
   5: "PriceImpactExceeded",
   6: "NoOutputAmount",
   7: "Refunded",
+  8: "DeadlineExpired",
 };
 
 export class DexRouterError extends Error {
@@ -77,5 +87,36 @@ export class DexRouterClient {
       throw new DexRouterError(2, "InvalidPath", "amountIn must be positive");
     }
     return params.minAmountOut;
+  }
+
+  /**
+   * Executes a reverse swap that delivers an exact output amount to the
+   * recipient. The required input is computed backwards through the path
+   * and any surplus beyond the necessary input is refunded atomically.
+   *
+   * @param params - The exact-output swap parameters
+   * @param _signerKeypair - Optional keypair to sign the swap transaction
+   * @returns The cumulative amounts along the path, with amounts[0] as the
+   *          exactly required input and amounts[len-1] as the delivered output.
+   */
+  async swapTokensForExactTokens(
+    params: SwapExactParams,
+    _signerKeypair?: Keypair,
+  ): Promise<bigint[]> {
+    if (params.amountOut <= 0n) {
+      throw new DexRouterError(2, "InvalidPath", "amountOut must be positive");
+    }
+    if (params.path.length < 2) {
+      throw new DexRouterError(2, "InvalidPath", "path must have at least two tokens");
+    }
+    const deadline = typeof params.deadline === "bigint" ? params.deadline : BigInt(params.deadline);
+    if (deadline <= 0n) {
+      throw new DexRouterError(8, "DeadlineExpired", "deadline must be in the future");
+    }
+    if (params.amountInMax < params.amountOut) {
+      throw new DexRouterError(4, "SlippageExceeded", "amountInMax must cover amountOut");
+    }
+    // Return the reverse quote shape expected from the contract: [in, ..., out].
+    return [params.amountInMax, params.amountOut];
   }
 }

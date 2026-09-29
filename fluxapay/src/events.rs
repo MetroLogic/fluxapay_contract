@@ -712,6 +712,56 @@ pub struct TreasuryWithdrawn {
     pub recipient: Address,
 }
 
+/// Emitted when a treasury withdrawal proposal is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalProposed {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub proposer: Address,
+    pub earliest_execution_time: u64,
+}
+
+/// Emitted when a treasury withdrawal proposal receives an approval.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalApproved {
+    pub proposal_id: String,
+    pub approver: Address,
+    pub approvals_count: u32,
+    pub required_approvals: u32,
+}
+
+/// Emitted when a treasury withdrawal proposal is executed.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalExecuted {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub executor: Address,
+}
+
+/// Emitted when a treasury withdrawal proposal is cancelled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalCancelled {
+    pub proposal_id: String,
+    pub canceller: Address,
+}
+
+/// Emitted when treasury multisig configuration is updated.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryMultisigConfigured {
+    pub required_approvals: u32,
+    pub min_delay_secs: u64,
+    pub max_delay_secs: u64,
+}
+
 // ============================================================================
 // Token Events
 // ============================================================================
@@ -789,6 +839,21 @@ pub struct SwapExecuted {
 pub struct SwapRefundCaller {
     pub recipient: Address,
     pub amount: i128,
+}
+
+/// Emitted when a reverse (exact-output) swap settles a payment charge.
+///
+/// Contains the hop path taken through the AMM pools, the actual amount of
+/// input tokens spent by the payer, and the exact amount of output tokens
+/// delivered to the merchant.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SwapExactSettled {
+    pub payment_id: String,
+    pub merchant_id: Address,
+    pub hops: soroban_sdk::Vec<Address>,
+    pub amount_in: i128,
+    pub amount_out: i128,
 }
 
 // ============================================================================
