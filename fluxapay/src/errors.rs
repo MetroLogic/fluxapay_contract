@@ -35,37 +35,37 @@ pub enum MerkleError {
     NotFound,
     /// The provided inclusion proof is invalid or does not match the committed root.
     InvalidProof,
-    /// The leaf at the given index has already been claimed.
+    /// The recipient has already claimed their allocation.
     AlreadyClaimed,
     /// The distribution has expired and cannot be claimed.
     Expired,
+    /// The distribution has been defunded and cannot be claimed.
+    Defunded,
     /// The distribution has not yet expired and cannot be defunded.
     NotExpired,
-    /// The distribution has already been defunded.
-    AlreadyDefunded,
-    /// The provided leaf index is out of output range for the tree.
+    /// The provided longitude or index is out of bounds for the distribution.
     InvalidIndex,
-    /// The provided leaf data does not match the committed leaf hash.
-    InvalidLeaf,
-    /// The distribution has no remaining unclaimed balance to defund.
-    NothingToDefund,
+    /// The provided amount is invalid (e.g. zero or negative).
+    InvalidAmount,
+    /// The distribution has already been created for this identifier.
+    AlreadyExists,
     /// A generic storage or persistence failure.
     StorageError(String),
 }
 
 impl fmt::Display for MerkleError {
-    fn fmt(&self, f: &mut fmt::Formatter<_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MerkleError::NotFound => write!(f, "merkle distribution not found"),
             MerkleError::InvalidProof => write!(f, "invalid merkle inclusion proof"),
-            MerkleError::AlreadyClaimed => write!(f, "leaf has already been claimed"),
+            MerkleError::AlreadyClaimed => write!(f, "allocation already claimed"),
             MerkleError::Expired => write!(f, "merkle distribution has expired"),
+            MerkleError::Defunded => write!(f, "merkle distribution has been defunded"),
             MerkleError::NotExpired => write!(f, "merkle distribution has not expired"),
-            MerkleError::AlreadyDefunded => write!(f, "merkle distribution has already been defunded"),
-            MerkleError::InvalidIndex => write!(f, "leaf index is out of range"),
-            MerkleError::InvalidLeaf => write!(f, "leaf data does not match committed hash"),
-            MerkleError::NothingToDefund => write!(f, "no unclaimed balance to defund"),
-            MerkleError::StorageError(msg) => write!(f, "merkle storage error: {msg}"),
+            MerkleError::InvalidIndex => write!(f, "invalid merkle leaf index"),
+            MerkleError::InvalidAmount => write!(f, "invalid distribution amount"),
+            MerkleError::AlreadyExists => write!(f, "merkle distribution already exists"),
+            MerkleError::StorageError(msg) => write!(f, "storage error: {msg}"),
         }
     }
 }

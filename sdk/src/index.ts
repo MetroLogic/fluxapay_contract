@@ -1,4 +1,3 @@
-
 import {
   Client as ContractClient,
   type Merchant,
@@ -81,14 +80,6 @@ import {
   DEFAULT_RECEIPT_BASE_URL,
   type PaymentReceipt,
 } from "./receipt.js";
-import {
-  MerkleDistributorClient,
-  type MerkleDistributorConfig,
-  type Distribution,
-  type MerkleClaimParams,
-  type MerkleProof,
-  MerkleError,
-} from "./merkle.js";
 
 
 export {
@@ -97,15 +88,6 @@ export {
   type ExecuteSwapParams,
   DexRouterError,
   DEX_ROUTER_ERROR_MAP,
-};
-
-export {
-  MerkleDistributorClient,
-  type MerkleDistributorConfig,
-  type Distribution,
-  type MerkleClaimParams,
-  type MerkleProof,
-  MerkleError,
 };
 
 
@@ -138,10 +120,6 @@ export interface FluxapayConfig {
    * CSV downloads. Falls back to `apiUrl` when omitted.
    */
   indexerUrl?: string;
-   * Issue #839: Base URL of the FluxaPay indexer API. Used by
-   * `convertCurrency`. Falls back to `apiUrl` when unset.
-   */
-  indexerUrl?: string;
    * Issue #816: Stellar secret key (S...) for the FluxaPay platform receipt
    * signing key. Required for `generateReceipt`.
    */
@@ -157,11 +135,6 @@ export interface FluxapayConfig {
    * Default: `https://receipts.fluxapay.io`
    */
   receiptBaseUrl?: string;
-  /**
-   * MerkleDistributor contract ID for batch payment distribution operations.
-   * When omitted, falls back to `FLUXAPAY_CONTRACT_IDS[network].merkleDistributor`.
-   */
-  merkleDistributorContractId?: string;
 }
 
 /**
@@ -485,16 +458,6 @@ export interface CreateStreamParams {
   ratePerSecond: bigint;
   deposit: bigint;
   streamId: string;
-}
-
-/** Parameters for creating a Merkle distribution on-chain. */
-export interface CreateDistributionParams {
-  creator: string;
-  token: string;
-  merkleRoot: Buffer;
-  totalAmount: bigint;
-  expiresAt: bigint;
-  distributionId: string;
 }
 
 function fromContractStream(raw: {
@@ -1092,7 +1055,6 @@ export class FluxapayClient {
   private fxOracleClient?: FxOracleClient;
   private merchantRegistryClient?: MerchantRegistryClient;
   private paymentLinkManagerClient?: PaymentLinkManagerClient;
-  private merkleDistributorClient?: MerkleDistributorClient;
   private sep10Authenticator?: SEP10Authenticator;
   private readonly config: FluxapayConfig;
 
@@ -1176,7 +1138,6 @@ export class FluxapayClient {
     this.fxOracleClient = undefined;
     this.merchantRegistryClient = undefined;
     this.paymentLinkManagerClient = undefined;
-    this.merkleDistributorClient = undefined;
     this.sep10Authenticator = undefined;
   }
 
@@ -3016,76 +2977,6 @@ export class FluxapayClient {
     return this.getPaymentLinkManager().getLinkAnalytics(linkId);
   }
 
-  private getMerkleDistributor(): MerkleDistributorClient {
-    const contractId = resolveContractId(
-      this.config.merkleDistributorContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].merkleDistributor,
-      "merkleDistributorContractId",
-    );
-
-    if (!this.merkleDistributorClient) {
-      const profile = this.networkSwitcher.getProfile();
-      this.merkleDistributorClient = new MerkleDistributorClient({
-        network: profile.environment,
-        rpcUrl: this.config.rpcUrl || profile.rpcUrl,
-        contractId,
-      });
-    }
-
-    return this.merkleDistributorClient;
-  }
-
-  /**
-   * Create a Merkle distribution: commits a 32-byte Merkle root and funds the
-   * total amount in a single transaction. Recipients later claim individually
-   * with O(log N) inclusion proofs.
-   *
-   * @throws {FluxapayError} If the contract operation fails or returns an error.
-   */
-  async createDistribution(params: CreateDistributionParams): Promise<Distribution> {
-    return this.getMerkleDistributor().createDistribution(params);
-  }
-
-  /**
-   * Claim an allocated amount from a Merkle distribution using an inclusion proof.
-   * Reverts with `MerkleError::InvalidProof` if the proof is forged, and with
-   * `MerkleError::AlreadyClaimed` if the leaf/index was already claimed.
-   *
-   * @throws {FluxapayError} If the contract operation fails or returns an error.
-   */
-  async claimDistribution(params: MerkleClaimParams): Promise<bigint> {
-    return this.getMerkleDistributor().claim(params);
-  }
-
-  /**
-   * Read a distribution by ID.
-   * @throws {FluxapayError} If the contract operation fails or returns an error.
-   */
-  async getDistribution(distributionId: string): Promise<Distribution> {
-    return this.getMerkleDistributor().getDistribution(distributionId);
-  }
-
-  /**
-   * Check whether a leaf index has already been claimed for a distribution.
-   * @throws {FluxapayError} If the contract operation fails or returns an error.
-   */
-  async isDistributionClaimed(
-    distributionId: string,
-    index: number,
-  ): Promise<boolean> {
-    return this.getMerkleDistributor().isClaimed(distributionId, index);
-  }
-
-  /**
-   * Defund an expired distribution, returning unclaimed tokens to the creator.
-   * Subsequent claims revert with `MerkleError::DistributionExpired`.
-   *
-   * @throws {FluxapayError} If the contract operation fails or returns an error.
-   */
-  async defundDistribution(creator: string, distributionId: string): Promise<bigint> {
-    return this.getMerkleDistributor().defund(creator, distributionId);
-  }
-
   /**
    * Issue #683: Fetch a health summary of the PaymentProcessor contract.
    * No authentication required — this is a public read endpoint.
@@ -3564,14 +3455,6 @@ export {
   NetworkProfiles,
   type NetworkProfile,
 };
-
-export {
-  MerkleDistributorClient as MerkleClient,
-  type MerkleDistributorConfig as MerkleClientConfig,
-  type Distribution as MerkleDistribution,
-  type MerkleClaimParams as MerkleClaim,
-  type MerkleProof as MerkleProofPath,
-} from "./merkle.js";
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
 export {
