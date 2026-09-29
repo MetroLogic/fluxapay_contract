@@ -712,6 +712,56 @@ pub struct TreasuryWithdrawn {
     pub recipient: Address,
 }
 
+/// Emitted when a treasury withdrawal proposal is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalProposed {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub proposer: Address,
+    pub earliest_execution_time: u64,
+}
+
+/// Emitted when a treasury withdrawal proposal receives an approval.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalApproved {
+    pub proposal_id: String,
+    pub approver: Address,
+    pub approvals_count: u32,
+    pub required_approvals: u32,
+}
+
+/// Emitted when a treasury withdrawal proposal is executed.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalExecuted {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub executor: Address,
+}
+
+/// Emitted when a treasury withdrawal proposal is cancelled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalCancelled {
+    pub proposal_id: String,
+    pub canceller: Address,
+}
+
+/// Emitted when treasury multisig configuration is updated.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryMultisigConfigured {
+    pub required_approvals: u32,
+    pub min_delay_secs: u64,
+    pub max_delay_secs: u64,
+}
+
 // ============================================================================
 // Token Events
 // ============================================================================
@@ -974,5 +1024,116 @@ pub fn emit_invoice_overdue(env: &Env, invoice_id: &String, merchant_id: &Addres
             Symbol::new(env, "OVERDUE"),
         ),
         (invoice_id.clone(), merchant_id.clone()),
+    );
+}
+
+// ============================================================================
+// Merkle Batch Payment Distributor Events
+// ============================================================================
+
+/// Emitted when a new Merkle distribution is created and funded.
+///
+/// Topics: `(MERKLE, DISTRIBUTION_CREATED)`. Data includes the distribution id,
+/// the creator, the committed Merkle root, the total funded amount, and the
+/// expiry ledger after which unclaimed tokens may be defunded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDistributionCreated {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_amount: i128,
+    pub expires_at: u64,
+}
+
+/// Emitted when a recipient successfully claims their allocation.
+///
+/// Topics: `(MERKLE, CLAIMED)`. Data includes the distribution id, the
+/// recipient index within the tree, the recipient address, and the amount.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleClaimed {
+    pub distribution_id: u64,
+    pub index: u32,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+/// Emitted when a distribution is defunded after expiry, returning unclaimed
+/// tokens to the creator.
+///
+/// Topics: `(MERKLE, DEFUNDED)`. Data includes the distribution id, the
+/// creator receiving the refund, and the refunded amount.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDefunded {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub refunded_amount: i128,
+}
+
+/// Emit a `MERKLE/DISTRIBUTION_CREATED` event when a Merkle distribution is
+/// created and funded. Topics: `(MERKLE, DISTRIBUTION_CREATED)`.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_distribution_created(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    token: &Address,
+    merkle_root: &BytesN<32>,
+    total_amount: i128,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DISTRIBUTION_CREATED"),
+        ),
+        (
+            distribution_id,
+            creator.clone(),
+            token.clone(),
+            merkle_root.clone(),
+            total_amount,
+            expires_at,
+        ),
+    );
+}
+
+/// Emit a `MERKLE/CLAIMED` event when a recipient claims their allocation.
+/// Topics: `(MERKLE, CLAIMED)`.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_claimed(
+    env: &Env,
+    distribution_id: u64,
+    index: u32,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "CLAIMED"),
+        ),
+        (distribution_id, index, recipient.clone(), amount),
+    );
+}
+
+/// Emit a `MERKLE/DEFUNDED` event when a distribution is defunded after
+/// expiry. Topics: `(MERKLE, DEFUNDED)`.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_defunded(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    refunded_amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DEFUNDED"),
+        ),
+        (distribution_id, creator.clone(), refunded_amount),
     );
 }

@@ -1,3 +1,4 @@
+
 import {
   Client as ContractClient,
   type Merchant,
@@ -80,6 +81,14 @@ import {
   DEFAULT_RECEIPT_BASE_URL,
   type PaymentReceipt,
 } from "./receipt.js";
+import {
+  MerkleDistributorClient,
+  type MerkleDistributorConfig,
+  type Distribution,
+  type MerkleClaimParams,
+  type MerkleProof,
+  MerkleError,
+} from "./merkle.js";
 
 
 export {
@@ -88,6 +97,15 @@ export {
   type ExecuteSwapParams,
   DexRouterError,
   DEX_ROUTER_ERROR_MAP,
+};
+
+export {
+  MerkleDistributorClient,
+  type MerkleDistributorConfig,
+  type Distribution,
+  type MerkleClaimParams,
+  type MerkleProof,
+  MerkleError,
 };
 
 
@@ -139,6 +157,11 @@ export interface FluxapayConfig {
    * Default: `https://receipts.fluxapay.io`
    */
   receiptBaseUrl?: string;
+  /**
+   * MerkleDistributor contract ID for batch payment distribution operations.
+   * When omitted, falls back to `FLUXAPAY_CONTRACT_IDS[network].merkleDistributor`.
+   */
+  merkleDistributorContractId?: string;
 }
 
 /**
@@ -255,6 +278,62 @@ export interface PaymentRequest {
 export interface CreatePaymentBatchParams {
   merchantId: string;
   payments: PaymentRequest[];
+}
+
+/**
+ * Issue #577: Parameters for atomic swap-and-pay through a DEX router.
+ */
+export interface SwapAndPayParams {
+  payer: string;
+  merchantId: string;
+  paymentId: string;
+  dexRouter: string;
+  path: string[];
+  amountIn: bigint;
+  amountOutMin: bigint;
+  deadline?: number;
+  amount?: bigint;
+  currency?: string;
+  depositAddress?: string;
+  tokenIn?: string;
+  expiresAt?: number | bigint;
+  fxOracle?: string;
+  oraclePair?: string;
+  maxDeviationBps?: number;
+}
+
+/**
+ * Issue #577: Single route specification for multi-route swap routing / aggregation.
+ */
+export interface SwapRoute {
+  router: string;
+  path: string[];
+  amountIn: bigint;
+}
+
+/**
+ * Issue #577: Parameters for multi-route swap payments.
+ */
+export interface SwapAndPayMultiRouteParams extends SwapAndPayParams {
+  routes: SwapRoute[];
+  minOutputAmount?: bigint;
+}
+
+/**
+ * Issue #576: Stream top-up entry for batch top-up operations.
+ */
+export interface StreamTopUp {
+  streamId: string;
+  amount: bigint;
+}
+
+/**
+ * Issue #576: Stream withdrawal entry for batch withdrawal operations.
+ */
+export interface StreamWithdrawal {
+  streamId: string;
+  destination?: string;
+  amount?: bigint;
 }
 
 /** Mirrors the on-chain `StreamStatus` enum in `stream.rs`. */
@@ -406,6 +485,16 @@ export interface CreateStreamParams {
   ratePerSecond: bigint;
   deposit: bigint;
   streamId: string;
+}
+
+/** Parameters for creating a Merkle distribution on-chain. */
+export interface CreateDistributionParams {
+  creator: string;
+  token: string;
+  merkleRoot: Buffer;
+  totalAmount: bigint;
+  expiresAt: bigint;
+  distributionId: string;
 }
 
 function fromContractStream(raw: {
@@ -894,6 +983,35 @@ function toCreatePaymentArgs(params: CreatePaymentParams): CreatePaymentArgs {
   };
 }
 
+function toSwapAndPayArgs(params: SwapAndPayParams) {
+  const tokenIn = params.tokenIn ?? (params.path && params.path.length > 0 ? params.path[0] : "");
+  const amount = params.amount ?? params.amountOutMin;
+  const depositAddress = params.depositAddress ?? params.merchantId;
+  const expiresAt =
+    params.expiresAt !== undefined
+      ? BigInt(params.expiresAt)
+      : params.deadline !== undefined
+        ? BigInt(params.deadline)
+        : undefined;
+  return {
+    payer: params.payer,
+    payment_id: params.paymentId,
+    merchant_id: params.merchantId,
+    amount,
+    currency: params.currency ?? "USDC",
+    deposit_address: depositAddress,
+    token_in: tokenIn,
+    amount_in: params.amountIn,
+    amount_out_min: params.amountOutMin,
+    path: params.path,
+    expires_at: expiresAt,
+    dex_router: params.dexRouter,
+    fx_oracle: params.fxOracle,
+    oracle_pair: params.oraclePair,
+    max_deviation_bps: params.maxDeviationBps ?? 0,
+  };
+}
+
 /**
  * Issue #841: Encode a G-address + sub-account ID into a Stellar M-address.
  */
@@ -974,6 +1092,7 @@ export class FluxapayClient {
   private fxOracleClient?: FxOracleClient;
   private merchantRegistryClient?: MerchantRegistryClient;
   private paymentLinkManagerClient?: PaymentLinkManagerClient;
+  private merkleDistributorClient?: MerkleDistributorClient;
   private sep10Authenticator?: SEP10Authenticator;
   private readonly config: FluxapayConfig;
 
@@ -1057,6 +1176,7 @@ export class FluxapayClient {
     this.fxOracleClient = undefined;
     this.merchantRegistryClient = undefined;
     this.paymentLinkManagerClient = undefined;
+    this.merkleDistributorClient = undefined;
     this.sep10Authenticator = undefined;
   }
 
@@ -1137,6 +1257,68 @@ export class FluxapayClient {
         })),
       });
       return (result as any)?.result ?? result;
+    });
+  }
+
+  /**
+   * Issue #577: Swap tokens on a DEX router and pay a merchant in one atomic transaction.
+   * Maps to `PaymentProcessor.swap_and_pay` on-chain.
+   *
+   * @throws {ArbitrageDetectedError} If DEX output is worse than the quoted path return.
+   * @throws {SwapPathInvalidError} If swap path is empty or output token does not match.
+   * @throws {OraclePriceDeviationError} If swap rate deviates from oracle beyond tolerance.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async swapAndPay(params: SwapAndPayParams): Promise<PaymentCharge> {
+    return withMappedContractError(async () => {
+      const args = toSwapAndPayArgs(params);
+      const fn = (this.contract as any).swap_and_pay;
+      if (typeof fn === "function") {
+        try {
+          const res = await fn.call(this.contract, { args });
+          return (res as any)?.result ?? res;
+        } catch (e) {
+          const res = await fn.call(this.contract, args);
+          return (res as any)?.result ?? res;
+        }
+      }
+      throw new FluxapayError(28, "SwapPathInvalid", "swap_and_pay is not supported on this contract instance");
+    });
+  }
+
+  /**
+   * Issue #577: Split a token swap across multiple DEX routes and pay a merchant atomically.
+   * Maps to `PaymentProcessor.swap_and_pay_multi_route` on-chain.
+   *
+   * @throws {ArbitrageDetectedError} If DEX output is worse than quoted path returns.
+   * @throws {SwapPathInvalidError} If any route swap path is invalid.
+   * @throws {OraclePriceDeviationError} If swap rate deviates from oracle beyond tolerance.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async swapAndPayMultiRoute(params: SwapAndPayMultiRouteParams): Promise<PaymentCharge> {
+    return withMappedContractError(async () => {
+      const args = toSwapAndPayArgs(params);
+      const routes = params.routes.map((r) => ({
+        router: r.router,
+        path: r.path,
+        amount_in: r.amountIn,
+      }));
+      const minOutputAmount = params.minOutputAmount ?? params.amountOutMin ?? params.amount ?? 0n;
+      const fn = (this.contract as any).swap_and_pay_multi_route;
+      if (typeof fn === "function") {
+        try {
+          const res = await fn.call(this.contract, {
+            args,
+            routes,
+            min_output_amount: minOutputAmount,
+          });
+          return (res as any)?.result ?? res;
+        } catch (e) {
+          const res = await fn.call(this.contract, args, routes, minOutputAmount);
+          return (res as any)?.result ?? res;
+        }
+      }
+      throw new FluxapayError(28, "SwapPathInvalid", "swap_and_pay_multi_route is not supported on this contract instance");
     });
   }
 
@@ -1867,15 +2049,44 @@ export class FluxapayClient {
   }
 
   /**
-   * Get all disputes for a payment
+   * Issue #575: Get all disputes for a payment, optionally filtered by status.
+   * @param paymentId - The payment ID to query disputes for.
+   * @param status - Optional dispute status filter.
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
-  async getPaymentDisputes(paymentId: string) {
+  async getPaymentDisputes(paymentId: string, status?: DisputeStatus) {
+    if (status !== undefined) {
+      return this.getPaymentDisputesByStatus(paymentId, status);
+    }
     return withMappedContractError(() =>
       this.contract.get_payment_disputes({
         payment_id: paymentId,
       }),
     );
+  }
+
+  /**
+   * Issue #575: Get disputes for a payment filtered by dispute status.
+   * Maps to `PaymentProcessor.get_payment_disputes_by_status` on-chain.
+   *
+   * @param paymentId - The payment ID to query disputes for.
+   * @param status - The dispute status to filter by.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async getPaymentDisputesByStatus(paymentId: string, status: DisputeStatus) {
+    return withMappedContractError(async () => {
+      const fn = (this.contract as any).get_payment_disputes_by_status;
+      if (typeof fn === "function") {
+        const res = await fn.call(this.contract, {
+          payment_id: paymentId,
+          status,
+        });
+        return (res as any)?.result ?? res;
+      }
+      const all = await this.contract.get_payment_disputes({ payment_id: paymentId });
+      const list = (all as any)?.result ?? all;
+      return Array.isArray(list) ? list.filter((d: any) => d.status === status) : list;
+    });
   }
 
   /**
@@ -2805,6 +3016,76 @@ export class FluxapayClient {
     return this.getPaymentLinkManager().getLinkAnalytics(linkId);
   }
 
+  private getMerkleDistributor(): MerkleDistributorClient {
+    const contractId = resolveContractId(
+      this.config.merkleDistributorContractId,
+      FLUXAPAY_CONTRACT_IDS[this.config.network].merkleDistributor,
+      "merkleDistributorContractId",
+    );
+
+    if (!this.merkleDistributorClient) {
+      const profile = this.networkSwitcher.getProfile();
+      this.merkleDistributorClient = new MerkleDistributorClient({
+        network: profile.environment,
+        rpcUrl: this.config.rpcUrl || profile.rpcUrl,
+        contractId,
+      });
+    }
+
+    return this.merkleDistributorClient;
+  }
+
+  /**
+   * Create a Merkle distribution: commits a 32-byte Merkle root and funds the
+   * total amount in a single transaction. Recipients later claim individually
+   * with O(log N) inclusion proofs.
+   *
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async createDistribution(params: CreateDistributionParams): Promise<Distribution> {
+    return this.getMerkleDistributor().createDistribution(params);
+  }
+
+  /**
+   * Claim an allocated amount from a Merkle distribution using an inclusion proof.
+   * Reverts with `MerkleError::InvalidProof` if the proof is forged, and with
+   * `MerkleError::AlreadyClaimed` if the leaf/index was already claimed.
+   *
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async claimDistribution(params: MerkleClaimParams): Promise<bigint> {
+    return this.getMerkleDistributor().claim(params);
+  }
+
+  /**
+   * Read a distribution by ID.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async getDistribution(distributionId: string): Promise<Distribution> {
+    return this.getMerkleDistributor().getDistribution(distributionId);
+  }
+
+  /**
+   * Check whether a leaf index has already been claimed for a distribution.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async isDistributionClaimed(
+    distributionId: string,
+    index: number,
+  ): Promise<boolean> {
+    return this.getMerkleDistributor().isClaimed(distributionId, index);
+  }
+
+  /**
+   * Defund an expired distribution, returning unclaimed tokens to the creator.
+   * Subsequent claims revert with `MerkleError::DistributionExpired`.
+   *
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async defundDistribution(creator: string, distributionId: string): Promise<bigint> {
+    return this.getMerkleDistributor().defund(creator, distributionId);
+  }
+
   /**
    * Issue #683: Fetch a health summary of the PaymentProcessor contract.
    * No authentication required — this is a public read endpoint.
@@ -3054,6 +3335,40 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #576: Batch withdraw accrued tokens from multiple streams to a recipient.
+   * Maps to `PaymentProcessor.batch_withdraw_to` on-chain.
+   *
+   * @param recipient - Must be the streams' receiver; must sign.
+   * @param streamIds - List of stream IDs (or withdrawal specs) to withdraw from.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async batchWithdrawTo(
+    recipient: string,
+    streamIds: string[] | StreamWithdrawal[],
+  ): Promise<void> {
+    return withMappedContractError(async () => {
+      const withdrawals = streamIds.map((item) => {
+        if (typeof item === "string") {
+          return {
+            stream_id: item,
+            destination: recipient,
+            amount: I128_MAX,
+          };
+        }
+        return {
+          stream_id: item.streamId,
+          destination: item.destination ?? recipient,
+          amount: item.amount ?? I128_MAX,
+        };
+      });
+      await (this.contract as any).batch_withdraw_to({
+        recipient,
+        withdrawals,
+      });
+    });
+  }
+
+  /**
    * setStreamFeeRecipient
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
@@ -3082,6 +3397,23 @@ export class FluxapayClient {
     return withMappedContractError(() =>
       (this.contract as any).cancel_stream({ sender, stream_id: streamId }),
     );
+  }
+
+  /**
+   * Issue #576: Cancel multiple active streams in a single transaction.
+   * Maps to `PaymentProcessor.cancel_multiple_streams` on-chain.
+   *
+   * @param sender - The creator of the streams; must sign.
+   * @param streamIds - List of stream IDs to cancel.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async cancelMultipleStreams(sender: string, streamIds: string[]): Promise<void> {
+    return withMappedContractError(async () => {
+      await (this.contract as any).cancel_multiple_streams({
+        sender,
+        stream_ids: streamIds,
+      });
+    });
   }
 
   /**
@@ -3115,6 +3447,27 @@ export class FluxapayClient {
     return withMappedContractError(() =>
       (this.contract as any).top_up_stream({ caller: sender, stream_id: streamId, amount }),
     );
+  }
+
+  /**
+   * Issue #576: Top up multiple streams in a single transaction.
+   * Maps to `PaymentProcessor.top_up_multiple_streams` on-chain.
+   *
+   * @param sender - The sender funding the top-ups; must sign.
+   * @param topUps - List of stream IDs and top-up amounts.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async topUpMultipleStreams(
+    sender: string,
+    topUps: StreamTopUp[] | Array<{ streamId: string; amount: bigint }>,
+  ): Promise<void> {
+    return withMappedContractError(async () => {
+      const formatted = topUps.map((t) => [t.streamId, t.amount]);
+      await (this.contract as any).top_up_multiple_streams({
+        sender,
+        top_ups: formatted,
+      });
+    });
   }
 
   /**
@@ -3190,6 +3543,11 @@ export {
   type FeeConfig,
   type MaybeFeeConfig,
   type CreatePaymentArgs,
+  type SwapAndPayParams,
+  type SwapRoute,
+  type SwapAndPayMultiRouteParams,
+  type StreamTopUp,
+  type StreamWithdrawal,
   FluxapayOfflineSigner,
   type OfflineTransactionPayload,
   type SubscriptionBillingClient,
@@ -3206,6 +3564,14 @@ export {
   NetworkProfiles,
   type NetworkProfile,
 };
+
+export {
+  MerkleDistributorClient as MerkleClient,
+  type MerkleDistributorConfig as MerkleClientConfig,
+  type Distribution as MerkleDistribution,
+  type MerkleClaimParams as MerkleClaim,
+  type MerkleProof as MerkleProofPath,
+} from "./merkle.js";
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
 export {
