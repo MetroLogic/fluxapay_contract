@@ -1729,15 +1729,25 @@ impl MerchantRegistry {
         Ok(())
     }
 
-    /// Issue #184 / #833: Get the current dispute count for a merchant.
+    /// Issue #184 / #753: Get the current dispute count for a merchant.
     ///
-    /// Returns the on-chain `Merchant.dispute_count` field, which is incremented
-    /// via [`Self::increment_merchant_dispute_count`] when a dispute is opened.
-    /// This is a lifetime total used for KYC scoring — it does **not** decrement
-    /// when a dispute is resolved in the merchant's favour (active-dispute
-    /// tracking for suspension lives separately in RefundManager's
-    /// `MerchantDisputeCount` key).
+    /// The authoritative counter is owned by the `RefundManager`, since it is the
+    /// contract that opens disputes. When a `RefundManager` address is configured
+    /// we forward to it; otherwise (e.g. before wiring, or if the cross-contract
+    /// call fails) we fall back to the registry-local `Merchant.dispute_count`,
+    /// which is incremented via [`Self::increment_merchant_dispute_count`].
     pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
+        if let Some(refund_manager) = env
+            .storage()
+            .persistent()
+            .get::<MerchantDataKey, Address>(&MerchantDataKey::RefundManagerAddress)
+        {
+            let refund_client = crate::RefundManagerClient::new(&env, &refund_manager);
+            if let Ok(Ok(count)) = refund_client.try_get_merchant_dispute_count(&merchant_id) {
+                return count;
+            }
+        }
+
         match Self::get_merchant_internal(&env, &merchant_id) {
             Ok(merchant) => merchant.dispute_count as u64,
             Err(_) => 0,
