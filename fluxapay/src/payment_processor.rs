@@ -269,6 +269,271 @@ impl PaymentProcessor {
             .unwrap_or(true)
     }
 
+    /// Issue: tier-based rolling reserve — split merchant proceeds into
+    /// immediately claimable funds and a rolling reserve deposit based on the
+    /// merchant's KYC tier. Returns (immediate_amount, reserve_amount).
+    pub fn split_merchant_proceeds(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<(i128, i128), Error> {
+        if amount < 0 {
+            return Err(Error::InvalidAmount);
+        }
+        let (reserve_bps, holding_period_secs) =
+            Self::get_merchant_reserve_policy(env.clone(), merchant_id.clone())?;
+        let reserve_amount = amount
+            .checked_mul(reserve_bps as i128)
+            .ok_or(Error::InvalidAmount)?
+            / 10_000;
+        let immediate_amount = amount
+            .checked_sub(reserve_amount)
+            .ok_or(Error::InvalidAmount)?;
+        if reserve_amount > 0 {
+            Self::deposit_rolling_reserve(
+                env,
+                merchant_id,
+                reserve_amount,
+                holding_period_secs,
+            )?;
+        }
+        Ok((immediate_amount, reserve_amount))
+    }
+
+    /// Issue: tier-based rolling reserve — look up the reserve policy for a
+    /// merchant's KYC tier from the configured MerchantRegistry. Falls back to
+    /// a conservative default (Tier 0: 10% / 14 days) when no registry or
+    /// policy is configured.
+    fn get_merchant_reserve_policy(
+        env: Env,
+        merchant_id: Address,
+    ) -> Result<(u32, u64), Error> {
+        let registry: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantRegistryAddress);
+        if let Some(registry_address) = registry {
+            let tier: u32 = env.invoke_contract(
+                &registry_address,
+                &Symbol::new(&env, "get_merchant_tier"),
+                vec![&env, merchant_id.to_val()],
+            );
+            let policy: Option<(u32, u64)> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RollingReservePolicy(tier));
+            if let Some((reserve_bps, holding_period_secs)) = policy {
+                return Ok((reserve_bps, holding_period_secs));
+            }
+        }
+        Ok((DEFAULT_RESERVE_BPS, DEFAULT_HOLDING_PERIOD_SECS))
+    }
+
+    /// Issue: tier-based rolling reserve — append a new reserve bucket to the
+    /// merchant's maturity ledger queue.
+    fn deposit_rolling_reserve(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+        holding_period_secs: u64,
+    ) -> Result<(), Error> {
+        let now = env.ledger().timestamp();
+        let unlock_at = now.saturating_add(holding_period_secs);
+        let bucket = RollingReserveBucket {
+            amount,
+            created_at: now,
+            unlock_at,
+        };
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let mut buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+        buckets.push_back(bucket);
+        env.storage().persistent().set(&key, &buckets);
+
+        let total_key = DataKey::RollingReserveTotal(merchant_id.clone());
+        let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_key, &total.saturating_add(amount));
+
+        env.events().publish(
+            (Symbol::new(&env, "RESERVE"), Symbol::new(&env, "FUNDS_HELD")),
+            (merchant_id, amount, unlock_at),
+        );
+        Ok(())
+    }
+
+    /// Issue: tier-based rolling reserve — release all mature reserve buckets
+    /// whose holding periods have elapsed. Returns the total released amount.
+    pub fn release_matured_reserves(env: Env, merchant_id: Address) -> Result<i128, Error> {
+        let now = env.ledger().timestamp();
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut remaining: Vec<RollingReserveBucket> = vec![&env];
+        let mut released: i128 = 0;
+        for bucket in buckets.iter() {
+            if bucket.unlock_at <= now {
+                released = released.saturating_add(bucket.amount);
+            } else {
+                remaining.push_back(bucket);
+            }
+        }
+
+        if released > 0 {
+            env.storage().persistent().set(&key, &remaining);
+            let total_key = DataKey::RollingReserveTotal(merchant_id.clone());
+            let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&total_key, &total.saturating_sub(released));
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "RESERVE"),
+                    Symbol::new(&env, "FUNDS_RELEASED"),
+                ),
+                (merchant_id, released),
+            );
+        }
+        Ok(released)
+    }
+
+    /// Issue: tier-based rolling reserve — slash locked reserve to satisfy a
+    /// lost dispute payout. Callable by authorized dispute modules.
+    pub fn slash_reserve_for_dispute(
+        env: Env,
+        caller: Address,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        caller.require_auth();
+        if !AccessControl::has_role(&env, &role_arbitrator(&env), &caller)
+            && !AccessControl::has_role(&env, &role_admin(&env), &caller)
+        {
+            return Err(Error::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut remaining: Vec<RollingReserveBucket> = vec![&env];
+        let mut to_slash = amount;
+        for bucket in buckets.iter() {
+            if to_slash <= 0 {
+                remaining.push_back(bucket);
+                continue;
+            }
+            if bucket.amount <= to_slash {
+                to_slash -= bucket.amount;
+            } else {
+                remaining.push_back(RollingReserveBucket {
+                    amount: bucket.amount - to_slash,
+                    created_at: bucket.created_at,
+                    unlock_at: bucket.unlock_at,
+                });
+                to_slash = 0;
+            }
+        }
+
+        let slashed = amount - to_slash;
+        if slashed <= 0 {
+            return Err(Error::InsufficientBalance);
+        }
+
+        env.storage().persistent().set(&key, &remaining);
+        let total_key = DataKey::RollingReserveTotal(merchant_id.clone());
+        let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_key, &total.saturating_sub(slashed));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "RESERVE"),
+                Symbol::new(&env, "FUNDS_SLASHED"),
+            ),
+            (merchant_id, slashed),
+        );
+        Ok(slashed)
+    }
+
+    /// Issue: tier-based rolling reserve — query total locked reserve, matured
+    /// reserve, and the upcoming release schedule for a merchant.
+    pub fn get_merchant_reserve_balance(
+        env: Env,
+        merchant_id: Address,
+    ) -> MerchantReserveBalance {
+        let now = env.ledger().timestamp();
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut total_locked: i128 = 0;
+        let mut matured: i128 = 0;
+        let mut schedule: Vec<RollingReserveBucket> = vec![&env];
+        for bucket in buckets.iter() {
+            total_locked = total_locked.saturating_add(bucket.amount);
+            if bucket.unlock_at <= now {
+                matured = matured.saturating_add(bucket.amount);
+            } else {
+                schedule.push_back(bucket);
+            }
+        }
+
+        MerchantReserveBalance {
+            total_locked,
+            matured,
+            upcoming_releases: schedule,
+        }
+    }
+
+    /// Admin: configure the rolling reserve policy for a KYC tier.
+    pub fn set_rolling_reserve_policy(
+        env: Env,
+        admin: Address,
+        tier: u32,
+        reserve_bps: u32,
+        holding_period_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if reserve_bps > 10_000 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage().persistent().set(
+            &DataKey::RollingReservePolicy(tier),
+            &(reserve_bps, holding_period_secs),
+        );
+        Ok(())
+    }
+
+    /// Public read of the rolling reserve policy for a KYC tier.
+    pub fn get_rolling_reserve_policy(env: Env, tier: u32) -> Option<(u32, u64)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RollingReservePolicy(tier))
+    }
+
     /// Return the accumulated treasury balance collected via settlement fees
     /// and platform fees (when no custom fee_recipient).
     pub fn set_min_payment_duration_secs(
