@@ -14,20 +14,21 @@ Use subscriptions when you want to charge the same customer repeatedly over time
 - Access tiers or premium features
 - Usage bundles with fixed-period renewal
 
-FluxaPay supports recurring billing via subscription plans, each with a fixed `amount`, `currency`, and `billing_interval` (`Daily`, `Weekly`, `Monthly`, or `Annually`).
+FluxaPay supports recurring billing via subscription plans, each with a configurable `interval_secs` (in seconds), an optional `max_cycles` limit, and a configurable grace period.
 
 Subscription lifecycle states are:
 
 - `Active` — billing is enabled
-- `Paused` — temporarily suspended until a resume timestamp is reached
+- `Paused` — temporarily suspended by the subscriber- `PastDue` — a charge failed and the contract is waiting to retry
 - `Cancelled` — terminal stop; no future billing
-- `Expired` — reached the configured `max_payments` limit or otherwise ended by the system
+- `CancelledDueToPaymentFailure` — terminal stop after exceeding dunning retries
+- `Completed` — reached the configured `max_cycles` limit
 
 ---
 
 ## 2) Creating a subscription plan
 
-A merchant first creates a plan. Each plan defines the recurring charge and interval.
+A merchant first creates a plan. Each plan defines the recurring charge, interval, and lifetime.
 
 ### API shape
 
@@ -39,11 +40,13 @@ await client.createSubscriptionPlan({
   description: "Monthly SaaS access",
   amount: 5_000_000n,
   currency: "USDC",
-  billingInterval: "Monthly",
+  intervalSecs: 2592000,
+  maxCycles: 12,
+  gracePeriodSecs: 86400,
 });
 ```
 
-The on-chain contract uses `create_subscription_plan`, which stores the plan and emits a `SUBSCRIPTION/PLAN_CREATED` event for indexer visibility.
+The on-chain contract uses `create_plal`, which stores the plan and emits a `SUBSCRIPTION/PLAN_CREATED` event for indexer visibility.
 
 ### Soroban CLI example
 
@@ -52,27 +55,25 @@ stellar contract invoke \
   --id $PAYMENT_PROCESSOR_ID \
   --network testnet \
   --source $MERCHANT_SECRET \
-  -- create_subscription_plan \
+  -- create_plan \
   --merchant $MERCHANT_ADDRESS \
   --plan_id "pro_monthly" \
   --name "Pro" \
-  --description "Monthly SaaS access" \
   --amount 5000000 \
-  --currency USDC \
-  --billing_interval Monthly
+  --interval_secs 2592000 \
+  --max_cycles 12 \
+  --grace_period_secs 86400
 ```
 
-You can then fetch a plan by ID:
+You can then fetch a plan by Id:
 
 ```bash
 stellar contract invoke \
   --id $PAYMENT_PROCESSOR_ID \
   --network testnet \
-  -- create_subscription_plan \
+  -- get_plan \
   --plan_id "pro_monthly"
 ```
-
-If you need the read variant without writing, use the matching `get_subscription_plan` / `get_plan` call through the SDK or binding client.
 
 ---
 
@@ -82,7 +83,7 @@ The standard customer flow is:
 
 1. Merchant creates a plan.
 2. Customer subscribes to the plan.
-3. The contract creates a `Subscription` object.
+3. The contract creates a `Subscription` object with `current_cycle = 0`.
 4. The first charge occurs after the billing interval elapses.
 5. Future charges are triggered by the operator daemon or explicit processing calls.
 
@@ -92,11 +93,10 @@ The standard customer flow is:
 await client.subscribeToPlan({
   payer: "G_CUSTOMER...",
   planId: "pro_monthly",
-  paymentId: "sub_001",
 });
 ```
 
-This creates a subscription with `status: Active`, stores the `next_payment_at` timestamp, and emits `SUBSCRIPTION/CREATED`.
+This creates a subscription with `status: Active`, stores the `current_cycle` counter, and emits `SUBSCRIPTION/CREATED`.
 
 ### Soroban CLI example
 
@@ -106,41 +106,30 @@ stellar contract invoke \
   --network testnet \
   --source $CUSTOMER_SECRET \
   -- subscribe \
-  --payer $CUSTOMER_ADDRESS \
-  --plan_id "pro_monthly" \
-  --max_payments 12
+  --subscriber $CUSTOMER_ADDRESS \
+  --plan_id "pro_monthly"
 ```
-
-`max_payments` is optional. If set, the subscription ends automatically after the configured number of successful charges.
 
 ### First charge behavior
 
-The contract does not bill immediately when the subscription is created. It waits until the next billing window is due, which is calculated from the plan interval and the subscription's `next_payment_at` timestamp.
+The contract does not bill immediately when the subscription is created. It waits until the next billing window is due, which is calculated from the plan `interval_secs` and the subscription's `last_charge_at` timestamp.
 
 ---
 
-## 4) Charge cycle and `process_due_subscriptions`
+## 4) Charge cycle and charge_subscription
 
 Recurring charges are handled by the operator/settlement flow. A due subscription is processed when its billing date is reached.
 
-FluxaPay implements automated processing through `process_due_subscriptions`, which checks active subscriptions and executes each due charge in sequence. The daemon script in [scripts/subscription-daemon.js](../scripts/subscription-daemon.js) is the recommended operational pattern for polling and invoking this flow.
+FluxaPay implements automated processing through `charge_subscription`, which checks active subscriptions and executes each due charge in sequence. The daemon script in [scripts/subscription-daemon.js](../scripts/subscription-daemon.js) is the recommended operational pattern for polling and invoking this flow.
 
 ### How the cycle works
 
 - The daemon scans tracked active subscriptions.
-- It looks for subscriptions whose `next_payment_at` or `next_retry_at` is now or in the past.
-- It invokes `process_due_subscriptions` from the operator account.
+- It looks for subscriptions whose `last_charge_at + interval_secs` is now or in the past.
+- It invokes `charge_subscription` from the operator account.
 - The contract attempts each eligible subscription charge.
-- Successful charges update `last_payment_at`, `total_payments`, and advance `next_payment_at`.
-- Failed charges move the subscription into the retry/grace path.
-
-### Example daemon run
-
-```bash
-CONTRACT_ID=C... OPERATOR_SECRET=S... node scripts/subscription-daemon.js
-```
-
-The daemon polls on a configurable interval and is meant to run continuously in production.
+- Successful charges update `last_charge_at`, `current_cycle`, and open a fresh grace window.
+- Failed charges move the subscription into the dunning retry path.
 
 ### Manual operator-triggered charge
 
@@ -149,41 +138,43 @@ stellar contract invoke \
   --id $PAYMENT_PROCESSOR_ID \
   --network testnet \
   --source $OPERATOR_SECRET \
-  -- process_due_subscriptions \
-  --operator $OPERATOR_ADDRESS
+  -- charge_subscription \
+  --plan_id "pro_monthly" \
+  --subscriber $CUSTOMER_ADDRESS \
+  --charge_succeeded true
 ```
 
-The function returns the count of subscriptions processed in that cycle.
+The function returns an error if the interval has not elapsed, the subscription is paused, or the max cycle limit has been reached.
 
 ---
 
-## 5) Grace period and retry logic
+## 5) Dunning retry logic
 
-If a subscription charge fails, FluxaPay moves the customer into a grace period rather than immediately cancelling the subscription.
+If a subscription charge fails, FluxaPay moves the customer into a dunning state rather than immediately cancelling the subscription.
 
 The contract enforces:
 
-- `SUBSCRIPTION_MAX_RETRIES = 3`
-- `SUBSCRIPTION_RETRY_INTERVAL_SECS = 2 * 24 * 60 * 60` (2 days)
+- `MAX_DUNNING_RETRIES = 3`
+- `DUNNING_BACKOFF_SECS = 86400` (1 day minimum retry backoff)
 
 This means:
 
 1. A payment fails.
-2. The subscription enters the retry window with `next_retry_at` set.
-3. The daemon retries again after 2 days.
-4. If the same subscription fails through all 3 retry windows, the system cancels it with `SubscriptionRetryExhausted`.
+2. The subscription enters the `PastDue` state with `next_retry_at` set.
+3. The daemon retries after the backoff window.
+4. If the same subscription fails through all 3 retry windows, the system cancels it with `CancelledDueToPaymentFailure`.
 
 Relevant lifecycle events include:
 
-- `SUBSCRIPTION/PAYMENT_FAILED`
-- `SUBSCRIPTION/CANCELLED_MAX_RETRIES`
+- `SUBSCRIPTION/CHARGE_FAILED`
+- `SUBSCRIPTION/DUNNING_TRIGGERED`
 - `SUBSCRIPTION/CHARGED` on success
 
 A failed charge does not silently disappear: merchants should watch for retry and cancellation events so they can notify the customer or prompt for updated payment credentials.
 
-### Daemon RPC Timeout & Retry Handling (Issue #776)
+### Daemon RPC Timeout & Retry Handling
 
-During periods of Stellar network congestion, calls to `charge_subscription` or `process_due_subscriptions` may encounter RPC timeouts while the transaction is awaiting inclusion in a closed ledger. To avoid silently skipping billing cycles:
+During periods of Stellar network congestion, calls to `charge_subscription` may encounter RPC timeouts while the transaction is awaiting inclusion in a closed ledger. To avoid silently skipping billing cycles:
 
 1. **Retry Queue Persistence**:
    - On an RPC timeout (or missing transaction receipt within the poll timeout window), the daemon immediately persists the transaction record (`transaction_hash`, `subscription_id`, attempt count, and timestamps) to a local retry queue (`subscription_retry_queue.json`).
@@ -195,7 +186,7 @@ During periods of Stellar network congestion, calls to `charge_subscription` or 
    - If Horizon returns `404 Not Found` and the ledger close window (~30 seconds) has elapsed, the daemon prepares a re-submission with the same operator keypair and fresh sequence guard.
 
 3. **Exponential Backoff**:
-   - Re-submissions follow exponential backoff: base delay of 1s, doubling per retry (`1s`, `2s`, `4s`).
+   - Re-submissions follow exponential backoff: base delay of 1s, doubling per retry (1s, 2s, 4s).
    - The daemon allows a maximum of **3 retry attempts** per timeout cycle.
 
 4. **Retry Exhaustion Alerting**:
@@ -208,37 +199,29 @@ During periods of Stellar network congestion, calls to `charge_subscription` or 
 
 ## 6) Pause and resume
 
-Merchants and customers may pause a subscription when the service is temporarily suspended or a customer is taking a break.
+Subscribers may pause a subscription when the service is temporarily suspended or a customer is taking a break.
 
 ### Pause immediately
 
 ```typescript
 await client.pauseSubscription({
-  payer: "G_CUSTOMER...",
-  subscriptionId: "sub_123",
+  subscriber: "G_CUSTOMER...",
+  planId: "pro_monthly",
 });
 ```
 
-### Pause with a future resume date
-
-```typescript
-await client.pauseSubscriptionWithResumeDate({
-  payer: "G_CUSTOMER...",
-  subscriptionId: "sub_123",
-  resumeTimestamp: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
-});
-```
-
-This updates the subscription to `Paused` and sets `resume_at` to the future timestamp. When that time passes, `charge_subscription` auto-resumes the subscription and advances `next_payment_at` from the resume timestamp.
+This updates the subscription to `Paused` and emits `SUBSCRIPTION/PAUSED`. While paused, `charge_subscription` returns `SubscriptionPaused`.
 
 ### Resume manually
 
 ```typescript
 await client.resumeSubscription({
-  payer: "G_CUSTOMER...",
-  subscriptionId: "sub_123",
+  subscriber: "G_CUSTOMER...",
+  planId: "pro_monthly",
 });
 ```
+
+Resuming resets the billing baseline (`last_charge_at`) to the current timestamp so the paused duration is not back-billed. The contract emits `SUBSCRIPTION/RESUMED`.
 
 ### CLI examples
 
@@ -247,10 +230,9 @@ stellar contract invoke \
   --id $PAYMENT_PROCESSOR_ID \
   --network testnet \
   --source $CUSTOMER_SECRET \
-  -- pause_with_resume_date \
-  --payer $CUSTOMER_ADDRESS \
-  --subscription_id "sub_123" \
-  --resume_timestamp 1750000000
+  -- pause_subscription \
+  --plan_id "pro_monthly" \
+  --subscriber $CUSTOMER_ADDRESS
 ```
 
 ```bash
@@ -259,8 +241,8 @@ stellar contract invoke \
   --network testnet \
   --source $CUSTOMER_SECRET \
   -- resume_subscription \
-  --payer $CUSTOMER_ADDRESS \
-  --subscription_id "sub_123"
+  --plan_id "pro_monthly" \
+  --subscriber $CUSTOMER_ADDRESS
 ```
 
 Relevant events:
@@ -276,17 +258,12 @@ A customer or merchant can cancel a subscription at any time with `cancel_subscr
 
 ```typescript
 await client.cancelSubscription({
-  payerOrMerchant: "G_CUSTOMER...",
-  subscriptionId: "sub_123",
-  refundRemaining: true,
+  subscriber: "G_CUSTOMER...",
+  planId: "pro_monthly",
 });
 ```
 
-When `refund_remaining` is `true`, the contract may create a prorated pending refund for the unused portion of the current billing period if the policy allows it. This is a policy-driven flow and is surfaced through refund events rather than by mutating the subscription itself beyond setting `status: Cancelled`.
-
-The contract also supports `allow_prorated_refunds` and emits `REFUND/AUTO_CREATED` when the cancellation generates a refund.
-
-This is useful for SaaS subscriptions where a customer cancels mid-cycle and should receive credit for the unused time.
+Within the grace window, `cancel_within_grace_period` cancels the subscription and issues a refund for the most recent charge. Outside the grace window, no refund is issued.
 
 ---
 
@@ -296,19 +273,16 @@ For merchant integrations, the most important subscription events are:
 
 - `SUBSCRIPTION/CREATED`
 - `SUBSCRIPTION/CHARGED`
+- `SUBSCRIPTION/CHARGE_FAILED`
+- `SUBSCRIPTION/DUNNING_TRIGGERED`
 - `SUBSCRIPTION/PAUSED`
 - `SUBSCRIPTION/RESUMED`
+- `SUBSCRIPTION/COMPLETED`
 - `SUBSCRIPTION/CANCELLED`
-- `SUBSCRIPTION/CANCELLED_MAX_RETRIES`
-- `SUBSCRIPTION/PAYMENT_FAILED`
-- `SUBSCRIPTION/EXPIRED`
+- `SUBSCRIPTION/GRACE_CANCEL`
 - `SUBSCRIPTION/PLAN_CREATED`
-- `SUBSCRIPTION/PLAN_DEACTIVATED`
-
-If the merchant uses prorated refunds on cancellation, also listen for:
-
-- `REFUND/AUTO_CREATED`
-- `REFUND/REQUESTED` / `REFUND/PROCESSED` as the refund lifecycle completes
+- `SUBSCRIPTION/PLAN_ARCHIVED`
+- `SUBSCRIPTION/PLAN_RESTORED`
 
 A webhook consumer should key events by `subscription_id` or `refund_id` and treat retries as idempotent in the same way you would for standard payment webhooks.
 
@@ -329,7 +303,9 @@ async function createMonthlyPlan() {
     description: "Monthly access to studio tools",
     amount: 25_000_000n,
     currency: "USDC",
-    billingInterval: "Monthly",
+    intervalSecs: 2592000,
+    maxCycles: 12,
+    gracePeriodSecs: 86400,
   });
 
   const plan = await client.getSubscriptionPlan("studio-monthly");
@@ -338,20 +314,18 @@ async function createMonthlyPlan() {
 
 async function subscribeCustomer() {
   await client.subscribeToPlan({
-    payer: "GCUSTOMER...",
+    subscriber: "GCUSTOMER...",
     planId: "studio-monthly",
-    paymentId: "sub_001",
   });
 
-  await client.pauseSubscriptionWithResumeDate({
-    payer: "GCUSTOMER...",
-    subscriptionId: "sub_001",
-    resumeTimestamp: Math.floor(Date.now() / 1000) + 86400,
+  await client.pauseSubscription({
+    subscriber: "GCUSTOMER...",
+    planId: "studio-monthly",
   });
 
   await client.resumeSubscription({
-    payer: "GCUSTOMER...",
-    subscriptionId: "sub_001",
+    subscriber: "GCUSTOMER...",
+    planId: "studio-monthly",
   });
 }
 ```
@@ -365,23 +339,6 @@ This example demonstrates the full merchant journey: create plan → subscribe �
 To operate subscriptions reliably:
 
 - Keep the daemon running continuously using the repo script at [scripts/subscription-daemon.js](../scripts/subscription-daemon.js).
-- Listen for subscription lifecycle webhooks and reconcile the state in your own database.
-- Track `retry_count`, `next_retry_at`, `pause`, and `resume_at` values for customer support and reconciliation.
-- Use idempotent handlers for webhook processing so duplicate events do not double-apply subscription state.
-
-If you are building a merchant dashboard, the safest pattern is to source truth from the on-chain subscription record and treat webhooks as a signal stream rather than the canonical state store.
-
----
-
-## Summary
-
-FluxaPay subscriptions give merchants a Stripe-like recurring billing system with on-chain transparency and explicit lifecycle events. The core pattern is simple:
-
-1. Create a plan
-2. Subscribe a payer
-3. Charge on the interval
-4. Retry failed payment attempts
-5. Pause, resume, or cancel as needed
-6. Reconcile state from on-chain and webhook data
-
-For an end-to-end developer workflow and event mappings, also see [docs/webhooks.md](webhooks.md), [docs/events.md](events.md), and [scripts/README.md](../scripts/README.md).
+- Monitor `SUBSCRIPTION/CHARGE_FAILED` and `SUBSCRIPTION/DUNNING_TRIGGERED` events to proactively notify customers.
+- Use `SUBSCRIPTION/COMPLETED` to trigger renewal campaigns or access revocation.
+- Keep the grace period configured at or below the maximum of 3 days.
