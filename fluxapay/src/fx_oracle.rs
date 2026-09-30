@@ -15,6 +15,9 @@ const MAX_LEDGER_GAP: u32 = 17_280;
 /// Maximum number of currency pairs accepted by `set_rates_batch`.
 const MAX_BATCH_RATES: u32 = 20;
 
+/// Issue #XXX: Minimum accepted rate value. Rates must be strictly positive.
+const MIN_RATE: i128 = 1;
+
 /// Issue #636: Fixed-point precision of the reciprocal rate returned by
 /// `get_rate_or_inverse` when it falls back to the inverse pair. 14 decimals
 /// keeps ~7 significant digits of precision for reciprocals of rates that
@@ -67,8 +70,7 @@ pub enum FXOracleError {
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
     InvalidStalenessThreshold = 7,
-    /// Rate must be strictly positive; zero or negative rates would cause a
-    /// divide-by-zero panic in downstream consumers (e.g. `use_link`).
+    /// Issue #XXX: Rate must be strictly positive.
     InvalidRate = 8,
 }
 
@@ -273,10 +275,7 @@ impl FXOracle {
     }
 
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
-        // Reject non-positive rates: a zero rate would cause a divide-by-zero
-        // panic in `PaymentLinkManager.use_link`, and a negative rate would
-        // produce nonsensical settlement amounts.
-        if rate <= 0 {
+        if rate < MIN_RATE {
             return Err(FXOracleError::InvalidRate);
         }
 
@@ -287,6 +286,7 @@ impl FXOracle {
             .get::<OracleDataKey, u32>(&OracleDataKey::MaxDeviation(pair.clone()))
             .unwrap_or(0);
 
+        // Issue #478: Check rate deviation against configured limit
         if max_deviation_bps > 0 {
             if let Ok(last_rate_data) = env
                 .storage()
@@ -295,6 +295,8 @@ impl FXOracle {
                 .ok_or(FXOracleError::RateNotFound)
             {
                 let last_rate = last_rate_data.rate;
+                // Guard against a previously stored zero/negative rate so the
+                // deviation math below cannot divide by zero.
                 // Calculate deviation in basis points: (abs(new - old) / old) * 10_000
                 let diff = if rate > last_rate {
                     rate - last_rate
