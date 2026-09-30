@@ -1,7 +1,7 @@
 /**
  * Webhook domain types (Issues #808, #810).
  *
- * The event type list mirrors the table in `docs/webhooks.md`. Keeping it a
+ * The event type list mirrors the table in `docs/webhooks.md`. Keeping it a 
  * closed union rather than a free string is what lets the test endpoint
  * return `UnsupportedEventType` instead of cheerfully signing a typo and
  * leaving the merchant to wonder why nothing arrived.
@@ -40,7 +40,16 @@ export interface WebhookEndpoint {
 }
 
 export interface WebhookEnvelope {
+  /**
+   * The delivery ID (`whd_`-prefixed). Unique per build call, but not stable
+   * across retries — the idempotency key merchants dedupe on is `event_id`.
+   */
   id: string;
+  /**
+   * Stable identifier for the logical event. The same value is sent on every
+   * retry of the same event, so a merchant can deduplicate a redelivery.
+   */
+  eventId: string;
   type: WebhookEventType;
   createdAt: string;
   /**
