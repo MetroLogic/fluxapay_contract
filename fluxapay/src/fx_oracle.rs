@@ -67,6 +67,8 @@ pub enum FXOracleError {
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
     InvalidStalenessThreshold = 7,
+    /// Issue: rate must be strictly positive to avoid divide-by-zero downstream.
+    InvalidRate = 8,
 }
 
 #[contracttype]
@@ -270,6 +272,13 @@ impl FXOracle {
     }
 
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
+        // Reject non-positive rates before persisting. A stored `rate <= 0`
+        // would cause a divide-by-zero panic in downstream consumers such as
+        // `PaymentLinkManager.use_link`, permanently bricking affected links.
+        if rate <= 0 {
+            return Err(FXOracleError::InvalidRate);
+        }
+
         // Issue #478: Check rate deviation against configured limit
         let max_deviation_bps = env
             .storage()
@@ -426,7 +435,11 @@ impl FXOracle {
             divisor *= 10;
         }
 
-        Ok((usdc_amount * rate_data.rate) / divisor)
+        Ok(usdc_amount
+            .checked_mul(rate_data.rate)
+            .ok_or(FXOracleError::PairNotFound)?
+            .checked_div(divisor)
+            .unwrap_or(0))
     }
 
     /// Issue #636: Return the rate for `pair`, transparently falling back to the
@@ -504,7 +517,7 @@ impl FXOracle {
         let scaled = amount
             .checked_mul(rate_data.rate)
             .ok_or(FXOracleError::PairNotFound)?;
-        Ok(scaled / divisor)
+        Ok(scaled.checked_div(divisor).unwrap_or(0))
     }
 
     /// Derive the inverse of a `BASE_QUOTE` pair symbol, e.g. `EUR_USD` ->
