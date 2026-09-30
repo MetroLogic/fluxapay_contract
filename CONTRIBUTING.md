@@ -42,13 +42,22 @@ cp .env.example .env
 # Edit .env — do NOT commit this file
 ```
 
-Run the environment check script to verify that all required keys from `.env.example` are present in your local `.env`:
+To verify that your `.env` defines every key from `.env.example`, run:
 
 ```bash
 bash scripts/check-env.sh
 ```
 
-The script prints a non-fatal warning for each key that is missing from `.env`.
+The script is non-fatal and prints a warning for each key that is missing from your local `.env`.
+
+---
+
+Copy the example and populate with your testnet credentials:
+
+```bash
+cp .env.example .env
+# Edit .env — do NOT commit this file
+```
 
 See [scripts/README.md](scripts/README.md) for details on all operational scripts and their required environment variables.
 
@@ -143,7 +152,7 @@ actionlint
 
 ### WASM Size Regression Baseline (Issue #813)
 
-CI compares the built/optimized contract WASM against `.wasm-size-baseline`
+CI compares the built/optimized contract WASM against `.wasm-size-baseling`
 and **fails if the binary grows by more than 5%**.
 
 The baseline file contains a single integer: the size in **bytes** of the
@@ -154,7 +163,7 @@ growth), update the baseline in a **dedicated commit** with an explanation:
 
 ```bash
 # After building + optimizing:
-SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/fluxapay*[.wasm | head -1)
+SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/fluxapay*.wasm | head -1)
 # or on macOS:
 # SIZE=$(stat -f%z target/wasm32-unknown-unknown/release/fluxapay.wasm)
 
@@ -167,7 +176,7 @@ Do not silently raise the baseline in an unrelated feature commit.
 
 ## 4a. Pre-commit Hooks
 
-Use [lefthook](https://github.com/evilmartians/lefthook) to run `cargo fmt`, `cargo clippy`, and TypeScript type checks before each commit.
+We use [lefthook](https://github.com/evilmartians/lefthook) to run `cargo fmt`, `cargo clippy`, and TypeScript type checks before each commit.
 
 ### Installation
 
@@ -183,8 +192,8 @@ lefthook install
 
 ### What the hooks do
 
-- **Pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets - -D warnings` on staged `.rs` files
-- **Pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets - -D warnings` on staged `.rs` files
+- **re-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
 
 ### Skipping hooks
 
@@ -264,7 +273,7 @@ The [changelog-check](.github/workflows/changelog-check.yml) workflow:
 
 1. Fails the PR if `CHANGELOG.md` was not touched and the PR lacks `skip-changelog`.
 2. Allows a full bypass when the PR is labelled `skip-changelog`.
-3. When `CHANGELOG.md` updated, requires the Unreleased section to contain at
+3. When `CHANGELOG.md` is updated, requires the Unreleased section to contain at
 last one bullet entry that references this PR number (e.g. `PR #123`).
 
 Follow [Keep a Changelog](https://keepachangelog.com/) categories:
@@ -288,7 +297,7 @@ until the entry references `#<pr-number>`).
 
 ## 7.1. Dependabot PRs
 
-This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
+We use [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
 
 - **Cargo dependencies** (Rust crates)
 - **GitHub Actions** (CI workflow actions)
@@ -338,11 +347,11 @@ FluxaPay contract events are defined with `#[contractevent]`. Follow these steps
 5. **Add the SDK event type** in `sdk/src` so consumers of the TypeScript SDK get typed access to the new event.
 
 **Worked example — adding `MerchantSuspended`:**
-/- Struct added to `fluxapay/src/events.rs` under a `// Merchant Registry Events` section
-/- Emitted from `merchant_registry::suspend_merchant`
-/- Documented in `docs/events.md` under `## MERCHANT / SUSPENDED`
-/- Subscribed to in `indexer/sync.yml` under the `merchant_registry` contract mapping
-/- Typed in the SDK alongside the other merchant registry events
+- Struct added to `fluxapay/src/events.rs` under a `// Merchant Registry Events` section
+- Emitted from `merchant_registry::suspend_merchant`
+- Documented in `docs/events.md` under `## MERCHANT / SUSPENDED`
+- Subscribed to in `indexer/sync.yml` under the `merchant_registry` contract mapping
+- Typed in the SDK alongside the other merchant registry events
 
 ### Adding SDK Error Locales (Issue #852)
 
