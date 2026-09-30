@@ -15,9 +15,6 @@ const MAX_LEDGER_GAP: u32 = 17_280;
 /// Maximum number of currency pairs accepted by `set_rates_batch`.
 const MAX_BATCH_RATES: u32 = 20;
 
-/// Issue #XXX: Minimum accepted rate value. Rates must be strictly positive.
-const MIN_RATE: i128 = 1;
-
 /// Issue #636: Fixed-point precision of the reciprocal rate returned by
 /// `get_rate_or_inverse` when it falls back to the inverse pair. 14 decimals
 /// keeps ~7 significant digits of precision for reciprocals of rates that
@@ -70,7 +67,7 @@ pub enum FXOracleError {
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
     InvalidStalenessThreshold = 7,
-    /// Issue #XXX: Rate must be strictly positive.
+    /// Issue: rate must be strictly positive to avoid divide-by-zero downstream.
     InvalidRate = 8,
 }
 
@@ -275,7 +272,10 @@ impl FXOracle {
     }
 
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
-        if rate < MIN_RATE {
+        // Reject non-positive rates before persisting. A stored `rate <= 0`
+        // would cause a divide-by-zero panic in downstream consumers such as
+        // `PaymentLinkManager.use_link`, permanently bricking affected links.
+        if rate <= 0 {
             return Err(FXOracleError::InvalidRate);
         }
 
@@ -286,7 +286,6 @@ impl FXOracle {
             .get::<OracleDataKey, u32>(&OracleDataKey::MaxDeviation(pair.clone()))
             .unwrap_or(0);
 
-        // Issue #478: Check rate deviation against configured limit
         if max_deviation_bps > 0 {
             if let Ok(last_rate_data) = env
                 .storage()
@@ -295,8 +294,6 @@ impl FXOracle {
                 .ok_or(FXOracleError::RateNotFound)
             {
                 let last_rate = last_rate_data.rate;
-                // Guard against a previously stored zero/negative rate so the
-                // deviation math below cannot divide by zero.
                 // Calculate deviation in basis points: (abs(new - old) / old) * 10_000
                 let diff = if rate > last_rate {
                     rate - last_rate
@@ -438,7 +435,11 @@ impl FXOracle {
             divisor *= 10;
         }
 
-        Ok((usdc_amount * rate_data.rate) / divisor)
+        Ok(usdc_amount
+            .checked_mul(rate_data.rate)
+            .ok_or(FXOracleError::PairNotFound)?
+            .checked_div(divisor)
+            .unwrap_or(0))
     }
 
     /// Issue #636: Return the rate for `pair`, transparently falling back to the
@@ -516,7 +517,7 @@ impl FXOracle {
         let scaled = amount
             .checked_mul(rate_data.rate)
             .ok_or(FXOracleError::PairNotFound)?;
-        Ok(scaled / divisor)
+        Ok(scaled.checked_div(divisor).unwrap_or(0))
     }
 
     /// Derive the inverse of a `BASE_QUOTE` pair symbol, e.g. `EUR_USD` ->

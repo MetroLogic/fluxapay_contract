@@ -643,7 +643,10 @@ impl PaymentLinkManager {
                 .unwrap_or(None)
         };
         let fee_amount: i128 = match effective_fee_bps {
-            Some(bps) if bps > 0 => resolved_amount.saturating_mul(bps) / 10_000,
+            Some(bps) if bps > 0 => resolved_amount
+                .saturating_mul(bps)
+                .checked_div(10_000)
+                .unwrap_or(0),
             _ => 0,
         };
 
@@ -951,13 +954,18 @@ impl PaymentLinkManager {
         let link = Self::get_link_internal(&env, &link_id)?;
 
         let conversion_rate = if link.view_count > 0 {
-            link.use_count.saturating_mul(10_000) / link.view_count
+            link.use_count
+                .saturating_mul(10_000)
+                .checked_div(link.view_count)
+                .unwrap_or(0)
         } else {
             0
         };
 
         let average_payment = if link.use_count > 0 {
-            link.total_revenue / (link.use_count as i128)
+            link.total_revenue
+                .checked_div(link.use_count as i128)
+                .unwrap_or(0)
         } else {
             0
         };
