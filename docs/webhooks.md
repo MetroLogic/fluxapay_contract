@@ -76,6 +76,7 @@ All webhooks share a common envelope:
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique event delivery id (not the payment id) |
+| `event_id` | string | **Idempotency key** — stable across retries of the same event; use to deduplicate deliveries |
 | `type` | string | Event name (see tables above) |
 | `created_at` | number | Unix timestamp (seconds) |
 | `api_version` | string | Payload schema version |
