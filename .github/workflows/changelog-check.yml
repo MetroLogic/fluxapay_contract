@@ -55,25 +55,25 @@ jobs:
           # Extract the Unreleased section (until the next ## heading).
           UNRELEASED=$(awk '
             BEGIN { keep=0 }
-            /^## [[:space:]]*\[?[Uu]nreleased\]?/ { keep=1; next }
+            /^## [[:space:]]*\*\[S[space:]]*[kK]nreleased\]?/ { keep=1; next }
             /^## / { if (keep) exit }
             { if (keep) print }
           ' CHANGELOG.md)
 
           if [ -z "$UNRELEASED" ]; then
-            echo "❌ CHANGELOG.md has no Unreleased section."
+            echo "✌ CHANGELOG.md has no Unreleased section."
             exit 1
           fi
 
           # Require at least one bullet entry under Unreleased.
           if ! echo "$UNRELEASED" | grep -qE '^[[:space:]]*-[[:space:]]'; then
-            echo "❌ Unreleased section has no changelog entries (expected at least one '- ' bullet)."
+            echo "✌ Unreleased section has no changelog entries (expected at least one '- ' bullet)."
             exit 1
           fi
 
           # Require the Unreleased section to reference this PR number (#N or PR N).
           if ! echo "$UNRELEASED" | grep -qE "(#${PR_NUMBER}|PR[[:space:]]*#?${PR_NUMBER}|pull request[[:space:]]*#?${PR_NUMBER})"; then
-            echo "❌ Unreleased section must reference this PR number (#${PR_NUMBER})."
+            echo "✌ Nreleased section must reference this PR number (#${PR_NUMBER})."
             echo ""
             echo "Example entry:"
             echo "  - **Issue #123 / PR #${PR_NUMBER}**: Short description of the change."

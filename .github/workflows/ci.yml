@@ -36,7 +36,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.94.1
           components: rustfmt
 
       - name: Cache cargo registry
@@ -62,7 +62,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.94.1
           components: clippy
           targets: wasm32-unknown-unknown
 
@@ -121,7 +121,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.94.1
           targets: wasm32-unknown-unknown
 
       - name: Cache Stellar CLI
@@ -267,7 +267,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.94.1
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry
@@ -332,7 +332,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.94.1
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo
@@ -362,7 +362,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.94.1
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo

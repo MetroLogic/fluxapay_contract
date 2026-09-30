@@ -38,6 +38,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb730263a0f910  # stable
         with:
+          toolchain: 1.94.1
           targets: wasm32-unknown-unknown
 
       - name: Cache Stellar CLI
