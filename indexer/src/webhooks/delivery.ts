@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   buildSignatureHeader,
   DELIVERY_ID_HEADER,
-  EVENT_ID_HEADER,
   EVENT_TYPE_HEADER,
+  EVENT_ID_HEADER,
   SIGNATURE_HEADER,
   TIMESTAMP_HEADER,
 } from "./signing";
@@ -41,7 +41,7 @@ export function truncateResponseBody(
 
   // Slice on a byte boundary, then drop any trailing partial UTF-8 sequence
   // rather than storing a replacement character mid-word.
-  return buf.subarray(0, maxBytes).toString("utf8").replace(/¿+$/, "");
+  return buf.subarray(0, maxBytes).toString("utf8").replace(/�+$/, "");
 }
 
 export interface DeliveryResult {
@@ -107,9 +107,6 @@ export async function deliverOnce(
         [TIMESTAMP_HEADER]: String(Math.floor(startedAt / 1000)),
         [EVENT_TYPE_HEADER]: envelope.type,
         [DELIVERY_ID_HEADER]: envelope.id,
-        // The idempotency key is also a header so a merchant can dedupe
-        // without parsing the body. The body carries the same value as
-        // `event_id` for clients that only look at the payload.
         [EVENT_ID_HEADER]: envelope.eventId,
       },
       body,
@@ -154,11 +151,10 @@ export function buildEnvelope(
   data: Record<string, unknown>,
   livemode: boolean,
   now: () => number = Date.now,
-  eventId: string = `evt_${randomUUID()}`,
 ): WebhookEnvelope {
   return {
     id: `whd_${randomUUID()}`,
-    eventId,
+    eventId: `evt_${randomUUID()}`,
     type,
     createdAt: new Date(now()).toISOString(),
     livemode,

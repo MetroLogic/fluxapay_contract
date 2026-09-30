@@ -41,15 +41,18 @@ export interface WebhookEndpoint {
 
 export interface WebhookEnvelope {
   /**
-   * The delivery ID (`whd_`-prefixed). Unique per build call, but not stable
-   * across retries — the idempotency key merchants dedupe on is `event_id`.
+   * The delivery ID (`whd_`-prefixed). This is the idempotency key
+   * merchants deduplicate on. It is stable across retries of the same
+   * event, so a retried delivery carries the same value and can be
+   * collapsed with the original.
    */
   id: string;
   /**
-   * Stable identifier for the logical event. The same value is sent on every
-   * retry of the same event, so a merchant can deduplicate a redelivery.
+   * The event ID—a stable identifier for the event itself, independent of
+   * how many times it is delivered. Merchants deduplicate on this field
+   * when a retried delivery arrives at their endpoint more than once.
    */
-  eventId: string;
+  event_id: string;
   type: WebhookEventType;
   createdAt: string;
   /**
