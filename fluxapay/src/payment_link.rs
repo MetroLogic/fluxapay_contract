@@ -578,7 +578,11 @@ impl PaymentLinkManager {
             for _ in 0..rate_data.decimals {
                 divisor = divisor.saturating_mul(10);
             }
-            let usdc_equivalent = fiat_cfg.amount.saturating_mul(divisor) / rate_data.rate;
+            let usdc_equivalent = fiat_cfg
+                .amount
+                .saturating_mul(divisor)
+                .checked_div(rate_data.rate)
+                .ok_or(crate::Error::InvalidAmount)?;
 
             // If the link also has a fixed USDC amount, validate against it
             if let Some(fixed_amount) = link.amount {

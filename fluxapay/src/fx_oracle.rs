@@ -67,6 +67,9 @@ pub enum FXOracleError {
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
     InvalidStalenessThreshold = 7,
+    /// Rate must be strictly positive; zero or negative rates would cause a
+    /// divide-by-zero panic in downstream consumers (e.g. `use_link`).
+    InvalidRate = 8,
 }
 
 #[contracttype]
@@ -270,6 +273,13 @@ impl FXOracle {
     }
 
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
+        // Reject non-positive rates: a zero rate would cause a divide-by-zero
+        // panic in `PaymentLinkManager.use_link`, and a negative rate would
+        // produce nonsensical settlement amounts.
+        if rate <= 0 {
+            return Err(FXOracleError::InvalidRate);
+        }
+
         // Issue #478: Check rate deviation against configured limit
         let max_deviation_bps = env
             .storage()
