@@ -1,10 +1,17 @@
 import type { Pool } from "pg";
 import type { DeliveryAttempt, DeliveryLogRow, WebhookEndpoint } from "./types";
-import { randomUUID } from "crypto";
 
 /**
  * Persistence for webhook endpoints and the delivery log (Issues #808, #810).
  */
+
+/**
+ * Idempotency key included in every webhook payload so merchants can
+ * deduplicate retried deliveries (Issue: duplicate webhook delivery).
+ */
+export function buildEventId(paymentId: string, eventType: string): string {
+  return `${paymentId}:${eventType}`;
+}
 
 /** Test deliveries allowed per endpoint per hour (Issue #808). */
 export const TEST_DELIVERY_LIMIT_PER_HOUR = 5;
@@ -15,19 +22,6 @@ export const DELIVERY_LOG_RETENTION_DAYS = 30;
 /** Upper bound on a delivery listing page. */
 export const MAX_DELIVERY_PAGE_SIZE = 100;
 export const DEFAULT_DELIVERY_PAGE_SIZE = 20;
-
-/**
- * Generate a unique idempotency key for a webhook event.
- *
- * Webhook deliveries may be retried (e.g. after a transient failure), which
- * means a merchant endpoint can observe the same logical event more than once.
- * Every payload carries a stable `event_id` so merchants can deduplicate on
- * their side. The key is generated once per logical event and reused across
- * all retry attempts of that event.
- */
-export function generateEventId(): string {
-  return randomUUID();
-}
 
 export class WebhookStore {
   constructor(private readonly pool: Pool) {}
@@ -66,7 +60,7 @@ export class WebhookStore {
     const { rows } = await this.pool.query(
       `INSERT INTO webhook_delivery_log
          (endpoint_id, event_type, payment_id, attempt_number,
-          http_status, response_body, duration_ms, success, livemode)
+          http_status, response_body, duration_ms, success, livemode, event_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
@@ -79,37 +73,7 @@ export class WebhookStore {
         attempt.durationMs,
         attempt.success,
         attempt.livemode,
-      ],
-    );
-    return rows[0].id;
-  }
-
-  /**
-   * Record a delivery attempt together with the idempotency key for the
-   * logical event it belongs to. Retries of the same event must pass the same
-   * `eventId` so merchants can deduplicate across attempts.
-   */
-  async recordAttemptWithEventId(
-    attempt: DeliveryAttempt,
-    eventId: string,
-  ): Promise<string> {
-    const { rows } = await this.pool.query(
-      `INSERT INTO webhook_delivery_log
-         (endpoint_id, event_type, payment_id, attempt_number,
-          http_status, response_body, duration_ms, success, livemode, event_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING id`,
-      [
-        attempt.endpointId,
-        attempt.eventType,
-        attempt.paymentId,
-        attempt.attemptNumber,
-        attempt.httpStatus,
-        attempt.responseBody,
-        attempt.durationMs,
-        attempt.success,
-        attempt.livemode,
-        eventId,
+        buildEventId(attempt.paymentId, attempt.eventType),
       ],
     );
     return rows[0].id;

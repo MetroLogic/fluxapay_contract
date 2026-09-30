@@ -3,7 +3,6 @@ import {
   buildSignatureHeader,
   DELIVERY_ID_HEADER,
   EVENT_TYPE_HEADER,
-  EVENT_ID_HEADER,
   SIGNATURE_HEADER,
   TIMESTAMP_HEADER,
 } from "./signing";
@@ -107,7 +106,7 @@ export async function deliverOnce(
         [TIMESTAMP_HEADER]: String(Math.floor(startedAt / 1000)),
         [EVENT_TYPE_HEADER]: envelope.type,
         [DELIVERY_ID_HEADER]: envelope.id,
-        [EVENT_ID_HEADER]: envelope.eventId,
+        "x-webhook-event-id": envelope.id,
       },
       body,
       signal: controller.signal,
@@ -154,7 +153,7 @@ export function buildEnvelope(
 ): WebhookEnvelope {
   return {
     id: `whd_${randomUUID()}`,
-    eventId: `evt_${randomUUID()}`,
+    event_id: `evt_${randomUUID()}`,
     type,
     createdAt: new Date(now()).toISOString(),
     livemode,
