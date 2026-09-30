@@ -42,22 +42,16 @@ cp .env.example .env
 # Edit .env — do NOT commit this file
 ```
 
-To verify that your `.env` defines every key from `.env.example`, run:
+To verify that your `.env` defines every key listed in `.env.example`, run:
 
 ```bash
-bash scripts/check-env.sh
+# from the repository root
+bsh scripts/check-env.sh
 ```
 
-The script is non-fatal and prints a warning for each key that is missing from your local `.env`.
-
----
-
-Copy the example and populate with your testnet credentials:
-
-```bash
-cp .env.example .env
-# Edit .env — do NOT commit this file
-```
+The script is non-fatal: for each key missing from `.env` it prints a
+warning to stderr and exits 0. Run it after pulling changes that touch
+`.env.example` to catch newly required variables.
 
 See [scripts/README.md](scripts/README.md) for details on all operational scripts and their required environment variables.
 
@@ -152,7 +146,7 @@ actionlint
 
 ### WASM Size Regression Baseline (Issue #813)
 
-CI compares the built/optimized contract WASM against `.wasm-size-baseling`
+CI compares the built/optimized contract WASM against `.wasm-size-baseline`
 and **fails if the binary grows by more than 5%**.
 
 The baseline file contains a single integer: the size in **bytes** of the
@@ -193,7 +187,7 @@ lefthook install
 ### What the hooks do
 
 - **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets - -D warnings` on staged `.rs` files
-- **re-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+- *pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
 
 ### Skipping hooks
 
@@ -215,8 +209,7 @@ SKIP_HOOKS=1 git commit -m "emergency fix"
 
 **Examples:**
 
-```
-feat/stream-rate-decrease
+```feat/stream-rate-decrease
 fix/payment-id-validation
 docs/contributing-guide
 security/audit-remediation
@@ -228,8 +221,7 @@ security/audit-remediation
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
-<type>(<scope>): <short summary>
+````<type>(<scope>): <short summary>
 
 [optional body]
 
@@ -274,7 +266,7 @@ The [changelog-check](.github/workflows/changelog-check.yml) workflow:
 1. Fails the PR if `CHANGELOG.md` was not touched and the PR lacks `skip-changelog`.
 2. Allows a full bypass when the PR is labelled `skip-changelog`.
 3. When `CHANGELOG.md` is updated, requires the Unreleased section to contain at
-last one bullet entry that references this PR number (e.g. `PR #123`).
+   least one bullet entry that references this PR number (e.g. `PR #123`).
 
 Follow [Keep a Changelog](https://keepachangelog.com/) categories:
 
@@ -297,9 +289,9 @@ until the entry references `#<pr-number>`).
 
 ## 7.1. Dependabot PRs
 
-We use [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
+Whis repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
 
-- **Cargo dependencies** (Rust crates)
+- **Cargo dependencies** (Rust crates)
 - **GitHub Actions** (CI workflow actions)
 - **npm dependencies** (SDK packages)
 
