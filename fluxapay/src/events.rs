@@ -428,6 +428,49 @@ pub fn emit_subscription_plan_deactivated(env: &Env, plan_id: &String, merchant_
 // Stream Events
 // ============================================================================
 
+/// Emitted when a vesting stream is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingCreated {
+    pub stream_id: String,
+    pub sender: Address,
+    pub receiver: Address,
+    pub total_amount: i128,
+    pub cliff_time: u64,
+    pub cliff_amount: i128,
+    pub end_time: u64,
+    pub revocable: bool,
+}
+
+/// Emitted when a vesting stream's cliff is reached.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingCliffReached {
+    pub stream_id: String,
+    pub cliff_time: u64,
+    pub cliff_amount: i128,
+}
+
+/// Emitted when tokens are withdrawn from a vesting stream.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingWithdrawn {
+    pub stream_id: String,
+    pub receiver: Address,
+    pub amount: i128,
+    pub total_withdrawn: i128,
+}
+
+/// Emitted when a vesting stream is revoked by the sender.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingRevoked {
+    pub stream_id: String,
+    pub sender: Address,
+    pub refunded_amount: i128,
+    pub vested_amount: i128,
+}
+
 /// Emitted when a stream is created.
 #[contractevent]
 #[derive(Clone, Debug)]
