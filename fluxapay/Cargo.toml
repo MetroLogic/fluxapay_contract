@@ -27,4 +27,4 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 proptest = "1.4.0"
-ed25519-dalek = "2.2.0"
+ed25519-dalek = "3.0.0"
