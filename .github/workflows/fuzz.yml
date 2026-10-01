@@ -34,7 +34,7 @@ jobs:
           - fuzz_create_payment_id_parse
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup nightly Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
