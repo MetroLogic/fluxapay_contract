@@ -474,16 +474,114 @@ export class InvalidEvidenceCidError extends FluxapayError {
   }
 }
 
+export class MuxedAccountMismatchError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(70, "MuxedAccountMismatch", message, cause, locale);
+    this.name = "MuxedAccountMismatchError";
+  }
+}
+
+export class TreasuryMultisigNotConfiguredError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(71, "TreasuryMultisigNotConfigured", message, cause, locale);
+    this.name = "TreasuryMultisigNotConfiguredError";
+  }
+}
+
+export class NotAuthorizedTreasurySignerError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(72, "NotAuthorizedTreasurySigner", message, cause, locale);
+    this.name = "NotAuthorizedTreasurySignerError";
+  }
+}
+
+export class TreasuryProposalNotFoundError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(73, "TreasuryProposalNotFound", message, cause, locale);
+    this.name = "TreasuryProposalNotFoundError";
+  }
+}
+
+export class TreasuryProposalAlreadyExecutedError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(74, "TreasuryProposalAlreadyExecuted", message, cause, locale);
+    this.name = "TreasuryProposalAlreadyExecutedError";
+  }
+}
+
+export class TreasuryProposalCancelledError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(75, "TreasuryProposalCancelled", message, cause, locale);
+    this.name = "TreasuryProposalCancelledError";
+  }
+}
+
+export class TreasuryTimelockNotExpiredError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(76, "TreasuryTimelockNotExpired", message, cause, locale);
+    this.name = "TreasuryTimelockNotExpiredError";
+  }
+}
+
+export class TreasuryProposalExpiredError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(77, "TreasuryProposalExpired", message, cause, locale);
+    this.name = "TreasuryProposalExpiredError";
+  }
+}
+
+export class TreasuryAlreadyApprovedError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(78, "TreasuryAlreadyApproved", message, cause, locale);
+    this.name = "TreasuryAlreadyApprovedError";
+  }
+}
+
+export class TreasuryInsufficientApprovalsError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(79, "TreasuryInsufficientApprovals", message, cause, locale);
+    this.name = "TreasuryInsufficientApprovalsError";
+  }
+}
+
+export class InvalidTreasuryThresholdError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(80, "InvalidTreasuryThreshold", message, cause, locale);
+    this.name = "InvalidTreasuryThresholdError";
+  }
+}
+
+export class InsufficientTokenTreasuryBalanceError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(81, "InsufficientTokenTreasuryBalance", message, cause, locale);
+    this.name = "InsufficientTokenTreasuryBalanceError";
+  }
+}
+
+export class TrialActiveError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(82, "TrialActive", message, cause, locale);
+    this.name = "TrialActiveError";
+  }
+}
+
+export class TrialTooLongError extends FluxapayError {
+  constructor(message?: string, cause?: unknown, locale = "en") {
+    super(83, "TrialTooLong", message, cause, locale);
+    this.name = "TrialTooLongError";
+  }
+}
+
 export class InvalidPaymentLinkError extends FluxapayError {
   constructor(message?: string, cause?: unknown, locale = "en") {
-    super(70, "InvalidPaymentLink", message, cause, locale);
+    super(84, "InvalidPaymentLink", message, cause, locale);
     this.name = "InvalidPaymentLinkError";
   }
 }
 
 export class KycLimitExceededError extends FluxapayError {
   constructor(message?: string, cause?: unknown, locale = "en") {
-    super(71, "KycLimitExceeded", message, cause, locale);
+    super(85, "KycLimitExceeded", message, cause, locale);
     this.name = "KycLimitExceededError";
   }
 }
@@ -577,8 +675,22 @@ export const ERROR_CONSTRUCTOR_MAP: Record<
   67: InputTooLongError,
   68: TimelockNotExpiredError,
   69: InvalidEvidenceCidError,
-  70: InvalidPaymentLinkError,
-  71: KycLimitExceededError,
+  70: MuxedAccountMismatchError,
+  71: TreasuryMultisigNotConfiguredError,
+  72: NotAuthorizedTreasurySignerError,
+  73: TreasuryProposalNotFoundError,
+  74: TreasuryProposalAlreadyExecutedError,
+  75: TreasuryProposalCancelledError,
+  76: TreasuryTimelockNotExpiredError,
+  77: TreasuryProposalExpiredError,
+  78: TreasuryAlreadyApprovedError,
+  79: TreasuryInsufficientApprovalsError,
+  80: InvalidTreasuryThresholdError,
+  81: InsufficientTokenTreasuryBalanceError,
+  82: TrialActiveError,
+  83: TrialTooLongError,
+  84: InvalidPaymentLinkError,
+  85: KycLimitExceededError,
   404: PaymentNotFoundError,
   405: RefundNotFoundError,
   406: InvalidAmountError,

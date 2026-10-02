@@ -67,6 +67,10 @@ pub enum FXOracleError {
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
     InvalidStalenessThreshold = 7,
+    /// Issue #851: `set_rates_batch` was called with an empty rate list.
+    EmptyBatch = 8,
+    /// Issue #811: Pair symbol is malformed, or a token is outside the allowlist.
+    TokenNotAllowed = 9,
 }
 
 #[contracttype]
@@ -117,6 +121,10 @@ impl FXOracle {
         env.storage()
             .instance()
             .set(&OracleDataKey::StalenessThreshold, &threshold);
+        // An empty list stays "not configured" and permits every pair.
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::AllowedTokens, &allowed_tokens);
     }
 
     pub fn oracle_grant_role(
@@ -267,6 +275,130 @@ impl FXOracle {
         );
 
         Ok(count)
+    }
+
+    /// Issue #811: Admin adds a token to the publish allowlist.
+    ///
+    /// Idempotent. An empty allowlist means enforcement is off; the first
+    /// successful add turns it on.
+    pub fn add_allowed_token(env: Env, admin: Address, token: Symbol) -> Result<(), FXOracleError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(FXOracleError::Unauthorized);
+        }
+        let mut allowed = Self::allowed_tokens(&env);
+        if Self::token_in_list(&allowed, &token) {
+            return Ok(());
+        }
+        if allowed.len() >= MAX_ALLOWED_TOKENS {
+            return Err(FXOracleError::Unauthorized);
+        }
+        allowed.push_back(token);
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::AllowedTokens, &allowed);
+        Ok(())
+    }
+
+    /// Issue #811: Admin removes a token from the publish allowlist.
+    ///
+    /// Idempotent. Existing stored rates are left in place and age out through
+    /// the normal staleness path.
+    pub fn remove_allowed_token(
+        env: Env,
+        admin: Address,
+        token: Symbol,
+    ) -> Result<(), FXOracleError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(FXOracleError::Unauthorized);
+        }
+        let current = Self::allowed_tokens(&env);
+        let mut next = Vec::new(&env);
+        for item in current.iter() {
+            if item != token {
+                next.push_back(item);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::AllowedTokens, &next);
+        Ok(())
+    }
+
+    /// Tokens a rate may be published against. Empty means enforcement is off.
+    pub fn get_allowed_tokens(env: Env) -> Vec<Symbol> {
+        Self::allowed_tokens(&env)
+    }
+
+    /// Whether `token` is on the allowlist. Returns false when the list is empty.
+    pub fn is_token_allowed(env: Env, token: Symbol) -> bool {
+        Self::token_in_list(&Self::allowed_tokens(&env), &token)
+    }
+
+    fn allowed_tokens(env: &Env) -> Vec<Symbol> {
+        env.storage()
+            .instance()
+            .get(&OracleDataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn token_in_list(allowed: &Vec<Symbol>, token: &Symbol) -> bool {
+        for item in allowed.iter() {
+            if item == *token {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Reject a pair unless the allowlist is unset/empty, or both `BASE` and
+    /// `QUOTE` of a single-underscore pair are on the list.
+    fn require_pair_allowed(env: &Env, pair: &Symbol) -> Result<(), FXOracleError> {
+        let allowed = Self::allowed_tokens(env);
+        if allowed.is_empty() {
+            return Ok(());
+        }
+        let (base, quote) = Self::split_pair(env, pair).ok_or(FXOracleError::TokenNotAllowed)?;
+        if Self::token_in_list(&allowed, &base) && Self::token_in_list(&allowed, &quote) {
+            Ok(())
+        } else {
+            Err(FXOracleError::TokenNotAllowed)
+        }
+    }
+
+    /// Split `BASE_QUOTE` into two symbols. `None` when the underscore is
+    /// missing, repeated, or either half is empty.
+    fn split_pair(env: &Env, pair: &Symbol) -> Option<(Symbol, Symbol)> {
+        let str_repr = SymbolStr::try_from_val(env, &pair.to_symbol_val()).ok()?;
+        let text: &str = str_repr.as_ref();
+        let bytes = text.as_bytes();
+
+        let mut separator: Option<usize> = None;
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'_' {
+                if separator.is_some() {
+                    return None;
+                }
+                separator = Some(i);
+            }
+        }
+        let separator = separator?;
+        let base = &bytes[..separator];
+        let quote = &bytes[separator + 1..];
+        if base.is_empty() || quote.is_empty() || base.len() > 32 || quote.len() > 32 {
+            return None;
+        }
+
+        let mut base_buf = [0u8; 32];
+        let mut quote_buf = [0u8; 32];
+        base_buf[..base.len()].copy_from_slice(base);
+        quote_buf[..quote.len()].copy_from_slice(quote);
+        let base_len = base.len();
+        let quote_len = quote.len();
+        let base_sym = Symbol::new(env, core::str::from_utf8(&base_buf[..base_len]).ok()?);
+        let quote_sym = Symbol::new(env, core::str::from_utf8(&quote_buf[..quote_len]).ok()?);
+        Some((base_sym, quote_sym))
     }
 
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
