@@ -24,7 +24,6 @@ fluxapay/test_snapshots
 # Node.js
 node_modules
 dist
-package-lock.json
 
 # actionlint binary (installed at CI runtime via rhysd/actionlint action)
 /actionlint
