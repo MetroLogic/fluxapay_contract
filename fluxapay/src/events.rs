@@ -20,6 +20,109 @@ use crate::merchant_registry::KycTier;
 use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 
 // ============================================================================
+// Merkle Distributor Events
+// ============================================================================
+
+/// Emitted when a new Merkle batch distribution is created and funded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDistributionCreated {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_amount: i128,
+    pub leaf_count: u32,
+    pub expires_at: u64,
+}
+
+/// Emitted when a recipient claims their allocation from a distribution.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleClaimed {
+    pub distribution_id: u64,
+    pub index: u32,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an expired distribution is defunded and unclaimed tokens are
+/// returned to the creator.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDefunded {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub refunded_amount: i128,
+}
+
+/// Emit a `MERKLE/DISTRIBUTION_CREATED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_distribution_created(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    token: &Address,
+    merkle_root: &BytesN<32>,
+    total_amount: i128,
+    leaf_count: u32,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DISTRIBUTION_CREATED"),
+            distribution_id,
+        ),
+        (
+            creator.clone(),
+            token.clone(),
+            merkle_root.clone(),
+            total_amount,
+            leaf_count,
+            expires_at,
+        ),
+    );
+}
+
+/// Emit a `MERKLE/CLAIMED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_claimed(
+    env: &Env,
+    distribution_id: u64,
+    index: u32,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "CLAIMED"),
+            distribution_id,
+        ),
+        (index, recipient.clone(), amount),
+    );
+}
+
+/// Emit a `MERKLE/DEFUNDED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_defunded(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    refunded_amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DEFUNDED"),
+            distribution_id,
+        ),
+        (creator.clone(), refunded_amount),
+    );
+}
+
+// ============================================================================
 // Payment Events
 // ============================================================================
 

@@ -117,7 +117,7 @@ export interface FluxapayConfig {
    */
   apiUrl?: string;
   /**
-   * Issue #840, #839: Base URL of the FluxaPay indexer API used for reconciliation
+* Issue #840, #839: Base URL of the FluxaPay indexer API used for reconciliation
    * CSV downloads and currency conversions. Falls back to `apiUrl` when omitted.
    */
   indexerUrl?: string;
@@ -972,6 +972,35 @@ function toCreatePaymentArgs(params: CreatePaymentParams): CreatePaymentArgs {
     allow_partial: params.allowPartial,
     payer_muxed_id: payerMuxedId,
     tip_enabled: params.tipEnabled ?? false,
+  };
+}
+
+function toSwapAndPayArgs(params: SwapAndPayParams) {
+  const tokenIn = params.tokenIn ?? (params.path && params.path.length > 0 ? params.path[0] : "");
+  const amount = params.amount ?? params.amountOutMin;
+  const depositAddress = params.depositAddress ?? params.merchantId;
+  const expiresAt =
+    params.expiresAt !== undefined
+      ? BigInt(params.expiresAt)
+      : params.deadline !== undefined
+        ? BigInt(params.deadline)
+        : undefined;
+  return {
+    payer: params.payer,
+    payment_id: params.paymentId,
+    merchant_id: params.merchantId,
+    amount,
+    currency: params.currency ?? "USDC",
+    deposit_address: depositAddress,
+    token_in: tokenIn,
+    amount_in: params.amountIn,
+    amount_out_min: params.amountOutMin,
+    path: params.path,
+    expires_at: expiresAt,
+    dex_router: params.dexRouter,
+    fx_oracle: params.fxOracle,
+    oracle_pair: params.oraclePair,
+    max_deviation_bps: params.maxDeviationBps ?? 0,
   };
 }
 
@@ -3458,6 +3487,11 @@ export {
   type FeeConfig,
   type MaybeFeeConfig,
   type CreatePaymentArgs,
+  type SwapAndPayParams,
+  type SwapRoute,
+  type SwapAndPayMultiRouteParams,
+  type StreamTopUp,
+  type StreamWithdrawal,
   FluxapayOfflineSigner,
   type OfflineTransactionPayload,
   type SubscriptionBillingClient,
