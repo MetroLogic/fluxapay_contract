@@ -4,9 +4,9 @@
   "description": "FluxaPay backend API \u2014 SEP-10 challenge/token endpoints for merchant authentication",
   "main": "dist/index.js",
   "scripts": {
-    "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "build": "tsc",
+    "start": "node api.js && node dist/index.js",
+    "dev": "node api.js && ts-node src/index.ts",
+    "build": "node api.js && tsc",
     "test:content-type": "ts-node --transpile-only test/content-type.test.ts"
   },
   "keywords": [

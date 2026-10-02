@@ -39,7 +39,7 @@
     "test:exports": "node --input-type=module -e \"import { FluxapayClient, RefundManagerClient, MerchantRegistryClient } from './dist/index.js'; if (typeof FluxapayClient !== 'function' || typeof RefundManagerClient !== 'function' || typeof MerchantRegistryClient !== 'function') { throw new Error('Missing SDK exports'); }\"",
     "test:node-entry": "tsx --test test/node-entry.test.ts",
     "test:unit": "tsx --test test/error-mapping.test.ts test/bulk-payment-status.test.ts test/error-localization.test.ts",
-    "test:unit": "tsx --test test/error-mapping.test.ts test/bulk-payment-status.test.ts test/error-localization.test.ts test/receipt.test.ts",
+    "test:unit": "tsx --test test/error-mapping.test.ts test/bulk-payment-status.test.ts test/error-localization.test.ts test/receipt.test.ts test/metaTx.test.ts",
     "check-error-map-sync": "tsx ../scripts/check-error-map-sync.ts",
     "lint:jsdoc": "node ../scripts/lint-jsdoc.js",
     "prepublishOnly": "npm run build"

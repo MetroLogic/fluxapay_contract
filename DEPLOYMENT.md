@@ -134,7 +134,21 @@ The CD pipeline automatically:
      -- get_merchant --merchant_id <KNOWN_MERCHANT_ADDRESS>
    ```
 
-4. **Health Check**
+4. **Verify Trusted System Callers**
+    ```bash
+    # Confirm system callbacks are restricted to the deployed contracts
+    stellar contract invoke \
+       --id <MERCHANT_REGISTRY_ID> \
+       --network mainnet \
+       -- get_refund_manager_address
+    stellar contract invoke \
+       --id <MERCHANT_REGISTRY_ID> \
+       --network mainnet \
+       -- get_payment_processor_address
+    ```
+    Expected: Returns the deployed RefundManager and PaymentProcessor contract IDs.
+
+5. **Health Check**
    ```bash
    # Verify contract responds correctly
    stellar contract info interface \
@@ -142,7 +156,7 @@ The CD pipeline automatically:
      --network mainnet
    ```
 
-5. **Monitor Initial Transactions**
+6. **Monitor Initial Transactions**
    - Watch first few transactions on Stellar Expert explorer
    - Verify event logs are correct
    - Check for any error patterns

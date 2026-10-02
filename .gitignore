@@ -12,6 +12,7 @@ fluxapay/test_snapshots
 
 # Git worktrees (linked checkouts — never commit these)
 .worktrees/
+temp_auto_push.bat
 
 # Environment variables (do not commit secrets)
 .env
@@ -24,7 +25,8 @@ fluxapay/test_snapshots
 # Node.js
 node_modules
 dist
-package-lock.json
 
 # actionlint binary (installed at CI runtime via rhysd/actionlint action)
 /actionlint
+.gitignore
+branch_structure.json

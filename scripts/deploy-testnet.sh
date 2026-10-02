@@ -205,6 +205,17 @@ invoke "$REFUND_MANAGER_CONTRACT_ID" \
     echo "   (RefundManager init skipped — may need real USDC token address)"
 echo "   Done."
 
+# Authorize the deployed system contracts for MerchantRegistry callbacks.
+invoke "$MERCHANT_REGISTRY_CONTRACT_ID" \
+    set_refund_manager_address \
+    --admin "$DEPLOYER_ADDRESS" \
+    --refund_manager "$REFUND_MANAGER_CONTRACT_ID"
+invoke "$MERCHANT_REGISTRY_CONTRACT_ID" \
+    set_payment_processor_address \
+    --admin "$DEPLOYER_ADDRESS" \
+    --payment_processor "$PAYMENT_PROCESSOR_CONTRACT_ID"
+echo "   MerchantRegistry system callers configured."
+
 # ── Initialize PaymentLinkManager ────────────────────────────────────────────
 
 echo ">> Initialising PaymentLinkManager..."

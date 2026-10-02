@@ -2028,6 +2028,76 @@ fn test_auto_upgrade_kyc_tier_emits_event() {
 }
 
 #[test]
+fn test_system_callbacks_require_configured_contracts() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let refund_manager = Address::generate(&env);
+    let payment_processor = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_refund_manager_address(&admin, &refund_manager);
+    client.set_payment_processor_address(&admin, &payment_processor);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    assert!(matches!(
+        client.try_suspend_merchant_by_system(
+            &attacker,
+            &merchant_id,
+            &String::from_str(&env, "griefing"),
+            &u64::MAX,
+        ),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+    assert!(matches!(
+        client.try_set_last_settlement_at(&attacker, &merchant_id, &123u64),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+    assert!(matches!(
+        client.try_increment_merchant_dispute_count(&attacker, &merchant_id),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+    assert!(matches!(
+        client.try_increment_resolved_against_count(&attacker, &merchant_id),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+
+    assert_eq!(
+        client.increment_merchant_dispute_count(&payment_processor, &merchant_id),
+        1
+    );
+    client.set_last_settlement_at(&payment_processor, &merchant_id, &123u64);
+    assert_eq!(
+        client.increment_resolved_against_count(&refund_manager, &merchant_id),
+        1
+    );
+    client.suspend_merchant_by_system(
+        &refund_manager,
+        &merchant_id,
+        &String::from_str(&env, "trusted callback"),
+        &u64::MAX,
+    );
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert!(!merchant.active);
+    assert_eq!(merchant.last_settlement_at, Some(123));
+    assert_eq!(merchant.dispute_count, 1);
+    assert_eq!(merchant.resolved_against_count, 1);
+}
+
+#[test]
 fn test_kyc_tier_limits_all_tiers_and_boundaries() {
     let env = Env::default();
     env.mock_all_auths();

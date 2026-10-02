@@ -1739,3 +1739,62 @@ fn test_proposal_executed_applies_config_change() {
 
     assert_eq!(payment_client.get_refund_fee_bps(), new_bps);
 }
+
+/// Issue #904: Integration test verifying that a payment link created with a short TTL
+/// expires and correctly rejects incoming payments after time is advanced past the TTL.
+#[test]
+fn test_payment_link_ttl_expiry_rejects_incoming_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(crate::PaymentLinkManager, ());
+    let client = crate::PaymentLinkManagerClient::new(&env, &contract_id);
+
+    let merchant = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "ttl_exp_link");
+    let amount = 1_000i128;
+    let now = env.ledger().timestamp();
+    let ttl_secs = 60u64; // Short TTL: 60 seconds
+    let expires_at = now + ttl_secs;
+
+    // 1. Create a payment link with a short TTL
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(amount),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Test TTL link"),
+        &Some(expires_at),
+        &None, // unlimited uses
+        &false,
+        &None,
+        &crate::MaybeFiatConfig::None,
+        &None,
+    );
+
+    // 2. Confirm the payment link is initially usable before TTL expires
+    let link_before = client.get_link(&link_id);
+    assert!(link_before.active);
+    assert_eq!(link_before.expires_at, Some(expires_at));
+    assert_eq!(link_before.use_count, 0);
+
+    let initial_payment_id = client.use_link(&payer, &link_id, &amount, &None);
+    assert!(!initial_payment_id.is_empty());
+    assert_eq!(client.get_link(&link_id).use_count, 1);
+
+    // 3. Advance test time beyond the configured TTL
+    env.ledger().set_timestamp(expires_at + 1);
+
+    // 4. Attempt to use the expired payment link
+    let result = client.try_use_link(&payer, &link_id, &amount, &None);
+
+    // 5 & 6. Assert that the operation is rejected specifically with Error::LinkExpired
+    assert_eq!(result, Err(Ok(crate::Error::LinkExpired)));
+
+    // 7. Verify use_count was not incremented by the rejected attempt
+    let link_after = client.get_link(&link_id);
+    assert_eq!(link_after.use_count, 1);
+}
+

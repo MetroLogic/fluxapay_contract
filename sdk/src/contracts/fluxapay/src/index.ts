@@ -212,6 +212,30 @@ export type OracleDataKey =
   | { tag: "Rate"; values: readonly [string] }
   | { tag: "StalenessThreshold"; values: void };
 
+export interface SwapAndPayArgs {
+  payer: string;
+  payment_id: string;
+  merchant_id: string;
+  amount: i128;
+  currency: string;
+  deposit_address: string;
+  token_in: string;
+  amount_in: i128;
+  amount_out_min: i128;
+  path: Array<string>;
+  expires_at?: Option<u64>;
+  dex_router: string;
+  fx_oracle?: Option<string>;
+  oracle_pair?: Option<string>;
+  max_deviation_bps: u32;
+}
+
+export interface SwapRoute {
+  router: string;
+  path: Array<string>;
+  amount_in: i128;
+}
+
 export interface Client {
   /**
    * Construct and simulate a get_merchant transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -502,6 +526,54 @@ export interface Client {
   ) => Promise<AssembledTransaction<Result<Array<Dispute>>>>;
 
   /**
+   * Construct and simulate a get_payment_disputes_by_status transaction.
+   */
+  get_payment_disputes_by_status: (
+    { payment_id, status }: { payment_id: string; status: DisputeStatus },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<Dispute>>>>;
+
+  /**
+   * Construct and simulate a swap_and_pay transaction.
+   */
+  swap_and_pay: (
+    { args }: { args: SwapAndPayArgs },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
+
+  /**
+   * Construct and simulate a swap_and_pay_multi_route transaction.
+   */
+  swap_and_pay_multi_route: (
+    {
+      args,
+      routes,
+      min_output_amount,
+    }: {
+      args: SwapAndPayArgs;
+      routes: Array<SwapRoute>;
+      min_output_amount: i128;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
+
+  /**
+   * Construct and simulate a cancel_multiple_streams transaction.
+   */
+  cancel_multiple_streams: (
+    { sender, stream_ids }: { sender: string; stream_ids: Array<string> },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<string>>>>;
+
+  /**
+   * Construct and simulate a top_up_multiple_streams transaction.
+   */
+  top_up_multiple_streams: (
+    { sender, top_ups }: { sender: string; top_ups: Array<[string, i128]> },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
+
+  /**
    * Construct and simulate a refund_renounce_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   refund_renounce_role: (
@@ -765,6 +837,11 @@ export class Client extends ContractClient {
     refund_revoke_role: (json: string) => (this as any).txFromJSON(json),
     get_payment_refunds: (json: string) => (this as any).txFromJSON(json),
     get_payment_disputes: (json: string) => (this as any).txFromJSON(json),
+    get_payment_disputes_by_status: (json: string) => (this as any).txFromJSON(json),
+    swap_and_pay: (json: string) => (this as any).txFromJSON(json),
+    swap_and_pay_multi_route: (json: string) => (this as any).txFromJSON(json),
+    cancel_multiple_streams: (json: string) => (this as any).txFromJSON(json),
+    top_up_multiple_streams: (json: string) => (this as any).txFromJSON(json),
     refund_renounce_role: (json: string) => (this as any).txFromJSON(json),
     payment_grant_role: (json: string) => (this as any).txFromJSON(json),
     refund_transfer_admin: (json: string) => (this as any).txFromJSON(json),

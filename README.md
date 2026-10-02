@@ -130,12 +130,12 @@ See the full guide: [docs/subscription-guide.md](docs/subscription-guide.md)
 
 ### 4) Dispute handling and resolution
 
-•⁠ ⁠Customer raises a dispute against a confirmed payment with evidence and a bond
+•⁠ ⁠Customer raises a dispute against a confirmed payment; the merchant co-authorizes creation and both parties post a bond
 •⁠ ⁠Operator reviews the case and resolves or rejects it
 •⁠ ⁠Time-based escalation and arbitrator voting protect the process from stalls
 •⁠ ⁠Bond return / forfeiture and merchant score impacts are enforced on-chain
 
-See the full guide: [docs/dispute-resolution-guide.md](docs/dispute-resolution-guide.md)
+Merchant lifecycle and response steps: [docs/disputes.md](docs/disputes.md). For operator details, see the [full dispute resolution guide](docs/dispute-resolution-guide.md).
 
 ### 5) Streaming payroll and milestone payouts
 

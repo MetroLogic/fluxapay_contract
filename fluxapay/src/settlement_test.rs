@@ -38,6 +38,7 @@ fn setup(
 
     // Wire payment processor to merchant registry.
     payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+    merchant_client.set_payment_processor_address(&admin, &payment_client.address);
 
     let merchant = Address::generate(env);
     (admin, payment_client, merchant_client, merchant)

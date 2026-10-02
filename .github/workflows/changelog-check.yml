@@ -33,7 +33,7 @@ jobs:
         id: changelog_check
         if: steps.label_check.outputs.has_skip_label == '0'
         run: |
-          git fetch origin ${{ github.base_ref }} --depth=0
+          git fetch origin ${{ github.base_ref }}
           MODIFIED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -c "^CHANGELOG.md$" || true)
           echo "changelog_modified=$MODIFIED" >> "$GITHUB_OUTPUT"
           if [ "$MODIFIED" = "0" ]; then
