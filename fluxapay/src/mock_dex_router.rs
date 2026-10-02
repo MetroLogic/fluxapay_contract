@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use soroban_sdk::{contract, contracterror, contractimpl, vec, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, token, vec, Address, Env, Symbol, Vec};
 
 pub const OUTPUT_KEY: &str = "output";
 pub const FAIL_SWAP_KEY: &str = "fail_swap";
@@ -47,7 +47,7 @@ impl MockDexRouter {
         amount_in: i128,
         amount_out_min: i128,
         path: Vec<Address>,
-        _to: Address,
+        to: Address,
         _deadline: u64,
     ) -> Result<Vec<i128>, MockDexError> {
         if path.len() < 2 {
@@ -69,6 +69,18 @@ impl MockDexRouter {
                 if output < amount_out_min {
                     return Err(MockDexError::InsufficientOutput);
                 }
+                let token_in = path.get(0).unwrap();
+                let token_out = path.get(path.len() - 1).unwrap();
+                token::Client::new(&env, &token_in).transfer(
+                    &env.current_contract_address(),
+                    &to,
+                    &amount_in,
+                );
+                token::Client::new(&env, &token_out).transfer(
+                    &env.current_contract_address(),
+                    &to,
+                    &output,
+                );
                 Ok(Self::build_amounts(&env, amount_in, output))
             }
             None => Err(MockDexError::SwapFailed),
@@ -77,10 +89,10 @@ impl MockDexRouter {
 
     pub fn execute_swap(
         env: Env,
-        _caller: Address,
-        _token_in: Address,
-        _token_out: Address,
-        _amount_in: i128,
+        caller: Address,
+        token_in: Address,
+        token_out: Address,
+        amount_in: i128,
         min_amount_out: i128,
         max_slippage_bps: u32,
     ) -> Result<i128, MockDexError> {
@@ -106,6 +118,16 @@ impl MockDexRouter {
                 if output < min_amount_out || output < min_from_bps {
                     return Err(MockDexError::InsufficientOutput);
                 }
+                token::Client::new(&env, &token_in).transfer(
+                    &caller,
+                    &env.current_contract_address(),
+                    &amount_in,
+                );
+                token::Client::new(&env, &token_out).transfer(
+                    &env.current_contract_address(),
+                    &caller,
+                    &output,
+                );
                 Ok(output)
             }
             None => Err(MockDexError::SwapFailed),
