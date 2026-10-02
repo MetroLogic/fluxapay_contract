@@ -36,8 +36,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup nightly Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.1
 
       - name: Cache cargo registry
         uses: actions/cache@v4
