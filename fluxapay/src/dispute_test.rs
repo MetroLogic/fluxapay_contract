@@ -1742,3 +1742,59 @@ fn test_open_dispute_stores_evidence_hash_and_emits_event() {
     // Check DISPUTE/OPENED event was published
     assert!(has_dispute_event(&env, "OPENED"));
 }
+
+#[test]
+fn test_get_all_disputes_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, refund_client) = setup_contracts(&env);
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+
+    for i in 0..5u32 {
+        let pid = crate::utils::format_id(&env, "all_disp_", i as u64);
+        let amount = 100i128;
+        payment_client.create_payment(&create_payment_args(&env, &pid, &merchant, amount));
+        let oracle = Address::generate(&env);
+        payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+        payment_client.verify_payment(
+            &oracle,
+            &pid,
+            &BytesN::from_array(&env, &[(i + 1) as u8; 32]),
+            &customer,
+            &amount,
+            &None::<u64>,
+        );
+        let token_address = env.as_contract(&refund_client.address, || {
+            env.storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::UsdcToken)
+                .unwrap()
+        });
+        token::StellarAssetClient::new(&env, &token_address).mint(&merchant, &100_000);
+        refund_client.register_payment(&pid, &merchant, &amount, &Symbol::new(&env, "USDC"));
+        refund_client.create_dispute(
+            &pid,
+            &amount,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, VALID_CID_V0),
+            &customer,
+            &vec![&env],
+        );
+    }
+
+    let page1 = refund_client.get_all_disputes(&0u32, &2u32);
+    assert_eq!(page1.len(), 2);
+
+    let page2 = refund_client.get_all_disputes(&2u32, &2u32);
+    assert_eq!(page2.len(), 2);
+
+    let page3 = refund_client.get_all_disputes(&4u32, &2u32);
+    assert_eq!(page3.len(), 1);
+
+    let all = refund_client.get_all_disputes(&0u32, &10u32);
+    assert_eq!(all.len(), 5);
+}
