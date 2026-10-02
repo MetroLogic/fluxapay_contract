@@ -132,7 +132,6 @@ pub const MIN_TIMELOCK_LEDGERS: u32 = 17_280;
 pub struct AccessControl;
 
 impl AccessControl {
-
     pub fn initialize(env: &Env, admin: Address) {
         env.storage()
             .persistent()
@@ -800,6 +799,7 @@ impl AccessControl {
             &AccessControlDataKey::PendingAdminTransfer,
             &(new_admin.clone(), earliest_ledger),
         );
+        let lock_in = 7 * 24 * 60 * 60; // 7 days in seconds
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::AdminTransferLockIn, &lock_in);

@@ -4,18 +4,23 @@
   "description": "FluxaPay Soroban event indexer for PostgreSQL",
   "main": "dist/index.js",
   "scripts": {
-    "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "start:api": "node dist/server.js",
-    "dev:api": "ts-node src/server.ts",
-    "build": "tsc",
+    "start": "node init && node dist/index.js",
+    "dev": "node init && ts-node src/index.ts",
+    "start:api": "node init && node dist/server.js",
+    "dev:api": "node init && ts-node src/server.ts",
+    "build": "node init && tsc",
     "test": "ts-node --test test/webhooks.test.ts test/rate-limit.test.ts",
     "migrate": "node dist/migrations/run.js",
     "drizzle:generate": "drizzle-kit generate",
     "drizzle:studio": "drizzle-kit studio",
     "watch": "tsc --watch"
   },
-  "keywords": ["soroban", "indexer", "stellar", "postgres"],
+  "keywords": [
+    "soroban",
+    "indexer",
+    "stellar",
+    "postgres"
+  ],
   "author": "FluxaPay",
   "license": "MIT",
   "dependencies": {

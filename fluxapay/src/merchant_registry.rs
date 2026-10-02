@@ -281,7 +281,7 @@ pub enum MerchantError {
     DuplicateVote = 11,
     /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
     KycLimitExceeded = 12,
-    PageSizeTooLarge = 12,
+    PageSizeTooLarge = 13,
 }
 
 #[cfg_attr(
@@ -1685,10 +1685,8 @@ impl MerchantRegistry {
     /// Issue #184: System-initiated suspension triggered by the RefundManager contract
     /// when a merchant's dispute rate exceeds the auto-suspend threshold.
     ///
-    /// Unlike `suspend_merchant`, this function does **not** require admin auth —
-    /// it is intended to be called cross-contract by the RefundManager. The caller
-    /// is the RefundManager contract address itself, which is trusted implicitly
-    /// because it is a deployed contract (not an externally-owned account).
+    /// Unlike `suspend_merchant`, this function does not require admin auth. It
+    /// accepts calls only from the configured RefundManager or PaymentProcessor.
     ///
     /// # Arguments
     /// * `merchant_id`          – The merchant to suspend.
@@ -1696,10 +1694,26 @@ impl MerchantRegistry {
     /// * `expiration_duration`  – Duration in seconds after which the suspension auto-lifts.
     pub fn suspend_merchant_by_system(
         env: Env,
+        caller: Address,
         merchant_id: Address,
         reason: String,
         expiration_duration: u64,
     ) -> Result<(), MerchantError> {
+        caller.require_auth();
+        let refund_manager: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::RefundManagerAddress);
+        let payment_processor: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress);
+        if refund_manager.as_ref() != Some(&caller)
+            && payment_processor.as_ref() != Some(&caller)
+        {
+            return Err(MerchantError::Unauthorized);
+        }
+
         // Only suspend if the merchant exists and is currently active
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
 
@@ -2158,9 +2172,20 @@ impl MerchantRegistry {
     /// Set the last settlement timestamp for a merchant.
     pub fn set_last_settlement_at(
         env: Env,
+        caller: Address,
         merchant_id: Address,
         timestamp: u64,
     ) -> Result<(), MerchantError> {
+        caller.require_auth();
+        let payment_processor: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+        if caller != payment_processor {
+            return Err(MerchantError::Unauthorized);
+        }
+
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.last_settlement_at = Some(timestamp);
         env.storage()
@@ -2180,8 +2205,24 @@ impl MerchantRegistry {
     /// Returns the new dispute count.
     pub fn increment_merchant_dispute_count(
         env: Env,
+        caller: Address,
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
+        caller.require_auth();
+        let refund_manager: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::RefundManagerAddress);
+        let payment_processor: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress);
+        if refund_manager.as_ref() != Some(&caller)
+            && payment_processor.as_ref() != Some(&caller)
+        {
+            return Err(MerchantError::Unauthorized);
+        }
+
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.dispute_count = merchant.dispute_count.saturating_add(1);
 
@@ -2196,8 +2237,19 @@ impl MerchantRegistry {
     /// Returns the new resolved_against_merchant_count.
     pub fn increment_resolved_against_count(
         env: Env,
+        caller: Address,
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
+        caller.require_auth();
+        let refund_manager: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::RefundManagerAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+        if caller != refund_manager {
+            return Err(MerchantError::Unauthorized);
+        }
+
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.lost_disputes_count = merchant.lost_disputes_count.saturating_add(1);
         merchant.resolved_against_count = merchant.resolved_against_count.saturating_add(1);
@@ -2309,7 +2361,11 @@ impl MerchantRegistry {
     /// Checks single-payment limit and calendar monthly volume cap.
     /// Resets monthly volume on the 1st of each month (UTC).
     /// Returns `KycLimitExceeded` if payment exceeds either limit.
-    pub fn check_kyc_limit(env: Env, merchant_id: Address, amount: i128) -> Result<(), MerchantError> {
+    pub fn check_kyc_limit(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<(), MerchantError> {
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
 
         if !merchant.active || merchant.suspension_reason.is_some() {
@@ -2319,7 +2375,9 @@ impl MerchantRegistry {
         let (max_single, max_monthly) = match merchant.kyc_tier {
             KycTier::Unverified => (crate::TIER_0_MAX_SINGLE, crate::TIER_0_MAX_MONTHLY),
             KycTier::Basic => (crate::TIER_1_MAX_SINGLE, crate::TIER_1_MAX_MONTHLY),
-            KycTier::Full | KycTier::Business => (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY),
+            KycTier::Full | KycTier::Business => {
+                (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY)
+            }
         };
 
         if amount > max_single {
@@ -2351,12 +2409,12 @@ impl MerchantRegistry {
     }
 
     /// Issue #777: Query KYC tier as numeric level (0 = Unverified, 1 = Basic, 2 = Full/Business).
-    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u8, MerchantError> {
+    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u32, MerchantError> {
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         Ok(match merchant.kyc_tier {
-            KycTier::Unverified => 0,
-            KycTier::Basic => 1,
-            KycTier::Full | KycTier::Business => 2,
+            KycTier::Unverified => 0u32,
+            KycTier::Basic => 1u32,
+            KycTier::Full | KycTier::Business => 2u32,
         })
     }
 

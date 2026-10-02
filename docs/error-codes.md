@@ -183,7 +183,12 @@ document on every CI run to catch drift between them.
 | 1 | `Unauthorized` | Caller is not authorized to use this session key. | Executing a payload with a session key you don't own. | Use a session key granted to your account. |
 | 2 | `SessionNotFound` | No session exists for the given (account, session_key) pair. | Typo'd session key, or session was never granted. | Grant a session key before attempting execution. |
 | 3 | `SessionExpired` | The session key has passed its expiry time. | Executing after the session's validity window closed. | Grant a new session key. |
-| 4 | `InvalidPayload` | The execution payload failed validation. | Malformed or empty payload/hash. | Pass a well-formed payload matching the expected schema. |
+| 4 | `InvalidPayload` | The execution payload failed validation. | Malformed or empty payload/hash, or a negative spend cap. | Pass a `SessionInvocation` XDR payload and non-negative policy caps. |
+| 5 | `SignerRevoked` | The session key was revoked before execution. | The account owner called `revoke_session_key` while a payload was in flight. | Register a new session key. |
+| 6 | `SpendLimitExceeded` | One call exceeds `max_amount_per_tx`. | The invocation amount is above the per-transaction cap. | Split the charge or raise the cap. |
+| 7 | `WindowBudgetExceeded` | The rolling window budget is exhausted. | Cumulative spend in the current window would pass `max_amount_per_window`. | Wait for the window to roll, or raise the budget. |
+| 8 | `ContractNotAllowed` | The target contract is not on the session allowlist. | Payload `target_contract` is outside `allowed_contracts`. | Call an allowlisted contract, or register a wider policy. |
+| 9 | `FunctionNotAllowed` | The function selector is not on the session allowlist. | Payload `function` is outside `allowed_functions`. | Call an allowlisted function, or register a wider policy. |
 
 ---
 

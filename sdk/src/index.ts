@@ -80,6 +80,7 @@ import {
   DEFAULT_RECEIPT_BASE_URL,
   type PaymentReceipt,
 } from "./receipt.js";
+import { FluxapayError, ERROR_CONSTRUCTOR_MAP } from "./errors.js";
 
 
 export {
@@ -116,14 +117,11 @@ export interface FluxapayConfig {
    */
   apiUrl?: string;
   /**
-   * Issue #840: Base URL of the FluxaPay indexer API used for reconciliation
-   * CSV downloads. Falls back to `apiUrl` when omitted.
+   * Issue #840, #839: Base URL of the FluxaPay indexer API used for reconciliation
+   * CSV downloads and currency conversions. Falls back to `apiUrl` when omitted.
    */
   indexerUrl?: string;
-   * Issue #839: Base URL of the FluxaPay indexer API. Used by
-   * `convertCurrency`. Falls back to `apiUrl` when unset.
-   */
-  indexerUrl?: string;
+  /**
    * Issue #816: Stellar secret key (S...) for the FluxaPay platform receipt
    * signing key. Required for `generateReceipt`.
    */
@@ -223,6 +221,7 @@ export interface CreatePaymentParams {
    * Issue #841: Optional muxed sub-account ID directly (alternative to `muxedPayer`).
    */
   payerMuxedId?: bigint;
+  /**
    * Issue #844: When true, checkout may collect an optional tip via
    * `confirmPayment({ tipAmount })`.
    */
@@ -255,6 +254,62 @@ export interface PaymentRequest {
 export interface CreatePaymentBatchParams {
   merchantId: string;
   payments: PaymentRequest[];
+}
+
+/**
+ * Issue #577: Parameters for atomic swap-and-pay through a DEX router.
+ */
+export interface SwapAndPayParams {
+  payer: string;
+  merchantId: string;
+  paymentId: string;
+  dexRouter: string;
+  path: string[];
+  amountIn: bigint;
+  amountOutMin: bigint;
+  deadline?: number;
+  amount?: bigint;
+  currency?: string;
+  depositAddress?: string;
+  tokenIn?: string;
+  expiresAt?: number | bigint;
+  fxOracle?: string;
+  oraclePair?: string;
+  maxDeviationBps?: number;
+}
+
+/**
+ * Issue #577: Single route specification for multi-route swap routing / aggregation.
+ */
+export interface SwapRoute {
+  router: string;
+  path: string[];
+  amountIn: bigint;
+}
+
+/**
+ * Issue #577: Parameters for multi-route swap payments.
+ */
+export interface SwapAndPayMultiRouteParams extends SwapAndPayParams {
+  routes: SwapRoute[];
+  minOutputAmount?: bigint;
+}
+
+/**
+ * Issue #576: Stream top-up entry for batch top-up operations.
+ */
+export interface StreamTopUp {
+  streamId: string;
+  amount: bigint;
+}
+
+/**
+ * Issue #576: Stream withdrawal entry for batch withdrawal operations.
+ */
+export interface StreamWithdrawal {
+  streamId: string;
+  destination?: string;
+  amount?: bigint;
 }
 
 /** Mirrors the on-chain `StreamStatus` enum in `stream.rs`. */
@@ -653,11 +708,22 @@ export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
   67: "InputTooLong",
   68: "TimelockNotExpired",
   69: "InvalidEvidenceCid",
-  70: "InvalidPaymentLink",
-  71: "KycLimitExceeded",
   70: "MuxedAccountMismatch",
-  70: "TrialActive",
-  71: "TrialTooLong",
+  71: "TreasuryMultisigNotConfigured",
+  72: "NotAuthorizedTreasurySigner",
+  73: "TreasuryProposalNotFound",
+  74: "TreasuryProposalAlreadyExecuted",
+  75: "TreasuryProposalCancelled",
+  76: "TreasuryTimelockNotExpired",
+  77: "TreasuryProposalExpired",
+  78: "TreasuryAlreadyApproved",
+  79: "TreasuryInsufficientApprovals",
+  80: "InvalidTreasuryThreshold",
+  81: "InsufficientTokenTreasuryBalance",
+  82: "TrialActive",
+  83: "TrialTooLong",
+  84: "InvalidPaymentLink",
+  85: "KycLimitExceeded",
   404: "PaymentNotFound",
   405: "RefundNotFound",
   406: "InvalidAmount",
@@ -729,6 +795,20 @@ export {
   InputTooLongError,
   TimelockNotExpiredError,
   InvalidEvidenceCidError,
+  MuxedAccountMismatchError,
+  TreasuryMultisigNotConfiguredError,
+  NotAuthorizedTreasurySignerError,
+  TreasuryProposalNotFoundError,
+  TreasuryProposalAlreadyExecutedError,
+  TreasuryProposalCancelledError,
+  TreasuryTimelockNotExpiredError,
+  TreasuryProposalExpiredError,
+  TreasuryAlreadyApprovedError,
+  TreasuryInsufficientApprovalsError,
+  InvalidTreasuryThresholdError,
+  InsufficientTokenTreasuryBalanceError,
+  TrialActiveError,
+  TrialTooLongError,
   InvalidPaymentLinkError,
   KycLimitExceededError,
   PaymentNotFoundError,
@@ -891,6 +971,36 @@ function toCreatePaymentArgs(params: CreatePaymentParams): CreatePaymentArgs {
     fee_waiver_code: params.feeWaiverCode,
     allow_partial: params.allowPartial,
     payer_muxed_id: payerMuxedId,
+    tip_enabled: params.tipEnabled ?? false,
+  };
+}
+
+function toSwapAndPayArgs(params: SwapAndPayParams) {
+  const tokenIn = params.tokenIn ?? (params.path && params.path.length > 0 ? params.path[0] : "");
+  const amount = params.amount ?? params.amountOutMin;
+  const depositAddress = params.depositAddress ?? params.merchantId;
+  const expiresAt =
+    params.expiresAt !== undefined
+      ? BigInt(params.expiresAt)
+      : params.deadline !== undefined
+        ? BigInt(params.deadline)
+        : undefined;
+  return {
+    payer: params.payer,
+    payment_id: params.paymentId,
+    merchant_id: params.merchantId,
+    amount,
+    currency: params.currency ?? "USDC",
+    deposit_address: depositAddress,
+    token_in: tokenIn,
+    amount_in: params.amountIn,
+    amount_out_min: params.amountOutMin,
+    path: params.path,
+    expires_at: expiresAt,
+    dex_router: params.dexRouter,
+    fx_oracle: params.fxOracle,
+    oracle_pair: params.oraclePair,
+    max_deviation_bps: params.maxDeviationBps ?? 0,
   };
 }
 
@@ -947,7 +1057,6 @@ export function decodeMuxedAddress(mAddress: string): { gAddress: string; id: bi
   return {
     gAddress: muxed.baseAccount().accountId(),
     id: BigInt(muxed.id),
-    tip_enabled: params.tipEnabled ?? false,
   };
 }
 
@@ -1110,6 +1219,7 @@ export class FluxapayClient {
   /**
    * Issue #771: Create up to 10 payment charges atomically in a single transaction.
    * Wraps the `create_payment_batch` contract entry point.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   async createPaymentBatch(params: CreatePaymentBatchParams): Promise<string[]> {
     if (params.payments.length > 10) {
@@ -1141,8 +1251,71 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #577: Swap tokens on a DEX router and pay a merchant in one atomic transaction.
+   * Maps to `PaymentProcessor.swap_and_pay` on-chain.
+   *
+   * @throws {ArbitrageDetectedError} If DEX output is worse than the quoted path return.
+   * @throws {SwapPathInvalidError} If swap path is empty or output token does not match.
+   * @throws {OraclePriceDeviationError} If swap rate deviates from oracle beyond tolerance.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async swapAndPay(params: SwapAndPayParams): Promise<PaymentCharge> {
+    return withMappedContractError(async () => {
+      const args = toSwapAndPayArgs(params);
+      const fn = (this.contract as any).swap_and_pay;
+      if (typeof fn === "function") {
+        try {
+          const res = await fn.call(this.contract, { args });
+          return (res as any)?.result ?? res;
+        } catch (e) {
+          const res = await fn.call(this.contract, args);
+          return (res as any)?.result ?? res;
+        }
+      }
+      throw new FluxapayError(28, "SwapPathInvalid", "swap_and_pay is not supported on this contract instance");
+    });
+  }
+
+  /**
+   * Issue #577: Split a token swap across multiple DEX routes and pay a merchant atomically.
+   * Maps to `PaymentProcessor.swap_and_pay_multi_route` on-chain.
+   *
+   * @throws {ArbitrageDetectedError} If DEX output is worse than quoted path returns.
+   * @throws {SwapPathInvalidError} If any route swap path is invalid.
+   * @throws {OraclePriceDeviationError} If swap rate deviates from oracle beyond tolerance.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async swapAndPayMultiRoute(params: SwapAndPayMultiRouteParams): Promise<PaymentCharge> {
+    return withMappedContractError(async () => {
+      const args = toSwapAndPayArgs(params);
+      const routes = params.routes.map((r) => ({
+        router: r.router,
+        path: r.path,
+        amount_in: r.amountIn,
+      }));
+      const minOutputAmount = params.minOutputAmount ?? params.amountOutMin ?? params.amount ?? 0n;
+      const fn = (this.contract as any).swap_and_pay_multi_route;
+      if (typeof fn === "function") {
+        try {
+          const res = await fn.call(this.contract, {
+            args,
+            routes,
+            min_output_amount: minOutputAmount,
+          });
+          return (res as any)?.result ?? res;
+        } catch (e) {
+          const res = await fn.call(this.contract, args, routes, minOutputAmount);
+          return (res as any)?.result ?? res;
+        }
+      }
+      throw new FluxapayError(28, "SwapPathInvalid", "swap_and_pay_multi_route is not supported on this contract instance");
+    });
+  }
+
+  /**
    * Issue #763: Permissionlessly expire a pending payment whose TTL has elapsed.
    * Returns PaymentExpired error if the payment has not yet expired.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   async expirePayment(paymentId: string): Promise<void> {
     return withMappedContractError(async () => {
@@ -1215,9 +1388,35 @@ export class FluxapayClient {
    * verifyPaymentBatch
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
+  async verifyPaymentBatch(params: {
+    operator: string;
+    verifications: Array<{
+      paymentId: string;
+      transactionHash: Buffer;
+      payerAddress: string;
+      amountReceived: bigint;
+      payerMuxedId?: bigint;
+    }>;
+  }) {
+    return withMappedContractError(() =>
+      (this.contract as any).verify_payment_batch({
+        operator: params.operator,
+        verifications: params.verifications.map((verification) => ({
+          payment_id: verification.paymentId,
+          transaction_hash: verification.transactionHash,
+          payer_address: verification.payerAddress,
+          amount_received: verification.amountReceived,
+          payer_muxed_id: verification.payerMuxedId,
+        })),
+      }),
+    );
+  }
+
+  /**
    * Issue #844: Confirm a payment (checkout flow), optionally with a tip.
    * `tipAmount` is only accepted when the payment was created with
    * `tipEnabled: true`. Tip is stored separately from base `amount`.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   async confirmPayment(params: {
     oracle: string;
@@ -1239,30 +1438,6 @@ export class FluxapayClient {
           tip_amount: params.tipAmount,
           payer_muxed_id: params.payerMuxedId,
         },
-      }),
-    );
-  }
-
-  async verifyPaymentBatch(params: {
-    operator: string;
-    verifications: Array<{
-      paymentId: string;
-      transactionHash: Buffer;
-      payerAddress: string;
-      amountReceived: bigint;
-      payerMuxedId?: bigint;
-    }>;
-  }) {
-    return withMappedContractError(() =>
-      (this.contract as any).verify_payment_batch({
-        operator: params.operator,
-        verifications: params.verifications.map((verification) => ({
-          payment_id: verification.paymentId,
-          transaction_hash: verification.transactionHash,
-          payer_address: verification.payerAddress,
-          amount_received: verification.amountReceived,
-          payer_muxed_id: verification.payerMuxedId,
-        })),
       }),
     );
   }
@@ -1798,6 +1973,7 @@ export class FluxapayClient {
 
   /**
    * Read-only view function to retrieve the stored SHA-256 evidence hash for a dispute (Issue #773).
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   async verifyEvidence(disputeId: string | number): Promise<string> {
     return withMappedContractError(async () => {
@@ -1867,15 +2043,44 @@ export class FluxapayClient {
   }
 
   /**
-   * Get all disputes for a payment
+   * Issue #575: Get all disputes for a payment, optionally filtered by status.
+   * @param paymentId - The payment ID to query disputes for.
+   * @param status - Optional dispute status filter.
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
-  async getPaymentDisputes(paymentId: string) {
+  async getPaymentDisputes(paymentId: string, status?: DisputeStatus) {
+    if (status !== undefined) {
+      return this.getPaymentDisputesByStatus(paymentId, status);
+    }
     return withMappedContractError(() =>
       this.contract.get_payment_disputes({
         payment_id: paymentId,
       }),
     );
+  }
+
+  /**
+   * Issue #575: Get disputes for a payment filtered by dispute status.
+   * Maps to `PaymentProcessor.get_payment_disputes_by_status` on-chain.
+   *
+   * @param paymentId - The payment ID to query disputes for.
+   * @param status - The dispute status to filter by.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async getPaymentDisputesByStatus(paymentId: string, status: DisputeStatus) {
+    return withMappedContractError(async () => {
+      const fn = (this.contract as any).get_payment_disputes_by_status;
+      if (typeof fn === "function") {
+        const res = await fn.call(this.contract, {
+          payment_id: paymentId,
+          status,
+        });
+        return (res as any)?.result ?? res;
+      }
+      const all = await this.contract.get_payment_disputes({ payment_id: paymentId });
+      const list = (all as any)?.result ?? all;
+      return Array.isArray(list) ? list.filter((d: any) => d.status === status) : list;
+    });
   }
 
   /**
@@ -1936,9 +2141,6 @@ export class FluxapayClient {
   }
 
   /**
-   * getPaymentStatusHistory
-   * @throws {FluxapayError} If the contract operation fails or returns an error.
-   */
    * Issue #816: Produce a signed, shareable payment receipt for a confirmed
    * (or settled) payment. The `proof` field is an Ed25519 signature over the
    * canonical receipt fields, verifiable offline with {@link verifyReceipt}.
@@ -1947,6 +2149,8 @@ export class FluxapayClient {
    * (default base `https://receipts.fluxapay.io`).
    *
    * Requires `platformSigningKey` in {@link FluxapayConfig}.
+   * @throws {Error} If platformSigningKey is not configured.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   async generateReceipt(paymentId: string): Promise<PaymentReceipt> {
     if (!this.config.platformSigningKey) {
@@ -2027,6 +2231,7 @@ export class FluxapayClient {
    *
    * Uses `platformPublicKey` from config, or derives it from
    * `platformSigningKey` when only the secret is configured.
+   * @throws {Error} If platformPublicKey or platformSigningKey is not configured.
    */
   verifyReceipt(receipt: PaymentReceipt): boolean {
     const publicKey =
@@ -2042,6 +2247,10 @@ export class FluxapayClient {
     return verifyReceiptProof(receipt, publicKey);
   }
 
+  /**
+   * Fetch payment status transition history for a given payment.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
   async getPaymentStatusHistory(paymentId: string) {
     return withMappedContractError(() =>
       (this.contract as any).get_payment_status_history({ payment_id: paymentId }),
@@ -2488,19 +2697,6 @@ export class FluxapayClient {
     const text = await res.text();
     params.dest.write(text);
     params.dest.end();
-  }
-
-  /**
-   * Issue #839: Resolve the indexer base URL for public FX preview calls.
-   */
-  private getIndexerUrl(): string {
-    const base = this.config.indexerUrl || this.config.apiUrl;
-    if (!base) {
-      throw new Error(
-        "indexerUrl (or apiUrl) is required in FluxapayConfig to use convertCurrency.",
-      );
-    }
-    return base.replace(/\/$/, "");
   }
 
   /**
@@ -3054,6 +3250,40 @@ export class FluxapayClient {
   }
 
   /**
+   * Issue #576: Batch withdraw accrued tokens from multiple streams to a recipient.
+   * Maps to `PaymentProcessor.batch_withdraw_to` on-chain.
+   *
+   * @param recipient - Must be the streams' receiver; must sign.
+   * @param streamIds - List of stream IDs (or withdrawal specs) to withdraw from.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async batchWithdrawTo(
+    recipient: string,
+    streamIds: string[] | StreamWithdrawal[],
+  ): Promise<void> {
+    return withMappedContractError(async () => {
+      const withdrawals = streamIds.map((item) => {
+        if (typeof item === "string") {
+          return {
+            stream_id: item,
+            destination: recipient,
+            amount: I128_MAX,
+          };
+        }
+        return {
+          stream_id: item.streamId,
+          destination: item.destination ?? recipient,
+          amount: item.amount ?? I128_MAX,
+        };
+      });
+      await (this.contract as any).batch_withdraw_to({
+        recipient,
+        withdrawals,
+      });
+    });
+  }
+
+  /**
    * setStreamFeeRecipient
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
@@ -3082,6 +3312,23 @@ export class FluxapayClient {
     return withMappedContractError(() =>
       (this.contract as any).cancel_stream({ sender, stream_id: streamId }),
     );
+  }
+
+  /**
+   * Issue #576: Cancel multiple active streams in a single transaction.
+   * Maps to `PaymentProcessor.cancel_multiple_streams` on-chain.
+   *
+   * @param sender - The creator of the streams; must sign.
+   * @param streamIds - List of stream IDs to cancel.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async cancelMultipleStreams(sender: string, streamIds: string[]): Promise<void> {
+    return withMappedContractError(async () => {
+      await (this.contract as any).cancel_multiple_streams({
+        sender,
+        stream_ids: streamIds,
+      });
+    });
   }
 
   /**
@@ -3115,6 +3362,27 @@ export class FluxapayClient {
     return withMappedContractError(() =>
       (this.contract as any).top_up_stream({ caller: sender, stream_id: streamId, amount }),
     );
+  }
+
+  /**
+   * Issue #576: Top up multiple streams in a single transaction.
+   * Maps to `PaymentProcessor.top_up_multiple_streams` on-chain.
+   *
+   * @param sender - The sender funding the top-ups; must sign.
+   * @param topUps - List of stream IDs and top-up amounts.
+   * @throws {FluxapayError} If the contract operation fails or returns an error.
+   */
+  async topUpMultipleStreams(
+    sender: string,
+    topUps: StreamTopUp[] | Array<{ streamId: string; amount: bigint }>,
+  ): Promise<void> {
+    return withMappedContractError(async () => {
+      const formatted = topUps.map((t) => [t.streamId, t.amount]);
+      await (this.contract as any).top_up_multiple_streams({
+        sender,
+        top_ups: formatted,
+      });
+    });
   }
 
   /**
@@ -3206,6 +3474,16 @@ export {
   NetworkProfiles,
   type NetworkProfile,
 };
+export {
+  buildMetaTransactionPayload,
+  domainSeparator,
+  signingPreimage,
+  signingDigest,
+  signMetaTransaction,
+  META_TX_FUNCTIONS,
+  type MetaTransactionPayload,
+  type MetaTransactionTarget,
+} from "./metaTx.js";
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
 export {

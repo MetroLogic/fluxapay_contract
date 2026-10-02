@@ -51,10 +51,16 @@ for (let i = 0; i < lines.length; i++) {
 
   // Match method declaration: e.g. async methodName( or methodName(
   const methodMatch = trimmed.match(/^(?:async\s+)?([a-zA-Z0-9_]+)\s*\([^)]*\)\s*(?::\s*[^;{]+)?\s*\{/);
-  // Exclude private / constructor / helpers
+  // Exclude private / constructor / helpers and JS control-flow statements
   if (methodMatch) {
     const methodName = methodMatch[1];
-    if (methodName !== "constructor" && !methodName.startsWith("#") && !methodName.startsWith("_")) {
+    const JS_KEYWORDS = new Set(["if", "while", "for", "switch", "catch"]);
+    if (
+      methodName !== "constructor" &&
+      !methodName.startsWith("#") &&
+      !methodName.startsWith("_") &&
+      !JS_KEYWORDS.has(methodName)
+    ) {
       checkedMethods++;
       if (!currentJsDoc || !currentJsDoc.includes("@throws")) {
         missingThrows.push(methodName);

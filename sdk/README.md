@@ -409,7 +409,10 @@ await client.resolveDisputeWithRefund("G...", "dispute_001", "Refund approved");
 
 // Query disputes
 const dispute = await client.getDispute("dispute_001");
-const paymentDisputes = await client.getPaymentDisputes("pay_123");
+const allDisputes = await client.getPaymentDisputes("pay_123");
+// Filter disputes by status (Issue #575)
+const openDisputes = await client.getPaymentDisputes("pay_123", "Open");
+const resolvedDisputes = await client.getPaymentDisputesByStatus("pay_123", "Resolved");
 ```
 
 ## Partial / Overpaid Payments (FluxapayClient)
@@ -887,7 +890,72 @@ const details = await client.getStream("stream_001");
 const senderStreams = await client.getSenderStreams("G_SENDER...");
 
 await client.cancelStream("G_SENDER...", "stream_001");
+
+// Batch stream operations (Issue #576)
+// Top up multiple streams in a single transaction
+await client.topUpMultipleStreams("G_SENDER...", [
+  { streamId: "stream_001", amount: 250_000n },
+  { streamId: "stream_002", amount: 500_000n },
+]);
+
+// Batch withdraw accrued balances from multiple streams
+await client.batchWithdrawTo("G_RECEIVER...", ["stream_001", "stream_002"]);
+
+// Cancel multiple streams in a single transaction
+await client.cancelMultipleStreams("G_SENDER...", ["stream_001", "stream_002"]);
 ```
+
+## Swap Payments (DEX Routing)
+
+Merchants who accept payments via Soroban DEX swap routing can have payers execute token swaps and payments atomically via `FluxapayClient` (Issue #577).
+
+```typescript
+// Single-route swap-and-pay
+const charge = await client.swapAndPay({
+  payer: "G_PAYER...",
+  merchantId: "G_MERCHANT...",
+  paymentId: "swap_pay_001",
+  dexRouter: "C_DEX_ROUTER...",
+  path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
+  amountIn: 10_000_000n,
+  amountOutMin: 9_900_000n,
+  deadline: Math.floor(Date.now() / 1000) + 3600,
+});
+
+// Multi-route split swap-and-pay
+const multiCharge = await client.swapAndPayMultiRoute({
+  payer: "G_PAYER...",
+  merchantId: "G_MERCHANT...",
+  paymentId: "multi_swap_pay_001",
+  dexRouter: "C_PRIMARY_ROUTER...",
+  path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
+  amountIn: 10_000_000n,
+  amountOutMin: 9_900_000n,
+  routes: [
+    {
+      router: "C_DEX_ROUTER_1...",
+      path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
+      amountIn: 5_000_000n,
+    },
+    {
+      router: "C_DEX_ROUTER_2...",
+      path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
+      amountIn: 5_000_000n,
+    },
+  ],
+});
+```
+
+### Swap Error Handling
+
+Swap failures map directly to typed `FluxapayError` subclasses:
+
+| Error Class | Code | Reason |
+|-------------|------|--------|
+| `ArbitrageDetectedError` | `#27` | DEX router swap slippage or price sandwich detected. |
+| `SwapPathInvalidError` | `#28` | Route swap path between tokens is invalid or empty. |
+| `OraclePriceDeviationError` | `#29` | DEX swap quote deviates from oracle price beyond tolerance threshold. |
+
 
 ## Gas Estimation
 

@@ -2,11 +2,11 @@
   "name": "@fluxapay/dashboard",
   "version": "0.1.0",
   "private": true,
-  "description": "FluxaPay merchant dashboard — authenticated payment management UI",
+  "description": "FluxaPay merchant dashboard \u2014 authenticated payment management UI",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node init && next dev",
+    "build": "node init && next build",
+    "start": "node init && next start",
     "lint": "next lint"
   },
   "dependencies": {

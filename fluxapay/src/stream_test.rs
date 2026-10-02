@@ -1048,7 +1048,8 @@ fn test_create_multi_stream_ten_payees() {
     let (client, sender, _receiver, token) = setup(&env);
 
     let mut payees = vec![&env];
-    let mut payee_addrs: [Option<Address>; 10] = [None, None, None, None, None, None, None, None, None, None];
+    let mut payee_addrs: [Option<Address>; 10] =
+        [None, None, None, None, None, None, None, None, None, None];
     for i in 0..(MAX_MULTI_PAYEES as usize) {
         let addr = Address::generate(&env);
         payee_addrs[i] = Some(addr.clone());
@@ -1129,6 +1130,8 @@ fn test_single_payee_create_stream_unchanged() {
     );
     assert_eq!(stream.receiver, receiver);
     assert_eq!(stream.stream_id, stream_id);
+}
+
 #[test]
 fn test_pause_stream_snapshots_accrued_at_pause() {
     let env = Env::default();

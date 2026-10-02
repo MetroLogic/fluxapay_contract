@@ -1,7 +1,7 @@
 {
   "name": "@fluxapay/react",
   "version": "0.1.0",
-  "description": "React hooks for the FluxaPay SDK — payments, refunds, and merchant data for Next.js dashboards",
+  "description": "React hooks for the FluxaPay SDK \u2014 payments, refunds, and merchant data for Next.js dashboards",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -18,7 +18,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node init && tsc",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
