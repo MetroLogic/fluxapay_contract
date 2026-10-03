@@ -206,5 +206,7 @@ pub enum DataKey {
     PaymentIdempotencyKey(String),
     /// Queued auto-refund created when a partially funded payment expires.
     /// Appended so earlier discriminants stay stable.
-    AutoRefundQueue(String),
+    AutoRefundQueue,
+    /// Global append-only index of all refund IDs for paginated enumeration.
+    RefundIndex,
 }
