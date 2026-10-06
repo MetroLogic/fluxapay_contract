@@ -79,6 +79,15 @@ pub const TIER_UPGRADE_THRESHOLD_BUSINESS: i128 = TIER_CAP_FULL; // $100,000 cum
 pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
 /// Spacing between retry attempts in seconds (2 days).
 pub const SUBSCRIPTION_RETRY_INTERVAL_SECS: u64 = 2 * 24 * 60 * 60;
+/// Issue #900: Maximum number of dunning retries before a subscription is
+/// automatically terminated due to repeated payment failure.
+pub const MAX_DUNNING_RETRIES: u32 = 3;
+/// Issue #900: Minimum backoff window (in seconds) between dunning retry
+/// attempts. Retries use exponential backoff starting from this base.
+pub const DUNNING_RETRY_BACKOFF_SECS: u64 = 24 * 60 * 60;
+/// Issue #900: Default recurring billing interval (30 days in seconds) used
+/// when a plan does not specify an explicit `interval_secs`.
+pub const DEFAULT_SUBSCRIPTION_INTERVAL_SECS: u64 = 30 * 24 * 60 * 60;
 /// Issue #836: Maximum allowed free-trial length for a subscription plan (days).
 pub const MAX_TRIAL_DAYS: u32 = 90;
 /// Issue #836: Seconds in one trial day (ledger time).

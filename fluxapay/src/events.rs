@@ -493,6 +493,168 @@ pub struct SubscriptionPaymentCreated {
     pub amount: i128,
 }
 
+/// Emitted when a recurring subscription charge succeeds.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionCharged {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub amount: i128,
+    pub cycle: u32,
+}
+
+/// Emitted when a recurring subscription charge fails.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionChargeFailed {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub amount: i128,
+    pub dunning_attempts: u32,
+}
+
+/// Emitted when a subscription enters the dunning retry state machine.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionDunningTriggered {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub dunning_attempts: u32,
+    pub next_retry_at: u64,
+}
+
+/// Emitted when a subscriber pauses a subscription.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionPaused {
+    pub subscription_id: String,
+    pub payer: Address,
+}
+
+/// Emitted when a subscriber resumes a paused subscription.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionResumed {
+    pub subscription_id: String,
+    pub payer: Address,
+}
+
+/// Emitted when a subscription completes its maximum billing cycles.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionCompleted {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub total_cycles: u32,
+}
+
+/// Emit a `SUBSCRIPTION/CHARGED` event when a recurring charge succeeds.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_charged(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    amount: i128,
+    cycle: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "CHARGED"),
+        ),
+        (subscription_id.clone(), payer.clone(), amount, cycle),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/CHARGE_FAILED` event when a recurring charge fails.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_charge_failed(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    amount: i128,
+    dunning_attempts: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "CHARGE_FAILED"),
+        ),
+        (
+            subscription_id.clone(),
+            payer.clone(),
+            amount,
+            dunning_attempts,
+        ),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/DUNNING_TRIGGERED` event when a subscription enters
+/// the dunning retry state machine.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_dunning_triggered(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    dunning_attempts: u32,
+    next_retry_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "DUNNING_TRIGGERED"),
+        ),
+        (
+            subscription_id.clone(),
+            payer.clone(),
+            dunning_attempts,
+            next_retry_at,
+        ),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/PAUSED` event when a subscriber pauses a subscription.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_paused(env: &Env, subscription_id: &String, payer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "PAUSED"),
+        ),
+        (subscription_id.clone(), payer.clone()),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/RESUMED` event when a subscriber resumes a subscription.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_resumed(env: &Env, subscription_id: &String, payer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "RESUMED"),
+        ),
+        (subscription_id.clone(), payer.clone()),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/COMPLETED` event when a subscription reaches its
+/// maximum billing cycles.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_completed(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    total_cycles: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "COMPLETED"),
+        ),
+        (subscription_id.clone(), payer.clone(), total_cycles),
+    );
+}
+
 /// Issue #635: Emit a `SUBSCRIPTION/PLAN_CREATED` event when a merchant creates
 /// a new subscription/billing plan. Topics: `(SUBSCRIPTION, PLAN_CREATED)`,
 /// data: `(plan_id, merchant_id, amount, interval_secs)`.

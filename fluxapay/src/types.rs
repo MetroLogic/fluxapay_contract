@@ -808,6 +808,9 @@ pub enum SubscriptionStatus {
     Paused,
     Cancelled,
     Expired,
+    PastDue,
+    CancelledDueToPaymentFailure,
+    Completed,
 }
 
 #[contracttype]
@@ -826,6 +829,14 @@ pub struct Subscription {
     pub last_payment_at: Option<u64>,
     pub total_payments: u32,
     pub max_payments: Option<u32>,
+    /// Billing interval in seconds between recurring charges.
+    pub interval_secs: u64,
+    /// Maximum number of billing cycles allowed; `None` means unlimited.
+    pub max_cycles: Option<u32>,
+    /// Number of billing cycles successfully charged so far.
+    pub current_cycle: u32,
+    /// Number of consecutive dunning retry attempts for the current cycle.
+    pub dunning_attempts: u32,
     /// Number of consecutive failed payment attempts in the current grace period.
     pub retry_count: u32,
     /// Timestamp of the next retry attempt (set when a payment fails and grace period begins).
@@ -842,6 +853,8 @@ pub struct Subscription {
     /// plan has no trial. While `now < trial_ends_at`, `charge_subscription`
     /// returns `Error::TrialActive` and does not bill.
     pub trial_ends_at: Option<u64>,
+    /// Ledger timestamp of the last successful charge; used for interval verification.
+    pub last_charge_at: u64,
 }
 
 #[contracttype]
@@ -877,6 +890,10 @@ pub struct SubscriptionPlan {
     pub interval_secs: u64,
     pub billing_interval: BillingInterval,
     pub active: bool,
+    /// Billing interval in seconds between recurring charges.
+    pub interval_secs: u64,
+    /// Maximum number of billing cycles allowed; `None` means unlimited.
+    pub max_cycles: Option<u32>,
     /// Optional split payout configuration for bundle subscriptions.
     /// If non-empty, the plan amount will be distributed to the configured
     /// `SettlementSplit` recipients on each subscription charge.
