@@ -579,6 +579,37 @@ Emitted by `execute_with_session` when an expired spend window is reset on an ac
 
 ---
 
+## META_TX
+
+Sponsored meta-transactions. Emitted by `execute_meta_transaction`.
+
+### META_TX / EXECUTED
+
+The relayer submitted a valid merchant signature and the inner action succeeded.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `relayer` | `Address` | Account that submitted the transaction and paid the fee |
+| `merchant_id` | `Address` | Merchant the signature authorized |
+| `target_function` | `Symbol` | `create_charge`, `authorize_refund`, `rotate_webhook_key`, or `set_fee_recipient` |
+| `nonce` | `u64` | Sequence number consumed by this payload |
+| `gas` | `MetaTxGas` | Estimated instructions, ledger reads/writes, events, and resource fee |
+
+### META_TX / FAILED
+
+The signature was valid and the nonce was consumed, but the inner action failed.
+Validation failures (deadline, domain, nonce, signature) do not emit this event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `relayer` | `Address` | Relayer that submitted the payload |
+| `merchant_id` | `Address` | Merchant the signature authorized |
+| `target_function` | `Symbol` | Requested action |
+| `nonce` | `u64` | Sequence number consumed |
+| `gas` | `MetaTxGas` | Estimated resource use |
+
+---
+
 ## Topic Format Reference
 
 Every event uses a **2-tuple** topic:

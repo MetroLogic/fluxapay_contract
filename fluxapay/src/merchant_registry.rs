@@ -129,6 +129,49 @@ impl From<Option<AnchorConfig>> for MaybeAnchorConfig {
     }
 }
 
+/// Tier-based rolling reserve policy for a KYC tier.
+///
+/// A percentage of each settled payment (`reserve_bps`, in basis points) is
+/// held in a rolling reserve for `holding_period_secs` before becoming
+/// available for withdrawal. Higher-risk tiers (Unverified, Basic) hold a
+/// larger share for longer; trusted tiers (Full, Business) may hold nothing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReservePolicy {
+    /// Percentage of each settlement held back, in basis points (100 bps = 1%).
+    pub reserve_bps: u32,
+    /// Holding period in seconds before a reserve bucket matures.
+    pub holding_period_secs: u64,
+}
+
+/// A single rolling reserve deposit that unlocks at `unlock_at`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReserveBucket {
+    /// Monotonic bucket id, unique per merchant.
+    pub bucket_id: u64,
+    /// Amount locked in this bucket (smallest currency unit).
+    pub amount: i128,
+    /// Ledger timestamp at which this bucket becomes releasable.
+    pub unlock_at: u64,
+    /// Ledger timestamp at which the bucket was created.
+    pub created_at: u64,
+}
+
+/// Aggregate reserve view returned by `get_merchant_reserve_balance`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveBalance {
+    /// Total locked reserve (matured + unmatured).
+    pub total_locked: i128,
+    /// Portion of `total_locked` whose holding period has elapsed.
+    pub matured: i128,
+    /// Portion of `total_locked` still within its holding period.
+    pub upcoming: i128,
+    /// All buckets currently held for the merchant, oldest first.
+    pub buckets: Vec<RollingReserveBucket>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Merchant {
@@ -281,7 +324,7 @@ pub enum MerchantError {
     DuplicateVote = 11,
     /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
     KycLimitExceeded = 12,
-    PageSizeTooLarge = 12,
+    PageSizeTooLarge = 13,
 }
 
 #[cfg_attr(
@@ -2361,7 +2404,11 @@ impl MerchantRegistry {
     /// Checks single-payment limit and calendar monthly volume cap.
     /// Resets monthly volume on the 1st of each month (UTC).
     /// Returns `KycLimitExceeded` if payment exceeds either limit.
-    pub fn check_kyc_limit(env: Env, merchant_id: Address, amount: i128) -> Result<(), MerchantError> {
+    pub fn check_kyc_limit(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<(), MerchantError> {
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
 
         if !merchant.active || merchant.suspension_reason.is_some() {
@@ -2371,7 +2418,9 @@ impl MerchantRegistry {
         let (max_single, max_monthly) = match merchant.kyc_tier {
             KycTier::Unverified => (crate::TIER_0_MAX_SINGLE, crate::TIER_0_MAX_MONTHLY),
             KycTier::Basic => (crate::TIER_1_MAX_SINGLE, crate::TIER_1_MAX_MONTHLY),
-            KycTier::Full | KycTier::Business => (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY),
+            KycTier::Full | KycTier::Business => {
+                (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY)
+            }
         };
 
         if amount > max_single {
@@ -2403,12 +2452,12 @@ impl MerchantRegistry {
     }
 
     /// Issue #777: Query KYC tier as numeric level (0 = Unverified, 1 = Basic, 2 = Full/Business).
-    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u8, MerchantError> {
+    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u32, MerchantError> {
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         Ok(match merchant.kyc_tier {
-            KycTier::Unverified => 0,
-            KycTier::Basic => 1,
-            KycTier::Full | KycTier::Business => 2,
+            KycTier::Unverified => 0u32,
+            KycTier::Basic => 1u32,
+            KycTier::Full | KycTier::Business => 2u32,
         })
     }
 

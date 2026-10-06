@@ -1419,8 +1419,7 @@ fn test_open_dispute_increments_merchant_registry_dispute_count() {
     let (admin, payment_client, refund_client) = setup_contracts(&env);
 
     let registry_id = env.register(crate::merchant_registry::MerchantRegistry, ());
-    let registry_client =
-        crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_id);
+    let registry_client = crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_id);
     registry_client.initialize(&admin);
     registry_client.set_refund_manager_address(&admin, &refund_client.address);
 
@@ -1482,6 +1481,8 @@ fn test_open_dispute_increments_merchant_registry_dispute_count() {
     );
 
     assert_eq!(registry_client.get_merchant_dispute_count(&merchant), 1);
+}
+
 /// Issue #843: a small-stake arbitrator is outvoted by a large-stake arbitrator
 /// under weighted quorum (not raw vote count).
 #[test]
@@ -1659,7 +1660,12 @@ fn test_confirm_payment_tip_rejected_when_disabled() {
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
 
     let payment_id = String::from_str(&env, "payment_no_tip");
-    payment_client.create_payment(&create_payment_args(&env, &payment_id, &merchant, 1_000i128));
+    payment_client.create_payment(&create_payment_args(
+        &env,
+        &payment_id,
+        &merchant,
+        1_000i128,
+    ));
 
     let result = payment_client.try_confirm_payment(
         &oracle,
@@ -1679,7 +1685,7 @@ fn test_confirm_payment_tip_rejected_when_disabled() {
 /// cancel clears the proposal.
 #[test]
 fn test_propose_upgrade_timelock_and_cancel() {
-    use crate::{UPGRADE_TIMELOCK_LEDGERS, WasmUpgradeProposal};
+    use crate::{WasmUpgradeProposal, UPGRADE_TIMELOCK_LEDGERS};
 
     let env = Env::default();
     env.mock_all_auths();
@@ -1703,6 +1709,8 @@ fn test_propose_upgrade_timelock_and_cancel() {
     // Cancel clears
     payment_client.cancel_upgrade(&admin);
     assert!(payment_client.get_pending_upgrade().is_none());
+}
+
 #[test]
 fn test_open_dispute_stores_evidence_hash_and_emits_event() {
     let env = Env::default();
@@ -1721,13 +1729,14 @@ fn test_open_dispute_stores_evidence_hash_and_emits_event() {
         disputed_amount,
         bond_amount,
         evidence_hash.clone(),
-    ).expect("open_dispute should succeed");
+    )
+    .expect("open_dispute should succeed");
 
     assert_eq!(dispute_id, 1);
 
     // Verify stored evidence hash via read-only view function
-    let stored_hash = crate::dispute::verify_evidence(&env, dispute_id)
-        .expect("verify_evidence should succeed");
+    let stored_hash =
+        crate::dispute::verify_evidence(&env, dispute_id).expect("verify_evidence should succeed");
     assert_eq!(stored_hash, evidence_hash);
 
     // Check DISPUTE/OPENED event was published

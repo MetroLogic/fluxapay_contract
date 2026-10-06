@@ -6,12 +6,14 @@ use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol};
 /// Converts a payment ID String into a 32-byte hash key for storage.
 /// Reduces storage rent and improves lookups.
 pub fn payment_id_to_key(env: &Env, payment_id: &String) -> BytesN<32> {
-    env.crypto().sha256(&payment_id.to_bytes())
+    env.crypto().sha256(&payment_id.to_bytes()).to_bytes()
 }
 
 /// Converts a payment ID string slice into a 32-byte hash key for storage.
 pub fn payment_id_str_to_key(env: &Env, payment_id: &str) -> BytesN<32> {
-    env.crypto().sha256(&Bytes::from_slice(env, payment_id.as_bytes()))
+    env.crypto()
+        .sha256(&Bytes::from_slice(env, payment_id.as_bytes()))
+        .to_bytes()
 }
 
 #[contracttype]
@@ -180,13 +182,29 @@ pub enum DataKey {
     /// Issue #666: Paginated log of platform-fee collection events (newest-first,
     /// capped at `FEE_COLLECTION_HISTORY_CAP`), consumed by `get_platform_fee_report`.
     FeeCollectionHistory,
-    /// Issue #667: Arbitrary on-chain contract metadata (description, deployment notes,
-    /// audit commit
-    /// Issue #800: Cached token balance for the gas estimator, scoped to the
-    /// current transaction invocation via instance storage. Soroban instance
-    /// storage does not persist across transactions, so this cache is safe and
-    /// lets `GasEstimator::estimate_payment_fee` avoid repeated cross-contract
-    /// `balance` calls within a single batch (e.g. 5 estimates → 1 read).
-    /// Address of configured PaymentLinkManager contract for invoice cross-calls.
+    /// Address of the configured PaymentLinkManager contract for invoice cross-calls.
     PaymentLinkManagerAddress,
+    /// Configurable invoice overdue grace period in seconds (Issue #607).
+    InvoiceGracePeriodSecs,
+    /// Issue #667: Arbitrary on-chain contract metadata keyed by an admin-chosen symbol.
+    ContractMetadata(Symbol),
+    /// Issue #628: Cumulative gross payment volume per merchant.
+    MerchantGrossVolume(Address),
+    /// Issue #628: Merchants that have had at least one payment created.
+    TrackedMerchants,
+    /// Issue #638: Refund idempotency key to `RefundIdempotencyRecord`.
+    RefundIdempotencyKey(String),
+    /// Issue #633: Subscription IDs for a plan. Appended to preserve earlier discriminants.
+    PlanSubscribers(String),
+    /// Issue #624: Timelock delay in seconds for critical admin operations.
+    TimelockDelaySecs,
+    /// Issue #624: Pending timelocked action keyed by action ID.
+    PendingTimelockAction(String),
+    /// Issue #624: Counter for pending action IDs.
+    TimelockActionCounter,
+    /// Issue #761: Payment idempotency key to payment id.
+    PaymentIdempotencyKey(String),
+    /// Queued auto-refund created when a partially funded payment expires.
+    /// Appended so earlier discriminants stay stable.
+    AutoRefundQueue(String),
 }

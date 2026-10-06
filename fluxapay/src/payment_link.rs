@@ -723,6 +723,7 @@ impl PaymentLinkManager {
             payer_muxed_id: None,
             // Issue #668: trace this payment back to the link that created it.
             payment_link_id: Some(link_id.clone()),
+            allow_partial: None,
             tip_enabled: false,
             tip_amount: None,
         };
@@ -847,7 +848,10 @@ impl PaymentLinkManager {
             .set(&LinkDataKey::Link(link_id.clone()), &link);
 
         env.events().publish(
-            (Symbol::new(&env, "LINK"), Symbol::new(&env, "MAX_USES_UPDATED")),
+            (
+                Symbol::new(&env, "LINK"),
+                Symbol::new(&env, "MAX_USES_UPDATED"),
+            ),
             (link_id, new_max_uses),
         );
 
@@ -971,7 +975,7 @@ impl PaymentLinkManager {
         };
 
         Ok(LinkAnalytics {
-            merchant_id: link.merchant,
+            merchant_id: link.merchant_id,
             view_count: link.view_count,
             use_count: link.use_count,
             total_revenue: link.total_revenue,
