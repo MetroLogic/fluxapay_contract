@@ -1050,3 +1050,93 @@ pub fn emit_invoice_overdue(env: &Env, invoice_id: &String, merchant_id: &Addres
         (invoice_id.clone(), merchant_id.clone()),
     );
 }
+
+// ============================================================================
+// Rolling Reserve Events
+// ============================================================================
+
+/// Emitted when a portion of merchant proceeds is held in the rolling reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsHeld {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub unlock_ledger: u32,
+    pub reserve_bps: u32,
+}
+
+/// Emitted when matured reserve buckets are released to the merchant.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsReleased {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub bucket_count: u32,
+}
+
+/// Emitted when locked reserve funds are slashed to satisfy a lost dispute.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsSlashed {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub dispute_id: String,
+}
+
+/// Emit a `RESERVE/FUNDS_HELD` event when payment settlement locks a portion
+/// of merchant proceeds into the rolling reserve.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_held(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    unlock_ledger: u32,
+    reserve_bps: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_HELD"),
+            merchant_id.clone(),
+        ),
+        (amount, unlock_ledger, reserve_bps),
+    );
+}
+
+/// Emit a `RESERVE/FUNDS_RELEASED` event when matured reserve buckets are
+/// released back to the merchant.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_released(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    bucket_count: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_RELEASED"),
+            merchant_id.clone(),
+        ),
+        (amount, bucket_count),
+    );
+}
+
+/// Emit a `RESERVE/FUNDS_SLASHED` event when locked reserve funds are slashed
+/// to satisfy a lost dispute payout.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_slashed(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    dispute_id: &String,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_SLASHED"),
+            merchant_id.clone(),
+        ),
+        (amount, dispute_id.clone()),
+    );
+}

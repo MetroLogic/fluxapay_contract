@@ -129,6 +129,49 @@ impl From<Option<AnchorConfig>> for MaybeAnchorConfig {
     }
 }
 
+/// Tier-based rolling reserve policy for a KYC tier.
+///
+/// A percentage of each settled payment (`reserve_bps`, in basis points) is
+/// held in a rolling reserve for `holding_period_secs` before becoming
+/// available for withdrawal. Higher-risk tiers (Unverified, Basic) hold a
+/// larger share for longer; trusted tiers (Full, Business) may hold nothing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReservePolicy {
+    /// Percentage of each settlement held back, in basis points (100 bps = 1%).
+    pub reserve_bps: u32,
+    /// Holding period in seconds before a reserve bucket matures.
+    pub holding_period_secs: u64,
+}
+
+/// A single rolling reserve deposit that unlocks at `unlock_at`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReserveBucket {
+    /// Monotonic bucket id, unique per merchant.
+    pub bucket_id: u64,
+    /// Amount locked in this bucket (smallest currency unit).
+    pub amount: i128,
+    /// Ledger timestamp at which this bucket becomes releasable.
+    pub unlock_at: u64,
+    /// Ledger timestamp at which the bucket was created.
+    pub created_at: u64,
+}
+
+/// Aggregate reserve view returned by `get_merchant_reserve_balance`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveBalance {
+    /// Total locked reserve (matured + unmatured).
+    pub total_locked: i128,
+    /// Portion of `total_locked` whose holding period has elapsed.
+    pub matured: i128,
+    /// Portion of `total_locked` still within its holding period.
+    pub upcoming: i128,
+    /// All buckets currently held for the merchant, oldest first.
+    pub buckets: Vec<RollingReserveBucket>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Merchant {
