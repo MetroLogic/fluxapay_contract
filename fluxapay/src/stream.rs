@@ -181,12 +181,69 @@ pub enum StreamError {
     InvalidPayeeShares = 18,
     /// Issue #831: Requested stream is not a multi-payee stream.
     NotMultiStream = 19,
+    /// Cliff period has not been reached yet.
+    CliffNotReached = 20,
 }
 
 /// Issue #627: Maximum number of stream IDs accepted by `bulk_bump_stream_ttls`
 /// in a single call. Mirrors the 50-item cap on
 /// `PaymentProcessor::bulk_bump_payment_ttls`.
 pub const MAX_BULK_TTL_BUMP: u32 = 50;
+
+/// Storage key for a [`VestingStream`].
+#[contracttype]
+pub enum VestingDataKey {
+    Vesting(String),
+    VestingCounter,
+}
+
+/// A token vesting schedule with a cliff period and optional revocable clawback.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingStream {
+    pub stream_id: String,
+    pub sender: Address,
+    pub receiver: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub cliff_amount: i128,
+    pub cliff_time: u64,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub withdrawn: i128,
+    pub revoked: bool,
+    pub revocable: bool,
+}
+
+/// Compute the vested amount for a vesting stream at `now`.
+pub fn compute_vested_amount(
+    total_amount: i128,
+    cliff_amount: i128,
+    start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+    now: u64,
+) -> i128 {
+    if now < cliff_time {
+        return 0;
+    }
+    let cliff = cliff_amount.max(0).min(total_amount.max(0));
+    if now >= end_time {
+        return total_amount.max(0);
+    }
+    let linear_total = total_amount.max(0).saturating_sub(cliff);
+    let linear_start = cliff_time.max(start_time);
+    if end_time <= linear_start {
+        return cliff;
+    }
+    let elapsed = now.saturating_sub(linear_start);
+    let duration = end_time.saturating_sub(linear_start);
+    let linear_vested = (elapsed as i128)
+        .saturating_mul(linear_total)
+        .checked_div(duration as i128)
+        .unwrap_or(0);
+    cliff.saturating_add(linear_vested).min(total_amount.max(0))
+}
 
 /// Issue #627: TTL (in ledgers) that `bulk_bump_stream_ttls` extends each stream
 /// entry to — ~3 years at 5s/ledger, matching `LONG_LIVE_TTL` in the payment
