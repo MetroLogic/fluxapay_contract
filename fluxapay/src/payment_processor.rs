@@ -5692,6 +5692,9 @@ impl PaymentProcessor {
         if AccessControl::get_admin(&env) != Some(admin) {
             return Err(Error::AccessControlError);
         }
+        if !(0..=10_000).contains(&fee_bps) {
+            return Err(Error::InvalidAmount);
+        }
         PaymentStreaming::set_stream_fee_bps(env, fee_bps);
         Ok(())
     }

@@ -240,6 +240,9 @@ fn apply_fee(amount: i128, fee_bps: i128) -> (i128, i128) {
     if fee_bps <= 0 {
         return (0, amount);
     }
+    // Defensive clamp: fee_bps is validated at the setter, but guard here too
+    // so a corrupt/legacy stored value can never produce a negative `net`.
+    let fee_bps = fee_bps.min(10_000);
     let fee = amount * fee_bps / 10_000;
     (fee, amount - fee)
 }
@@ -315,10 +318,14 @@ impl PaymentStreaming {
 
     /// Set the platform fee in basis points applied to stream withdrawals.
     /// Admin auth is enforced by the caller (PaymentProcessor).
-    pub fn set_stream_fee_bps(env: Env, fee_bps: i128) {
+    pub fn set_stream_fee_bps(env: Env, fee_bps: i128) -> Result<(), StreamError> {
+        if !(0..=10_000).contains(&fee_bps) {
+            return Err(StreamError::InvalidRate);
+        }
         env.storage()
             .persistent()
             .set(&StreamDataKey::StreamFeeBps, &fee_bps);
+        Ok(())
     }
 
     pub fn get_stream_fee_bps(env: Env) -> i128 {
