@@ -8,6 +8,17 @@ export interface RefundManagerConfig {
 }
 
 /**
+ * RefundStatus mirrors the on-chain `RefundStatus` enum used by the
+ * RefundManager contract. Values are the string variant names expected by
+ * the contract when passing a status argument.
+ */
+export type RefundStatus =
+  | "Pending"
+  | "Processed"
+  | "Rejected"
+  | "Cancelled";
+
+/**
  * RefundManagerClient provides a high-level interface for interacting with the RefundManager contract.
  * Handles refund creation, processing, rejection, and cancellation operations.
  */
@@ -68,7 +79,7 @@ export class RefundManagerClient {
    * @param idempotencyKey - Issue #638: optional idempotency key. When supplied,
    *   retrying with the same key and the same `(paymentId, refundAmount, reason)`
    *   returns the original refund ID instead of creating a duplicate; reusing the
-   *   key with different parameters throws `DuplicateIdempotencyKey`. Keys are
+   * key with different parameters throws `DuplicateIdempotencyKey`. Keys are
    *   retained for 30 days. Routes to the `create_refund_idempotent` entry point.
    * @returns A promise resolving to the refund ID
    * @throws Error if the refund creation fails
@@ -171,8 +182,56 @@ export class RefundManagerClient {
    */
   async getPaymentRefunds(paymentId: string): Promise<string[]> {
     return withMappedContractError(() =>
-      this.getContract().get_payment_refunds({
+      this.getContract().get_payment_refunds(s
         payment_id: paymentId,
+      }),
+    );
+  }
+
+  /**
+   * Retrieve a paginated list of all refunds recorded on the contract.
+   *
+   * This backs the global refund index maintained on-chain and appended on
+   * every `create_refund` / `create_refund_with_receipt` call, allowing operators
+   * to enumerate refunds without already knowing their IDs.
+   *
+   * @param offset - Number of refunds to skip from the start of the index
+   * @param limit - Maximum number of refunds to return
+   * @returns A promise resolving to the page of refund records
+   * @throws Error if the query fails
+   */
+  async getAllRefunds(offset: number, limit: number): Promise<any[]> {
+    return withMappedContractError(() =>
+      this.getContract().get_all_refunds({
+        offset: offset,
+        limit: limit,
+      }),
+    );
+  }
+
+  /**
+   * Retrieve a paginated list of refunds filtered by their status.
+   *
+   * The contract filters in-memory over the paginated slice of the global
+   * refund index, so the `offset` / `limit` window applies to the underlying
+   * index before the status filter is applied.
+   *
+   * @param status - The refund status to filter by (e.g., "Pending")
+   * @param offset - Number of refunds to skip from the start of the index
+   * @param limit - Maximum number of refunds to return
+   * @returns A promise resolving to the page of matching refund records
+   * @throws Error if the query fails
+   */
+  async getRefundsByStatus(
+    status: RefundStatus,
+    offset: number,
+    limit: number,
+  ): Promise<any[]> {
+    return withMappedContractError(() =>
+      this.getContract().get_refunds_by_status({
+        status: status,
+        offset: offset,
+        limit: limit,
       }),
     );
   }
