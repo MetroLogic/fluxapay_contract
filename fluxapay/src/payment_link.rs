@@ -578,7 +578,11 @@ impl PaymentLinkManager {
             for _ in 0..rate_data.decimals {
                 divisor = divisor.saturating_mul(10);
             }
-            let usdc_equivalent = fiat_cfg.amount.saturating_mul(divisor) / rate_data.rate;
+            let usdc_equivalent = fiat_cfg
+                .amount
+                .saturating_mul(divisor)
+                .checked_div(rate_data.rate)
+                .ok_or(crate::Error::InvalidAmount)?;
 
             // If the link also has a fixed USDC amount, validate against it
             if let Some(fixed_amount) = link.amount {
@@ -639,7 +643,10 @@ impl PaymentLinkManager {
                 .unwrap_or(None)
         };
         let fee_amount: i128 = match effective_fee_bps {
-            Some(bps) if bps > 0 => resolved_amount.saturating_mul(bps) / 10_000,
+            Some(bps) if bps > 0 => resolved_amount
+                .saturating_mul(bps)
+                .checked_div(10_000)
+                .unwrap_or(0),
             _ => 0,
         };
 
@@ -951,13 +958,18 @@ impl PaymentLinkManager {
         let link = Self::get_link_internal(&env, &link_id)?;
 
         let conversion_rate = if link.view_count > 0 {
-            link.use_count.saturating_mul(10_000) / link.view_count
+            link.use_count
+                .saturating_mul(10_000)
+                .checked_div(link.view_count)
+                .unwrap_or(0)
         } else {
             0
         };
 
         let average_payment = if link.use_count > 0 {
-            link.total_revenue / (link.use_count as i128)
+            link.total_revenue
+                .checked_div(link.use_count as i128)
+                .unwrap_or(0)
         } else {
             0
         };
