@@ -140,6 +140,10 @@ pub enum LinkDataKey {
     LinkRateLimitConfig,
     /// Issue #623: Per-payer rolling window of link-use timestamps, keyed by payer address.
     PayerLinkUseWindow(Address),
+    /// Issue #754: Contract-wide per-viewer view rate limit config (max_views, window_secs).
+    LinkViewRateLimitConfig,
+    /// Issue #754: Per-viewer rolling window of link-view timestamps, keyed by viewer address.
+    PayerLinkViewWindow(Address),
 }
 
 #[contract]
@@ -504,14 +508,28 @@ impl PaymentLinkManager {
             .and_then(|link| link.shareable_url)
     }
 
-    /// Record a view of a payment link.
+    /// Record a view of a payment link on behalf of `viewer`.
     ///
-    /// This is a permissionless entry point — any caller may increment the
-    /// `view_count` for an active link. Merchants use this (typically from
-    /// their storefront or checkout page) to track how many people viewed
-    /// the link versus how many actually paid, enabling conversion-rate
-    /// analytics via `get_link_analytics`.
-    pub fn record_link_view(env: Env, link_id: String) -> Result<(), crate::Error> {
+    /// The `viewer` must authorize the call. Merchants (or the storefront
+    /// acting on their behalf) use this to track how many people viewed the
+    /// link versus how many actually paid, enabling conversion-rate analytics
+    /// via `get_link_analytics`.
+    ///
+    /// Issue #754: previously this was a permissionless entry point, which let
+    /// any address force unbounded persistent-storage writes and event
+    /// emissions for every active link. It now requires authorization and
+    /// enforces a per-viewer rolling-window rate limit (see
+    /// `enforce_link_view_rate_limit`), mirroring `use_link`.
+    pub fn record_link_view(
+        env: Env,
+        viewer: Address,
+        link_id: String,
+    ) -> Result<(), crate::Error> {
+        viewer.require_auth();
+
+        // Issue #754: Enforce the per-viewer rate limit before any storage write.
+        Self::enforce_link_view_rate_limit(&env, &viewer)?;
+
         let mut link = Self::get_link_internal(&env, &link_id)?;
 
         if !link.active {
@@ -1080,6 +1098,82 @@ impl PaymentLinkManager {
         env.storage()
             .instance()
             .set(&LinkDataKey::PayerLinkUseWindow(payer.clone()), &fresh);
+
+        Ok(())
+    }
+
+    // ── Issue #754: Per-viewer link-view rate limiting ────────────────────────
+
+    /// Default per-viewer rate-limit config: 100 views per 60 seconds.
+    const DEFAULT_LINK_VIEW_MAX_VIEWS: u32 = 100;
+    const DEFAULT_LINK_VIEW_WINDOW_SECS: u64 = 60;
+
+    /// Admin-only: configure the per-viewer payment-link view rate limit.
+    ///
+    /// * `max_views`   – Maximum number of `record_link_view` calls allowed per viewer within the window.
+    /// * `window_secs` – Rolling window length in seconds.
+    pub fn set_link_view_rate_limit(
+        env: Env,
+        admin: Address,
+        max_views: u32,
+        window_secs: u64,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkViewRateLimitConfig, &(max_views, window_secs));
+        Ok(())
+    }
+
+    /// Enforce the per-viewer payment-link view rate limit.
+    ///
+    /// Mirrors [`Self::enforce_payer_link_rate_limit`] but keeps its own
+    /// window so that recording a view never consumes a viewer's `use_link`
+    /// quota (and vice versa).
+    fn enforce_link_view_rate_limit(env: &Env, viewer: &Address) -> Result<(), crate::Error> {
+        let (max_views, window_secs): (u32, u64) = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkViewRateLimitConfig)
+            .unwrap_or((
+                Self::DEFAULT_LINK_VIEW_MAX_VIEWS,
+                Self::DEFAULT_LINK_VIEW_WINDOW_SECS,
+            ));
+
+        let now = env.ledger().timestamp();
+        let cutoff = now.saturating_sub(window_secs);
+
+        // Load existing timestamps, drop stale ones.
+        let timestamps: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&LinkDataKey::PayerLinkViewWindow(viewer.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut fresh: Vec<u64> = Vec::new(env);
+        for ts in timestamps.iter() {
+            if ts >= cutoff {
+                fresh.push_back(ts);
+            }
+        }
+
+        if fresh.len() >= max_views {
+            return Err(crate::Error::RateLimitExceeded);
+        }
+
+        // Record this view and persist.
+        fresh.push_back(now);
+        env.storage()
+            .instance()
+            .set(&LinkDataKey::PayerLinkViewWindow(viewer.clone()), &fresh);
 
         Ok(())
     }

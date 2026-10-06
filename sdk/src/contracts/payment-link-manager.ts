@@ -386,15 +386,18 @@ export class PaymentLinkManagerClient {
   }
 
   /**
-   * Record a view of a payment link (permissionless).
+   * Record a view of a payment link.
    *
-   * Increments the link's `view_count` so merchants can track
-   * how many people viewed the link versus how many actually paid.
+   * The viewer must authorize the call. Increments the link's `view_count`
+   * so merchants can track how many people viewed the link versus how many
+   * actually paid. Calls are rate-limited per viewer by the contract.
+   * @param viewer - The viewer's Stellar address (must sign the transaction)
    * @param linkId - The payment link ID
    */
-  async recordLinkView(linkId: string): Promise<void> {
+  async recordLinkView(viewer: string, linkId: string): Promise<void> {
     return withMappedContractError(() =>
       this.getContract().record_link_view({
+        viewer,
         link_id: linkId,
       }),
     );
