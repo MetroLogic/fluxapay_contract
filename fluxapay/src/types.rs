@@ -1,9 +1,7 @@
 //! Contract types and struct definitions for FluxaPay.
 
-use crate::merchant_registry::{KycTier, RollingReservePolicy};
-use soroban_sdk::{
-    contracterror, contracttype, Env, Address, BytesN, Map, String, Symbol, Vec,
-};
+use crate::merchant_registry::KycTier;
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,6 +381,14 @@ pub enum Error {
     InvalidTreasuryThreshold = 80,
     /// Treasury withdrawal amount exceeds token balance.
     InsufficientTokenTreasuryBalance = 81,
+    /// Issue #836: Subscription is still in its free trial; no charge yet.
+    TrialActive = 82,
+    /// Issue #836: Requested trial_days exceeds the maximum of 90 days.
+    TrialTooLong = 83,
+    /// Payment link does not exist or belongs to a different merchant.
+    InvalidPaymentLink = 84,
+    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
+    KycLimitExceeded = 85,
 }
 
 /// Issue #841: Muxed account (M-address) wrapping a G-address and 64-bit sub-account ID.
@@ -397,14 +403,6 @@ pub struct MuxedAccount {
     pub account: Address,
     /// 64-bit sub-account / memo ID embedded in the M-address.
     pub id: u64,
-    /// Issue #836: Subscription is still in its free trial; no charge yet.
-    TrialActive = 70,
-    /// Issue #836: Requested trial_days exceeds the maximum of 90 days.
-    TrialTooLong = 71,
-    /// Payment link does not exist or belongs to a different merchant.
-    InvalidPaymentLink = 70,
-    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
-    KycLimitExceeded = 71,
 }
 
 #[contracttype]
@@ -640,7 +638,7 @@ pub struct ArbitratorVote {
 pub struct ArbitratorVoteTally {
     pub approve_count: u32,
     pub reject_count: u32,
-        }
+}
 
 /// Record of a single admin treasury withdrawal.
 #[contracttype]
@@ -966,7 +964,9 @@ impl<'a> Drop for RefundLockGuard<'a> {
         self.env
             .storage()
             .persistent()
-            .remove(&crate::data_keys::DataKey::RefundLock(self.refund_id.clone()));
+            .remove(&crate::data_keys::DataKey::RefundLock(
+                self.refund_id.clone(),
+            ));
     }
 }
 

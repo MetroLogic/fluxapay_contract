@@ -16,8 +16,8 @@
 //! env.events().publish_event(&EventStruct { ... });
 //! ```
 
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 use crate::merchant_registry::KycTier;
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 
 // ============================================================================
 // Payment Events
@@ -606,10 +606,7 @@ pub struct MerchantPartialPaymentUpdated {
 #[allow(deprecated)]
 pub fn emit_merchant_suspended(env: &Env, merchant_id: &Address, reason: &String) {
     env.events().publish(
-        (
-            Symbol::new(env, "MERCHANT"),
-            Symbol::new(env, "SUSPENDED"),
-        ),
+        (Symbol::new(env, "MERCHANT"), Symbol::new(env, "SUSPENDED")),
         (merchant_id.clone(), reason.clone()),
     );
 }
@@ -618,11 +615,47 @@ pub fn emit_merchant_suspended(env: &Env, merchant_id: &Address, reason: &String
 #[allow(deprecated)]
 pub fn emit_merchant_reinstated(env: &Env, merchant_id: &Address, reinstated_by: &Address) {
     env.events().publish(
+        (Symbol::new(env, "MERCHANT"), Symbol::new(env, "REINSTATED")),
+        (merchant_id.clone(), reinstated_by.clone()),
+    );
+}
+
+/// Emit `MERCHANT/KYC_TIER_UPGRADED` after a merchant's tier is promoted.
+#[allow(deprecated)]
+pub fn emit_kyc_tier_upgraded(
+    env: &Env,
+    merchant_id: &Address,
+    old_tier: &KycTier,
+    new_tier: &KycTier,
+) {
+    env.events().publish(
         (
             Symbol::new(env, "MERCHANT"),
-            Symbol::new(env, "REINSTATED"),
+            Symbol::new(env, "KYC_TIER_UPGRADED"),
         ),
-        (merchant_id.clone(), reinstated_by.clone()),
+        (merchant_id.clone(), old_tier.clone(), new_tier.clone()),
+    );
+}
+
+/// Emit `REFUND/REQUESTED` when an auto-refund is queued for a payer.
+#[allow(deprecated)]
+pub fn emit_refund_requested(
+    env: &Env,
+    refund_id: &String,
+    payment_id: &String,
+    merchant_id: &Address,
+    payer: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "REFUND"), Symbol::new(env, "REQUESTED")),
+        (
+            refund_id.clone(),
+            payment_id.clone(),
+            merchant_id.clone(),
+            payer.clone(),
+            amount,
+        ),
     );
 }
 
@@ -995,10 +1028,7 @@ pub struct InvoiceOverdue {
 #[allow(deprecated)]
 pub fn emit_invoice_created(env: &Env, invoice_id: &String, merchant_id: &Address, amount: i128) {
     env.events().publish(
-        (
-            Symbol::new(env, "INVOICE"),
-            Symbol::new(env, "CREATED"),
-        ),
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "CREATED")),
         (invoice_id.clone(), merchant_id.clone(), amount),
     );
 }
@@ -1007,10 +1037,7 @@ pub fn emit_invoice_created(env: &Env, invoice_id: &String, merchant_id: &Addres
 #[allow(deprecated)]
 pub fn emit_invoice_paid(env: &Env, invoice_id: &String, merchant_id: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, "INVOICE"),
-            Symbol::new(env, "PAID"),
-        ),
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "PAID")),
         (invoice_id.clone(), merchant_id.clone()),
     );
 }
@@ -1019,10 +1046,7 @@ pub fn emit_invoice_paid(env: &Env, invoice_id: &String, merchant_id: &Address) 
 #[allow(deprecated)]
 pub fn emit_invoice_overdue(env: &Env, invoice_id: &String, merchant_id: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, "INVOICE"),
-            Symbol::new(env, "OVERDUE"),
-        ),
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "OVERDUE")),
         (invoice_id.clone(), merchant_id.clone()),
     );
 }

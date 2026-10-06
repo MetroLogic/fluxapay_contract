@@ -324,7 +324,7 @@ pub enum MerchantError {
     DuplicateVote = 11,
     /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
     KycLimitExceeded = 12,
-    PageSizeTooLarge = 12,
+    PageSizeTooLarge = 13,
 }
 
 #[cfg_attr(
@@ -2404,7 +2404,11 @@ impl MerchantRegistry {
     /// Checks single-payment limit and calendar monthly volume cap.
     /// Resets monthly volume on the 1st of each month (UTC).
     /// Returns `KycLimitExceeded` if payment exceeds either limit.
-    pub fn check_kyc_limit(env: Env, merchant_id: Address, amount: i128) -> Result<(), MerchantError> {
+    pub fn check_kyc_limit(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<(), MerchantError> {
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
 
         if !merchant.active || merchant.suspension_reason.is_some() {
@@ -2414,7 +2418,9 @@ impl MerchantRegistry {
         let (max_single, max_monthly) = match merchant.kyc_tier {
             KycTier::Unverified => (crate::TIER_0_MAX_SINGLE, crate::TIER_0_MAX_MONTHLY),
             KycTier::Basic => (crate::TIER_1_MAX_SINGLE, crate::TIER_1_MAX_MONTHLY),
-            KycTier::Full | KycTier::Business => (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY),
+            KycTier::Full | KycTier::Business => {
+                (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY)
+            }
         };
 
         if amount > max_single {
@@ -2446,12 +2452,12 @@ impl MerchantRegistry {
     }
 
     /// Issue #777: Query KYC tier as numeric level (0 = Unverified, 1 = Basic, 2 = Full/Business).
-    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u8, MerchantError> {
+    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u32, MerchantError> {
         let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         Ok(match merchant.kyc_tier {
-            KycTier::Unverified => 0,
-            KycTier::Basic => 1,
-            KycTier::Full | KycTier::Business => 2,
+            KycTier::Unverified => 0u32,
+            KycTier::Basic => 1u32,
+            KycTier::Full | KycTier::Business => 2u32,
         })
     }
 
