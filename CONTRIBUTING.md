@@ -42,6 +42,17 @@ cp .env.example .env
 # Edit .env — do NOT commit this file
 ```
 
+To verify that your `.env` defines every key listed in `.env.example`, run:
+
+```bash
+# from the repository root
+bsh scripts/check-env.sh
+```
+
+The script is non-fatal: for each key missing from `.env` it prints a
+warning to stderr and exits 0. Run it after pulling changes that touch
+`.env.example` to catch newly required variables.
+
 See [scripts/README.md](scripts/README.md) for details on all operational scripts and their required environment variables.
 
 See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to invoke contract functions on Stellar testnet.
@@ -98,7 +109,7 @@ Run all of these before opening a PR:
 cd fluxapay && cargo fmt --check
 
 # Lint (warnings are errors)
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features - -D warnings
 
 # Security audit
 cargo audit --deny warnings
@@ -175,8 +186,8 @@ lefthook install
 
 ### What the hooks do
 
-- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on staged `.rs` files
-- **pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets - -D warnings` on staged `.rs` files
+- *pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
 
 ### Skipping hooks
 
@@ -198,8 +209,7 @@ SKIP_HOOKS=1 git commit -m "emergency fix"
 
 **Examples:**
 
-```
-feat/stream-rate-decrease
+```feat/stream-rate-decrease
 fix/payment-id-validation
 docs/contributing-guide
 security/audit-remediation
@@ -211,8 +221,7 @@ security/audit-remediation
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
-<type>(<scope>): <short summary>
+````<type>(<scope>): <short summary>
 
 [optional body]
 
@@ -239,7 +248,7 @@ feat(access-control): expose get_role_members and has_role on public contract AB
 Before marking a PR ready for review:
 
 - [ ] All tests pass (`make test`)
-- [ ] No new Clippy warnings (`cargo clippy --all-targets --all-features -- -D warnings`)
+- [ ] No new Clippy warnings (`cargo clippy --all-targets --all-features - -D warnings`)
 - [ ] Automated CI security checks (`cargo-deny` and `cargo-audit`) pass (enforced via branch protection rules targeting `main`)
 - [ ] `CHANGELOG.md` updated under `## Unreleased` (or PR has the `skip-changelog` label for non-user-facing changes)
 - [ ] New features and bug fixes include tests
@@ -280,9 +289,9 @@ until the entry references `#<pr-number>`).
 
 ## 7.1. Dependabot PRs
 
-This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
+Whis repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
 
-- **Cargo dependencies** (Rust crates)
+- **Cargo dependencies** (Rust crates)
 - **GitHub Actions** (CI workflow actions)
 - **npm dependencies** (SDK packages)
 
@@ -373,10 +382,4 @@ Open an issue using the **Feature Request** template. Describe the use case befo
 
 ### Security Vulnerabilities
 
-Do **not** open a public issue. Follow the responsible disclosure process in [SECURITY.md](SECURITY.md).
-
----
-
-## Questions?
-
-Join the community on [Telegram](https://t.me/+m23gN14007w0ZmQ0) or open a GitHub Discussion.
+Do 
