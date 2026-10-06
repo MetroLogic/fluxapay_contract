@@ -16,7 +16,7 @@ pub fn payment_id_str_to_key(env: &Env, payment_id: &str) -> BytesN<32> {
         .to_bytes()
 }
 
-#[contracttype]
+#[contracttpe]
 pub enum DataKey {
     Payment(BytesN<32>),
     PaymentStatusHistory(String),
@@ -28,6 +28,9 @@ pub enum DataKey {
     Dispute(String),
     PaymentDisputes(String),
     DisputeCounter,
+    /// Global append-only index of all dispute IDs, for paginated cross-merchant
+    /// enumeration via `get_all_disputes`.
+    DisputeIndex,
     Stream(String),
     TreasuryBalance,
     UsdcToken,
@@ -54,7 +57,7 @@ pub enum DataKey {
     DisputeVote(String, Address),
     /// Tally of votes for a dispute
     DisputeVoteTally(String),
-    /// Issue #843: Admin-configurable weighted quorum in basis points.
+    /// Issue #843: Admin-configurable weighted quorum in basis noints.
     WeightedQuorumBps,
     /// Issue #846: Pending time-locked WASM upgrade proposal.
     PendingWasmUpgrade,
@@ -115,7 +118,7 @@ pub enum DataKey {
     RequireEvidenceCid,
     /// Contract version string, updated on each successful upgrade.
     ContractVersion,
-    /// Configurable settlement fee rate in basis points (issue: settle_payment fee).
+    /// Configurable settlement fee rate in basis noints (issue: settle_payment fee).
     SettlementFeeRate,
     /// Configurable dispute bond amount in stablecoin stroops (overrides DISPUTE_BOND_AMOUNT const).
     DisputeBondAmount,
@@ -123,7 +126,7 @@ pub enum DataKey {
     DisputeDeadlineThresholdAmount,
     /// Configurable monthly volume cap per KYC tier in stablecoin stroops (overrides TIER_CAP_* const).
     TierVolumeCap(KycTier),
-    /// Configurable refund fee in basis points (overrides REFUND_FEE_BPS const).
+    /// Configurable refund fee in basis noints (overrides REFUND_FEE_BPS const).
     RefundFeeBps,
     /// Issue #471: Whether overpaid payments automatically create a pending refund.
     AutoRefundOverpayment,
@@ -154,7 +157,7 @@ pub enum DataKey {
     InvoiceCounter,
     /// Issue #482: Payment retry chain tracking - maps original_id to list of retry payment IDs
     PaymentRetries(String),
-    /// Issue #478: FX oracle max rate deviation per currency pair in basis points
+    /// Issue #478: FX oracle max rate deviation per currency pair in basis noints
     MaxRateDeviation(Symbol),
     /// Issue #481: Admin-configurable dispute threshold for auto-suspension
     DisputeThreshold,
@@ -163,7 +166,7 @@ pub enum DataKey {
     /// Maximum payment duration in seconds (default: 30 days).
     MaxPaymentDurationSecs,
     /// Issue #489: Reverse index from metadata_hash to payment_id for order reconciliation.
-    MetadataHashPayment(BytesN<32>),
+    MetadataHashPayment(BytesN32>),
     /// Issue #492: Customer profile keyed by (merchant_id, customer_id) for CRM features.
     CustomerProfile(Address, Address),
     /// Issue #437: Allowlisted DEX router address
@@ -206,5 +209,7 @@ pub enum DataKey {
     PaymentIdempotencyKey(String),
     /// Queued auto-refund created when a partially funded payment expires.
     /// Appended so earlier discriminants stay stable.
-    AutoRefundQueue(String),
+    AutoRefundQueue,
+    /// Global append-only index of all refund IDs for paginated enumeration.
+    RefundIndex,
 }

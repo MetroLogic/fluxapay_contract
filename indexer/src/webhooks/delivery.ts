@@ -106,6 +106,7 @@ export async function deliverOnce(
         [TIMESTAMP_HEADER]: String(Math.floor(startedAt / 1000)),
         [EVENT_TYPE_HEADER]: envelope.type,
         [DELIVERY_ID_HEADER]: envelope.id,
+        "x-webhook-event-id": envelope.id,
       },
       body,
       signal: controller.signal,
@@ -152,6 +153,7 @@ export function buildEnvelope(
 ): WebhookEnvelope {
   return {
     id: `whd_${randomUUID()}`,
+    event_id: `evt_${randomUUID()}`,
     type,
     createdAt: new Date(now()).toISOString(),
     livemode,

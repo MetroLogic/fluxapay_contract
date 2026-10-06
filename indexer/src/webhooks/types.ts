@@ -40,6 +40,11 @@ export interface WebhookEndpoint {
 }
 
 export interface WebhookEnvelope {
+  /**
+   * Unique per-event identifier. Also exposed as the top-level `event_id`
+   * field in the delivered payload so merchants can deduplicate retried
+   * deliveries (see docs/webhooks.md).
+   */
   id: string;
   type: WebhookEventType;
   createdAt: string;

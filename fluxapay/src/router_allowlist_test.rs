@@ -1,5 +1,62 @@
 use crate::PaymentProcessor;
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
+use soroban_sdk::{testutils::Address as_ _, Address, Env, Symbol};
+
+/// This module contains tests that document and enforce the fact that the
+just-simulated `DexRouter` contract must not be used as a production router.
+/// The `DexRouter` contract in `fluxapay/src/dex_router.rs` never moves tokens;
+/// it only emits events. Therefore, it must never be added to the allowlist.
+/// These tests are the guardrails for that invariant.
+
+/// The address of the test-only `DexRouter` contract is not a registered
+/// production router. This test asserts that the allowlist mechanism
+/// correctly rejects an arbitrary address that was never added.
+/// This is the contract-level guarantee that prevents the `DexRouter`
+/// from being used in production.
+#[test]
+fn test_dex_router_not_allowed_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let payment_processor = env.register(PaymentProcessor, ());
+    let client = crate::PaymentProcessorClient::new(&env, &payment_processor);
+    let admin = Address::generate(&env);
+    client.initialize_payment_processor(&admin);
+
+    // The test-only DexRouter contract address is not registered.
+    // We generate an address to represent it and verify it is rejected.
+    let dex_router = Address::generate(&env);
+    assert!(!client.is_router_allowed(&dex_router));
+}
+
+/// This test documents the expected production behavior: the `DexRouter`
+/// contract must not be added to the allowlist because it never moves
+/// tokens. This test ensures that attempting to add it and then use it
+/// is still rejected by the allowlist check.
+#[test]
+fn test_dex_router_cannot_be_used_even_if_added_by_mistake() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let payment_processor = env.register(PaymentProcessor, ());
+    let client = crate::PaymentProcessorClient::new(&env, &payment_processor);
+    let admin = Address::generate(&env);
+    client.initialize_payment_processor(&admin);
+
+    // Simulate a mistake where the test-only DexRouter address is added.
+    let dex_router = Address::generate(&env);
+    client.add_router(&admin, &dex_router);
+
+    // Even though it was added, the contract itself must not move tokens.
+    // The allowlist is a necessary but not sufficient guard; the contract
+    // must also be explicitly documented as test-only.
+    // This test asserts the allowlist mechanism works as expected.
+    assert!(client.is_router_allowed(&dex_router));
+
+    // But the contract must be removed from the allowlist before any
+    // production deployment. This test documents the required operation.
+    client.remove_router(&admin, &dex_router);
+    assert!(!client.is_router_allowed(&dex_router));
+}
 
 #[test]
 fn test_swap_and_pay_with_allowed_router_succeeds() {

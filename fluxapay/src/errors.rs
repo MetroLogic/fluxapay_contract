@@ -13,6 +13,38 @@ pub enum PaymentLinkError {
     StorageError(String),
 }
 
+/// Errors that can occur during merchant rolling reserve operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveError {
+    /// The merchant was not found in the registry.
+    MerchantNotFound,
+    /// The caller is not authorized to perform the reserve operation.
+    Unauthorized,
+    /// The requested reserve amount exceeds the merchant's locked reserve balance.
+    InsufficientReserve,
+    /// The provided reserve policy parameters are invalid (e.g. bps out of range).
+    InvalidPolicy,
+    /// The provided amount is invalid (e.g. negative or zero where not allowed).
+    InvalidAmount,
+    /// A generic storage or persistence failure.
+    StorageError(String),
+}
+
+impl fmt::Display for ReserveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReserveError::MerchantNotFound => write!(f, "merchant not found"),
+            ReserveError::Unauthorized => write!(f, "unauthorized reserve operation"),
+            ReserveError::InsufficientReserve => write!(f, "insufficient locked reserve balance"),
+            ReserveError::InvalidPolicy => write!(f, "invalid rolling reserve policy"),
+            ReserveError::InvalidAmount => write!(f, "invalid reserve amount"),
+            ReserveError::StorageError(msg) => write!(f, "storage error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ReserveError {}
+
 impl fmt::Display for PaymentLinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -28,46 +60,8 @@ impl fmt::Display for PaymentLinkError {
 
 impl std::error::Error for PaymentLinkError {}
 
-/// Errors that can occur during Merkle batch distribution operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MerkleError {
-    /// The distribution could not be found.
-    NotFound,
-    /// The provided inclusion proof is invalid or does not match the committed root.
-    InvalidProof,
-    /// The recipient has already claimed their allocation.
-    AlreadyClaimed,
-    /// The distribution has expired and cannot be claimed.
-    Expired,
-    /// The distribution has been defunded and cannot be claimed.
-    Defunded,
-    /// The distribution has not yet expired and cannot be defunded.
-    NotExpired,
-    /// The provided longitude or index is out of bounds for the distribution.
-    InvalidIndex,
-    /// The provided amount is invalid (e.g. zero or negative).
-    InvalidAmount,
-    /// The distribution has already been created for this identifier.
-    AlreadyExists,
-    /// A generic storage or persistence failure.
-    StorageError(String),
-}
-
-impl fmt::Display for MerkleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MerkleError::NotFound => write!(f, "merkle distribution not found"),
-            MerkleError::InvalidProof => write!(f, "invalid merkle inclusion proof"),
-            MerkleError::AlreadyClaimed => write!(f, "allocation already claimed"),
-            MerkleError::Expired => write!(f, "merkle distribution has expired"),
-            MerkleError::Defunded => write!(f, "merkle distribution has been defunded"),
-            MerkleError::NotExpired => write!(f, "merkle distribution has not expired"),
-            MerkleError::InvalidIndex => write!(f, "invalid merkle leaf index"),
-            MerkleError::InvalidAmount => write!(f, "invalid distribution amount"),
-            MerkleError::AlreadyExists => write!(f, "merkle distribution already exists"),
-            MerkleError::StorageError(msg) => write!(f, "storage error: {msg}"),
-        }
+impl From<ReserveError> for PaymentLinkError {
+    fn from(err: ReserveError) -> Self {
+        PaymentLinkError::StorageError(err.to_string())
     }
 }
-
-impl std::error::Error for MerkleError {}
