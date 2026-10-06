@@ -5,6 +5,14 @@ import type { DeliveryAttempt, DeliveryLogRow, WebhookEndpoint } from "./types";
  * Persistence for webhook endpoints and the delivery log (Issues #808, #810).
  */
 
+/**
+ * Idempotency key included in every webhook payload so merchants can
+ * deduplicate retried deliveries (Issue: duplicate webhook delivery).
+ */
+export function buildEventId(paymentId: string, eventType: string): string {
+  return `${paymentId}:${eventType}`;
+}
+
 /** Test deliveries allowed per endpoint per hour (Issue #808). */
 export const TEST_DELIVERY_LIMIT_PER_HOUR = 5;
 
@@ -52,7 +60,7 @@ export class WebhookStore {
     const { rows } = await this.pool.query(
       `INSERT INTO webhook_delivery_log
          (endpoint_id, event_type, payment_id, attempt_number,
-          http_status, response_body, duration_ms, success, livemode)
+          http_status, response_body, duration_ms, success, livemode, event_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
@@ -65,6 +73,7 @@ export class WebhookStore {
         attempt.durationMs,
         attempt.success,
         attempt.livemode,
+        buildEventId(attempt.paymentId, attempt.eventType),
       ],
     );
     return rows[0].id;

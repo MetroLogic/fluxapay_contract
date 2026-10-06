@@ -297,6 +297,9 @@ fn apply_fee(amount: i128, fee_bps: i128) -> (i128, i128) {
     if fee_bps <= 0 {
         return (0, amount);
     }
+    // Defensive clamp: fee_bps is validated at the setter, but guard here too
+    // so a corrupt/legacy stored value can never produce a negative `net`.
+    let fee_bps = fee_bps.min(10_000);
     let fee = amount * fee_bps / 10_000;
     (fee, amount - fee)
 }
@@ -372,10 +375,14 @@ impl PaymentStreaming {
 
     /// Set the platform fee in basis points applied to stream withdrawals.
     /// Admin auth is enforced by the caller (PaymentProcessor).
-    pub fn set_stream_fee_bps(env: Env, fee_bps: i128) {
+    pub fn set_stream_fee_bps(env: Env, fee_bps: i128) -> Result<(), StreamError> {
+        if !(0..=10_000).contains(&fee_bps) {
+            return Err(StreamError::InvalidRate);
+        }
         env.storage()
             .persistent()
             .set(&StreamDataKey::StreamFeeBps, &fee_bps);
+        Ok(())
     }
 
     pub fn get_stream_fee_bps(env: Env) -> i128 {
@@ -685,14 +692,13 @@ impl PaymentStreaming {
 
         // ── Step 1: Checkpoint accrued_amount ─────────────────────────────────
         // Calculate how many tokens accrued since the last checkpoint.
-        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-        let newly_accrued = (elapsed as i128).saturating_mul(old_rate);
-
-        // Clamp so we never accrue more than the remaining deposit.
-        let newly_accrued =
-            newly_accrued.min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-
-        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.accrued_at_checkpoint = compute_total_accrued(
+            stream.accrued_at_checkpoint,
+            stream.last_checkpoint_at,
+            now,
+            old_rate,
+            stream.remaining_deposit,
+        );
         stream.last_checkpoint_at = now;
 
         // ── Step 2: Calculate surplus and refund ──────────────────────────────
@@ -849,12 +855,13 @@ impl PaymentStreaming {
                 }
 
                 let now = env.ledger().timestamp();
-                let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-                let newly_accrued = (elapsed as i128)
-                    .saturating_mul(stream.rate_per_second)
-                    .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-                stream.accrued_at_checkpoint =
-                    stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+                stream.accrued_at_checkpoint = compute_total_accrued(
+                    stream.accrued_at_checkpoint,
+                    stream.last_checkpoint_at,
+                    now,
+                    stream.rate_per_second,
+                    stream.remaining_deposit,
+                );
                 stream.last_checkpoint_at = now;
 
                 let withdrawable = stream
@@ -940,12 +947,13 @@ impl PaymentStreaming {
         acquire_lock(&env, &stream_id)?;
 
         let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-        let newly_accrued = (elapsed as i128)
-            .saturating_mul(stream.rate_per_second)
-            .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-
-        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.accrued_at_checkpoint = compute_total_accrued(
+            stream.accrued_at_checkpoint,
+            stream.last_checkpoint_at,
+            now,
+            stream.rate_per_second,
+            stream.remaining_deposit,
+        );
         stream.last_checkpoint_at = now;
 
         let withdrawable = stream
@@ -1095,11 +1103,13 @@ impl PaymentStreaming {
         let now = env.ledger().timestamp();
 
         // Checkpoint accrued amount up to now
-        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-        let newly_accrued = (elapsed as i128)
-            .saturating_mul(stream.rate_per_second)
-            .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.accrued_at_checkpoint = compute_total_accrued(
+            stream.accrued_at_checkpoint,
+            stream.last_checkpoint_at,
+            now,
+            stream.rate_per_second,
+            stream.remaining_deposit,
+        );
         stream.last_checkpoint_at = now;
 
         let accrued = stream.accrued_at_checkpoint;
@@ -1158,11 +1168,13 @@ impl PaymentStreaming {
 
         // Checkpoint accrued amount up to now before freezing and snapshot at pause (Issue #772).
         let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-        let newly_accrued = (elapsed as i128)
-            .saturating_mul(stream.rate_per_second)
-            .min(stream.remaining_deposit.saturating_sub(stream.accrued_at_checkpoint));
-        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.accrued_at_checkpoint = compute_total_accrued(
+            stream.accrued_at_checkpoint,
+            stream.last_checkpoint_at,
+            now,
+            stream.rate_per_second,
+            stream.remaining_deposit,
+        );
         stream.accrued_at_pause = stream.accrued_at_checkpoint;
         stream.last_checkpoint_at = now;
 
@@ -1251,12 +1263,13 @@ impl PaymentStreaming {
             }
 
             let now = env.ledger().timestamp();
-            let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-            let newly_accrued = (elapsed as i128)
-                .saturating_mul(stream.rate_per_second)
-                .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-            stream.accrued_at_checkpoint =
-                stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+            stream.accrued_at_checkpoint = compute_total_accrued(
+                stream.accrued_at_checkpoint,
+                stream.last_checkpoint_at,
+                now,
+                stream.rate_per_second,
+                stream.remaining_deposit,
+            );
             stream.last_checkpoint_at = now;
 
             let accrued = stream.accrued_at_checkpoint;
@@ -1335,11 +1348,13 @@ impl PaymentStreaming {
         let old_rate = stream.rate_per_second;
 
         // Checkpoint accrued amount at the old rate.
-        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-        let newly_accrued = (elapsed as i128)
-            .saturating_mul(old_rate)
-            .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.accrued_at_checkpoint = compute_total_accrued(
+            stream.accrued_at_checkpoint,
+            stream.last_checkpoint_at,
+            now,
+            old_rate,
+            stream.remaining_deposit,
+        );
         stream.last_checkpoint_at = now;
 
         // When decreasing: refund surplus deposit no longer needed at the new rate.
@@ -1461,12 +1476,13 @@ impl PaymentStreaming {
                 continue;
             }
 
-            let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-            let newly_accrued = (elapsed as i128)
-                .saturating_mul(stream.rate_per_second)
-                .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-            stream.accrued_at_checkpoint =
-                stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+            stream.accrued_at_checkpoint = compute_total_accrued(
+                stream.accrued_at_checkpoint,
+                stream.last_checkpoint_at,
+                now,
+                stream.rate_per_second,
+                stream.remaining_deposit,
+            );
             stream.last_checkpoint_at = now;
 
             let accrued = stream.accrued_at_checkpoint;
@@ -1537,12 +1553,13 @@ impl PaymentStreaming {
 
             // Recompute accrued up to now
             let now = env.ledger().timestamp();
-            let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-            let newly_accrued = (elapsed as i128)
-                .saturating_mul(stream.rate_per_second)
-                .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
-            stream.accrued_at_checkpoint =
-                stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+            stream.accrued_at_checkpoint = compute_total_accrued(
+                stream.accrued_at_checkpoint,
+                stream.last_checkpoint_at,
+                now,
+                stream.rate_per_second,
+                stream.remaining_deposit,
+            );
             stream.last_checkpoint_at = now;
 
             let withdrawable = stream.accrued_at_checkpoint.min(w.amount).max(0);
@@ -1749,12 +1766,13 @@ impl PaymentStreaming {
         acquire_lock(&env, &stream_id)?;
 
         let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
-        let newly_accrued = (elapsed as i128)
-            .saturating_mul(stream.rate_per_second)
-            .min(stream.remaining_deposit.saturating_sub(stream.accrued_at_checkpoint));
-
-        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.accrued_at_checkpoint = compute_total_accrued(
+            stream.accrued_at_checkpoint,
+            stream.last_checkpoint_at,
+            now,
+            stream.rate_per_second,
+            stream.remaining_deposit,
+        );
         stream.last_checkpoint_at = now;
 
         let withdrawable = stream

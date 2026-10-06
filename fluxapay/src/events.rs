@@ -16,8 +16,111 @@
 //! env.events().publish_event(&EventStruct { ... });
 //! ```
 
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 use crate::merchant_registry::KycTier;
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
+
+// ============================================================================
+// Merkle Distributor Events
+// ============================================================================
+
+/// Emitted when a new Merkle batch distribution is created and funded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDistributionCreated {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_amount: i128,
+    pub leaf_count: u32,
+    pub expires_at: u64,
+}
+
+/// Emitted when a recipient claims their allocation from a distribution.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleClaimed {
+    pub distribution_id: u64,
+    pub index: u32,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an expired distribution is defunded and unclaimed tokens are
+/// returned to the creator.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDefunded {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub refunded_amount: i128,
+}
+
+/// Emit a `MERKLE/DISTRIBUTION_CREATED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_distribution_created(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    token: &Address,
+    merkle_root: &BytesN<32>,
+    total_amount: i128,
+    leaf_count: u32,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DISTRIBUTION_CREATED"),
+            distribution_id,
+        ),
+        (
+            creator.clone(),
+            token.clone(),
+            merkle_root.clone(),
+            total_amount,
+            leaf_count,
+            expires_at,
+        ),
+    );
+}
+
+/// Emit a `MERKLE/CLAIMED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_claimed(
+    env: &Env,
+    distribution_id: u64,
+    index: u32,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "CLAIMED"),
+            distribution_id,
+        ),
+        (index, recipient.clone(), amount),
+    );
+}
+
+/// Emit a `MERKLE/DEFUNDED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_defunded(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    refunded_amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DEFUNDED"),
+            distribution_id,
+        ),
+        (creator.clone(), refunded_amount),
+    );
+}
 
 // ============================================================================
 // Payment Events
@@ -649,10 +752,7 @@ pub struct MerchantPartialPaymentUpdated {
 #[allow(deprecated)]
 pub fn emit_merchant_suspended(env: &Env, merchant_id: &Address, reason: &String) {
     env.events().publish(
-        (
-            Symbol::new(env, "MERCHANT"),
-            Symbol::new(env, "SUSPENDED"),
-        ),
+        (Symbol::new(env, "MERCHANT"), Symbol::new(env, "SUSPENDED")),
         (merchant_id.clone(), reason.clone()),
     );
 }
@@ -661,11 +761,47 @@ pub fn emit_merchant_suspended(env: &Env, merchant_id: &Address, reason: &String
 #[allow(deprecated)]
 pub fn emit_merchant_reinstated(env: &Env, merchant_id: &Address, reinstated_by: &Address) {
     env.events().publish(
+        (Symbol::new(env, "MERCHANT"), Symbol::new(env, "REINSTATED")),
+        (merchant_id.clone(), reinstated_by.clone()),
+    );
+}
+
+/// Emit `MERCHANT/KYC_TIER_UPGRADED` after a merchant's tier is promoted.
+#[allow(deprecated)]
+pub fn emit_kyc_tier_upgraded(
+    env: &Env,
+    merchant_id: &Address,
+    old_tier: &KycTier,
+    new_tier: &KycTier,
+) {
+    env.events().publish(
         (
             Symbol::new(env, "MERCHANT"),
-            Symbol::new(env, "REINSTATED"),
+            Symbol::new(env, "KYC_TIER_UPGRADED"),
         ),
-        (merchant_id.clone(), reinstated_by.clone()),
+        (merchant_id.clone(), old_tier.clone(), new_tier.clone()),
+    );
+}
+
+/// Emit `REFUND/REQUESTED` when an auto-refund is queued for a payer.
+#[allow(deprecated)]
+pub fn emit_refund_requested(
+    env: &Env,
+    refund_id: &String,
+    payment_id: &String,
+    merchant_id: &Address,
+    payer: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "REFUND"), Symbol::new(env, "REQUESTED")),
+        (
+            refund_id.clone(),
+            payment_id.clone(),
+            merchant_id.clone(),
+            payer.clone(),
+            amount,
+        ),
     );
 }
 
@@ -1038,10 +1174,7 @@ pub struct InvoiceOverdue {
 #[allow(deprecated)]
 pub fn emit_invoice_created(env: &Env, invoice_id: &String, merchant_id: &Address, amount: i128) {
     env.events().publish(
-        (
-            Symbol::new(env, "INVOICE"),
-            Symbol::new(env, "CREATED"),
-        ),
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "CREATED")),
         (invoice_id.clone(), merchant_id.clone(), amount),
     );
 }
@@ -1050,10 +1183,7 @@ pub fn emit_invoice_created(env: &Env, invoice_id: &String, merchant_id: &Addres
 #[allow(deprecated)]
 pub fn emit_invoice_paid(env: &Env, invoice_id: &String, merchant_id: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, "INVOICE"),
-            Symbol::new(env, "PAID"),
-        ),
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "PAID")),
         (invoice_id.clone(), merchant_id.clone()),
     );
 }
@@ -1062,10 +1192,97 @@ pub fn emit_invoice_paid(env: &Env, invoice_id: &String, merchant_id: &Address) 
 #[allow(deprecated)]
 pub fn emit_invoice_overdue(env: &Env, invoice_id: &String, merchant_id: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, "INVOICE"),
-            Symbol::new(env, "OVERDUE"),
-        ),
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "OVERDUE")),
         (invoice_id.clone(), merchant_id.clone()),
+    );
+}
+
+// ============================================================================
+// Rolling Reserve Events
+// ============================================================================
+
+/// Emitted when a portion of merchant proceeds is held in the rolling reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsHeld {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub unlock_ledger: u32,
+    pub reserve_bps: u32,
+}
+
+/// Emitted when matured reserve buckets are released to the merchant.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsReleased {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub bucket_count: u32,
+}
+
+/// Emitted when locked reserve funds are slashed to satisfy a lost dispute.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsSlashed {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub dispute_id: String,
+}
+
+/// Emit a `RESERVE/FUNDS_HELD` event when payment settlement locks a portion
+/// of merchant proceeds into the rolling reserve.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_held(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    unlock_ledger: u32,
+    reserve_bps: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_HELD"),
+            merchant_id.clone(),
+        ),
+        (amount, unlock_ledger, reserve_bps),
+    );
+}
+
+/// Emit a `RESERVE/FUNDS_RELEASED` event when matured reserve buckets are
+/// released back to the merchant.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_released(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    bucket_count: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_RELEASED"),
+            merchant_id.clone(),
+        ),
+        (amount, bucket_count),
+    );
+}
+
+/// Emit a `RESERVE/FUNDS_SLASHED` event when locked reserve funds are slashed
+/// to satisfy a lost dispute payout.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_slashed(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    dispute_id: &String,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_SLASHED"),
+            merchant_id.clone(),
+        ),
+        (amount, dispute_id.clone()),
     );
 }

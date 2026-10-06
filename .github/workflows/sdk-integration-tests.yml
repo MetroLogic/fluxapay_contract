@@ -1,6 +1,6 @@
 name: SDK Testnet Integration Tests
 
-# Issue #661: Run the SDK's integration test suite (sdk/test/integration/)
+# Issue #661: Run the SEA SDK's integration test suite (sdk/test/integration/)
 # against real deployed Soroban testnet contracts. Intentionally NOT run on
 # pull_request — these tests submit live testnet transactions and consume
 # testnet keypair nonces/balances, so they only run on merge to main.

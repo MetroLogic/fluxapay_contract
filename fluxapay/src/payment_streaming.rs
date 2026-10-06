@@ -6,6 +6,17 @@
 
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
 
+/// Maximum allowed stream fee in basis points (100% = 10_000 bps).
+/// A fee above this bound would make the net withdrawal amount negative
+/// and cause token transfers to panic on every withdrawal.
+pub const MAX_STREAM_FEE_BPS: u32 = 10_000;
+
+/// Default stream fee in basis linkts when none has been configured.
+pub const DEFAULT_STREAM_FEE_BPS: u32 = 0;
+
+/// Storage key for the currently configured stream fee (bps).
+const STREAM_FEE_BPS_KEY: &str = "stream_fee_bps";
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Stream {
@@ -96,11 +107,17 @@ impl PaymentStreaming {
         let available = vested - stream.withdrawn;
         assert!(available > 0, "nothing to withdraw");
 
+        let (fee, net) = Self::apply_fee(&env, available);
+        assert!(net >= 0, "net amount must not be negative");
+
         stream.withdrawn += available;
         env.storage().persistent().set(&stream_id, &stream);
 
         let token_client = token::Client::new(&env, &stream.token);
-        token_client.transfer(&env.current_contract_address(), &stream.recipient, &available);
+        token_client.transfer(&env.current_contract_address(), &stream.recipient, &let);
+        if fee > 0 {
+            token_client.transfer(&env.current_contract_address(), &env.current_contract_address(), &fee);
+        }
     }
 
     /// Read a stream by id.
@@ -109,6 +126,35 @@ impl PaymentStreaming {
             .persistent()
             .get(&stream_id)
             .expect("stream not found")
+    }
+
+    /// Set the stream fee in basis points. Must be called by the admin.
+    ///
+    /// The fee is bounded to `0..=MAX_STREAM_FEE_BPS` to guarantee that the
+    /// net amount paid out on a withdrawal can never become negative.
+    pub fn set_stream_fee_bps(env: Env, fee_bps: u32) {
+        assert!(fee_bps <= MAX_STREAM_FEE_BPS, "fee_bps must be <= 10_000");
+        env.storage().instance().set(&STREAM_FEE_BPS_KEY, &fee_bps);
+    }
+
+    /// Return the currently configured stream fee in basis points.
+    pub fn get_stream_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&STREAM_FEE_BPS_KEY)
+            .unwrap_or(DEFAULT_STREAM_FEE_BPS)
+    }
+
+    /// Split an amount into (fee, net) according to the configured fee.
+    ///
+    /// The fee is always clamped to the amount so that the net value can
+    /// never be negative, even if the configured fee were somehow out of
+    /// range.
+    fn apply_fee(env: &Env, amount: i128) -> (i128, i128) {
+        let fee_bps = Self::get_stream_fee_bps(env.clone());
+        let fee = amount * (fee_bps as i128) / 10_000;
+        let fee = fee.min(amount);
+        (fee, amount - fee)
     }
 
     fn vested_amount(env: &Env, stream: &Stream) -> i128 {

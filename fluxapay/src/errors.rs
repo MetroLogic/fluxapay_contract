@@ -13,6 +13,38 @@ pub enum PaymentLinkError {
     StorageError(String),
 }
 
+/// Errors that can occur during merchant rolling reserve operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveError {
+    /// The merchant was not found in the registry.
+    MerchantNotFound,
+    /// The caller is not authorized to perform the reserve operation.
+    Unauthorized,
+    /// The requested reserve amount exceeds the merchant's locked reserve balance.
+    InsufficientReserve,
+    /// The provided reserve policy parameters are invalid (e.g. bps out of range).
+    InvalidPolicy,
+    /// The provided amount is invalid (e.g. negative or zero where not allowed).
+    InvalidAmount,
+    /// A generic storage or persistence failure.
+    StorageError(String),
+}
+
+impl fmt::Display for ReserveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReserveError::MerchantNotFound => write!(f, "merchant not found"),
+            ReserveError::Unauthorized => write!(f, "unauthorized reserve operation"),
+            ReserveError::InsufficientReserve => write!(f, "insufficient locked reserve balance"),
+            ReserveError::InvalidPolicy => write!(f, "invalid rolling reserve policy"),
+            ReserveError::InvalidAmount => write!(f, "invalid reserve amount"),
+            ReserveError::StorageError(msg) => write!(f, "storage error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ReserveError {}
+
 impl fmt::Display for PaymentLinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -28,46 +60,8 @@ impl fmt::Display for PaymentLinkError {
 
 impl std::error::Error for PaymentLinkError {}
 
-/// Errors that can occur during stream and vesting operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamError {
-    /// The stream could not be found.
-    StreamNotFound,
-    /// The stream has already been cancelled/revoked.
-    StreamCancelled,
-    /// The caller is not authorized to perform the operation.
-    Unauthorized,
-    /// The cliff timestamp has not yet been reached.
-    CliffNotReached,
-    /// The supplied time range is invalid (e.g. end before start).
-    InvalidTimeRange,
-    /// The cliff timestamp falls outside the [start, end] window.
-    InvalidCliff,
-    /// The cliff amount exceeds the total vesting amount.
-    InvalidCliffAmount,
-    /// The stream is not revocable and cannot be cancelled.
-    NotRevocable,
-    /// There are no vested funds available to withdraw.
-    NothingToWithdraw,
-    /// A generic storage or persistence failure.
-    StorageError(String),
-}
-
-impl fmt::Display for StreamError {
-    fn fmt(&self, f: &mut fmt::Formatter<_>) -> fmt::Result {
-        match self {
-            StreamError::StreamNotFound => write!(f, "stream not found"),
-            StreamError::StreamCancelled => write!(f, "stream has been cancelled"),
-            StreamError::Unauthorized => write!(f, "unauthorized operation on stream"),
-            StreamError::CliffNotReached => write!(f, "cliff time not reached"),
-            StreamError::InvalidTimeRange => write!(f, "invalid time range"),
-            StreamError::InvalidCliff => write!(f, "invalid cliff timestamp"),
-            StreamError::InvalidCliffAmount => write!(f, "invalid cliff amount"),
-            StreamError::NotRevocable => write!(f, "stream is not revocable"),
-            StreamError::NothingToWithdraw => write!(f, "nothing to withdraw"),
-            StreamError::StorageError(msg) => write!(f, "storage error: {msg}"),
-        }
+impl From<ReserveError> for PaymentLinkError {
+    fn from(err: ReserveError) -> Self {
+        PaymentLinkError::StorageError(err.to_string())
     }
 }
-
-impl std::error::Error for StreamError {}

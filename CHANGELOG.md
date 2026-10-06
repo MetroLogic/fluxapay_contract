@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #893 / PR #910**:
+  - Sponsored meta-transactions for gasless actions with domain-separated Ed25519 signatures, replay prevention nonces, and execution deadlines.
+  - Core actions supported: `create_charge`, `authorize_refund`, `rotate_webhook_key`, and `set_fee_recipient`.
+  - TypeScript SDK helpers: `buildMetaTransactionPayload`, `domainSeparator`, `signingPreimage`, `signingDigest`, and `signMetaTransaction`.
+  - Emits `META_TX/EXECUTED` and `META_TX/FAILED` events with relayer, merchant, and gas estimation metadata.
 - **Issues #577, #745, #576, #575 / PR #896**:
   - **Issue #577**: TypeScript SDK wrappers for `swap_and_pay` and `swap_and_pay_multi_route` on `FluxapayClient` with full type exports (`SwapAndPayParams`, `SwapRoute`, `SwapAndPayMultiRouteParams`) and error mapping.
   - **Issue #576**: TypeScript SDK wrappers for batch stream methods on `FluxapayClient`: `cancelMultipleStreams`, `batchWithdrawTo`, and `topUpMultipleStreams`.

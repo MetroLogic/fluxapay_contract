@@ -1,9 +1,7 @@
 //! Contract types and struct definitions for FluxaPay.
 
 use crate::merchant_registry::KycTier;
-use soroban_sdk::{
-    contracterror, contracttype, Env, Address, BytesN, Map, String, Symbol, Vec,
-};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,6 +381,14 @@ pub enum Error {
     InvalidTreasuryThreshold = 80,
     /// Treasury withdrawal amount exceeds token balance.
     InsufficientTokenTreasuryBalance = 81,
+    /// Issue #836: Subscription is still in its free trial; no charge yet.
+    TrialActive = 82,
+    /// Issue #836: Requested trial_days exceeds the maximum of 90 days.
+    TrialTooLong = 83,
+    /// Payment link does not exist or belongs to a different merchant.
+    InvalidPaymentLink = 84,
+    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
+    KycLimitExceeded = 85,
 }
 
 /// Issue #841: Muxed account (M-address) wrapping a G-address and 64-bit sub-account ID.
@@ -397,14 +403,6 @@ pub struct MuxedAccount {
     pub account: Address,
     /// 64-bit sub-account / memo ID embedded in the M-address.
     pub id: u64,
-    /// Issue #836: Subscription is still in its free trial; no charge yet.
-    TrialActive = 70,
-    /// Issue #836: Requested trial_days exceeds the maximum of 90 days.
-    TrialTooLong = 71,
-    /// Payment link does not exist or belongs to a different merchant.
-    InvalidPaymentLink = 70,
-    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
-    KycLimitExceeded = 71,
 }
 
 #[contracttype]
@@ -640,7 +638,7 @@ pub struct ArbitratorVote {
 pub struct ArbitratorVoteTally {
     pub approve_count: u32,
     pub reject_count: u32,
-        }
+}
 
 /// Record of a single admin treasury withdrawal.
 #[contracttype]
@@ -966,7 +964,9 @@ impl<'a> Drop for RefundLockGuard<'a> {
         self.env
             .storage()
             .persistent()
-            .remove(&crate::data_keys::DataKey::RefundLock(self.refund_id.clone()));
+            .remove(&crate::data_keys::DataKey::RefundLock(
+                self.refund_id.clone(),
+            ));
     }
 }
 
@@ -1049,4 +1049,72 @@ pub struct ContractHealth {
     pub active_payment_count: u32,
     pub fx_oracle_configured: bool,
     pub merchant_registry_configured: bool,
+}
+
+/// A single rolling-reserve deposit bucket created when a payment settles.
+///
+/// Each settlement that withholds a reserve portion appends a bucket to the
+/// merchant's maturity queue. The bucket becomes releasable once
+/// `unlock_at` (ledger timestamp) has elapsed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReserveBucket {
+    /// Monotonic bucket identifier, unique per merchant.
+    pub bucket_id: u64,
+    /// Merchant whose proceeds are locked in this bucket.
+    pub merchant_id: Address,
+    /// Payment that produced this reserve deposit.
+    pub payment_id: String,
+    /// Locked amount in the settlement token's smallest unit.
+    pub amount: i128,
+    /// Ledger timestamp at which this bucket matures and may be released.
+    pub unlock_at: u64,
+    /// Ledger timestamp when the bucket was created.
+    pub created_at: u64,
+    /// True once `release_matured_reserves` has credited the bucket.
+    pub released: bool,
+    /// True once `slash_reserve_for_dispute` has consumed the bucket.
+    pub slashed: bool,
+}
+
+/// Aggregate reserve accounting for a merchant, returned by
+/// `get_merchant_reserve_balance`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantReserveBalance {
+    /// Total reserve currently locked (matured + unmatured, unreleased).
+    pub total_locked: i128,
+    /// Portion of `total_locked` whose holding period has already elapsed
+    /// and is claimable via `release_matured_reserves`.
+    pub matured: i128,
+    /// Portion of `total_locked` still within its holding period.
+    pub upcoming: i128,
+    /// Scheduled future releases, ordered by ascending `unlock_at`.
+    pub schedule: Vec<ReserveReleaseScheduleEntry>,
+}
+
+/// A single entry in a merchant's upcoming reserve release schedule.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveReleaseScheduleEntry {
+    /// Ledger timestamp at which `amount` becomes releasable.
+    pub unlock_at: u64,
+    /// Amount maturing at `unlock_at`.
+    pub amount: i128,
+}
+
+/// Per-merchant reserve accounting state persisted in contract storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantReserveState {
+    /// Next bucket id to assign for this merchant.
+    pub next_bucket_id: u64,
+    /// Total reserve currently locked (unreleased, unslashed).
+    pub total_locked: i128,
+    /// Total reserve that has been released to the merchant.
+    pub total_released: i128,
+    /// Total reserve that has been slashed to cover lost disputes.
+    pub total_slashed: i128,
+    /// Policy snapshot applied to this merchant's most recent settlement.
+    pub policy: RollingReservePolicy,
 }

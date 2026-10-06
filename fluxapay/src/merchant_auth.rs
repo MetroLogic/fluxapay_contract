@@ -434,4 +434,52 @@ impl MerchantPreAuth {
 
         Ok(())
     }
+
+    /// Return the stored authorization for a (customer, merchant) pair.
+    pub fn get_authorization(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+    ) -> Result<MerchantAuthorization, MerchantAuthError> {
+        env.storage()
+            .persistent()
+            .get(&MerchantAuthDataKey::Authorization(customer, merchant))
+            .ok_or(MerchantAuthError::AuthorizationNotFound)
+    }
+
+    /// Remaining pull budget for the current period.
+    ///
+    /// When the stored period has elapsed, the budget is the full limit. This
+    /// read does not persist the period reset; `pull_payment` does that.
+    pub fn remaining_limit(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+    ) -> Result<i128, MerchantAuthError> {
+        let auth: MerchantAuthorization = env
+            .storage()
+            .persistent()
+            .get(&MerchantAuthDataKey::Authorization(customer, merchant))
+            .ok_or(MerchantAuthError::AuthorizationNotFound)?;
+
+        if !auth.active {
+            return Err(MerchantAuthError::AuthorizationInactive);
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= auth.period_start + auth.period_secs {
+            return Ok(auth.limit_per_period);
+        }
+        Ok(auth
+            .limit_per_period
+            .saturating_sub(auth.pulled_this_period))
+    }
+
+    /// Return the stored API key record, including revoked keys.
+    pub fn get_api_key(env: Env, key_hash: BytesN<32>) -> Result<ApiKeyRecord, MerchantAuthError> {
+        env.storage()
+            .persistent()
+            .get(&MerchantAuthDataKey::ApiKey(key_hash))
+            .ok_or(MerchantAuthError::ApiKeyNotFound)
+    }
 }

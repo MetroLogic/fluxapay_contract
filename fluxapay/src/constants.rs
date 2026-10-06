@@ -180,5 +180,3 @@ pub const MAX_FEE_RECIPIENTS: u32 = 3;
 /// Maximum total affiliate share (in basis points) across all recipients.
 /// 5000 bps = 50%; the remaining share always goes to the platform treasury.
 pub const MAX_AFFILIATE_BPS: u32 = 5_000;
-/// Denominator for basis-point math (100% = 10_000 bps).
-pub const BPS_DENOMINATOR: u32 = 10_000;

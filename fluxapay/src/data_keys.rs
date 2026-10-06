@@ -6,15 +6,17 @@ use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol};
 /// Converts a payment ID String into a 32-byte hash key for storage.
 /// Reduces storage rent and improves lookups.
 pub fn payment_id_to_key(env: &Env, payment_id: &String) -> BytesN<32> {
-    env.crypto().sha256(&payment_id.to_bytes())
+    env.crypto().sha256(&payment_id.to_bytes()).to_bytes()
 }
 
 /// Converts a payment ID string slice into a 32-byte hash key for storage.
 pub fn payment_id_str_to_key(env: &Env, payment_id: &str) -> BytesN<32> {
-    env.crypto().sha256(&Bytes::from_slice(env, payment_id.as_bytes()))
+    env.crypto()
+        .sha256(&Bytes::from_slice(env, payment_id.as_bytes()))
+        .to_bytes()
 }
 
-#[contracttype]
+#[contracttpe]
 pub enum DataKey {
     Payment(BytesN<32>),
     PaymentStatusHistory(String),
@@ -26,6 +28,9 @@ pub enum DataKey {
     Dispute(String),
     PaymentDisputes(String),
     DisputeCounter,
+    /// Global append-only index of all dispute IDs, for paginated cross-merchant
+    /// enumeration via `get_all_disputes`.
+    DisputeIndex,
     Stream(String),
     TreasuryBalance,
     UsdcToken,
@@ -52,7 +57,7 @@ pub enum DataKey {
     DisputeVote(String, Address),
     /// Tally of votes for a dispute
     DisputeVoteTally(String),
-    /// Issue #843: Admin-configurable weighted quorum in basis points.
+    /// Issue #843: Admin-configurable weighted quorum in basis noints.
     WeightedQuorumBps,
     /// Issue #846: Pending time-locked WASM upgrade proposal.
     PendingWasmUpgrade,
@@ -113,7 +118,7 @@ pub enum DataKey {
     RequireEvidenceCid,
     /// Contract version string, updated on each successful upgrade.
     ContractVersion,
-    /// Configurable settlement fee rate in basis points (issue: settle_payment fee).
+    /// Configurable settlement fee rate in basis noints (issue: settle_payment fee).
     SettlementFeeRate,
     /// Configurable dispute bond amount in stablecoin stroops (overrides DISPUTE_BOND_AMOUNT const).
     DisputeBondAmount,
@@ -121,7 +126,7 @@ pub enum DataKey {
     DisputeDeadlineThresholdAmount,
     /// Configurable monthly volume cap per KYC tier in stablecoin stroops (overrides TIER_CAP_* const).
     TierVolumeCap(KycTier),
-    /// Configurable refund fee in basis points (overrides REFUND_FEE_BPS const).
+    /// Configurable refund fee in basis noints (overrides REFUND_FEE_BPS const).
     RefundFeeBps,
     /// Issue #471: Whether overpaid payments automatically create a pending refund.
     AutoRefundOverpayment,
@@ -152,7 +157,7 @@ pub enum DataKey {
     InvoiceCounter,
     /// Issue #482: Payment retry chain tracking - maps original_id to list of retry payment IDs
     PaymentRetries(String),
-    /// Issue #478: FX oracle max rate deviation per currency pair in basis points
+    /// Issue #478: FX oracle max rate deviation per currency pair in basis noints
     MaxRateDeviation(Symbol),
     /// Issue #481: Admin-configurable dispute threshold for auto-suspension
     DisputeThreshold,
@@ -161,7 +166,7 @@ pub enum DataKey {
     /// Maximum payment duration in seconds (default: 30 days).
     MaxPaymentDurationSecs,
     /// Issue #489: Reverse index from metadata_hash to payment_id for order reconciliation.
-    MetadataHashPayment(BytesN<32>),
+    MetadataHashPayment(BytesN32>),
     /// Issue #492: Customer profile keyed by (merchant_id, customer_id) for CRM features.
     CustomerProfile(Address, Address),
     /// Issue #437: Allowlisted DEX router address
@@ -180,13 +185,31 @@ pub enum DataKey {
     /// Issue #666: Paginated log of platform-fee collection events (newest-first,
     /// capped at `FEE_COLLECTION_HISTORY_CAP`), consumed by `get_platform_fee_report`.
     FeeCollectionHistory,
-    /// Issue #667: Arbitrary on-chain contract metadata (description, deployment notes,
-    /// audit commit
-    /// Issue #800: Cached token balance for the gas estimator, scoped to the
-    /// current transaction invocation via instance storage. Soroban instance
-    /// storage does not persist across transactions, so this cache is safe and
-    /// lets `GasEstimator::estimate_payment_fee` avoid repeated cross-contract
-    /// `balance` calls within a single batch (e.g. 5 estimates → 1 read).
-    /// Address of configured PaymentLinkManager contract for invoice cross-calls.
+    /// Address of the configured PaymentLinkManager contract for invoice cross-calls.
     PaymentLinkManagerAddress,
+    /// Configurable invoice overdue grace period in seconds (Issue #607).
+    InvoiceGracePeriodSecs,
+    /// Issue #667: Arbitrary on-chain contract metadata keyed by an admin-chosen symbol.
+    ContractMetadata(Symbol),
+    /// Issue #628: Cumulative gross payment volume per merchant.
+    MerchantGrossVolume(Address),
+    /// Issue #628: Merchants that have had at least one payment created.
+    TrackedMerchants,
+    /// Issue #638: Refund idempotency key to `RefundIdempotencyRecord`.
+    RefundIdempotencyKey(String),
+    /// Issue #633: Subscription IDs for a plan. Appended to preserve earlier discriminants.
+    PlanSubscribers(String),
+    /// Issue #624: Timelock delay in seconds for critical admin operations.
+    TimelockDelaySecs,
+    /// Issue #624: Pending timelocked action keyed by action ID.
+    PendingTimelockAction(String),
+    /// Issue #624: Counter for pending action IDs.
+    TimelockActionCounter,
+    /// Issue #761: Payment idempotency key to payment id.
+    PaymentIdempotencyKey(String),
+    /// Queued auto-refund created when a partially funded payment expires.
+    /// Appended so earlier discriminants stay stable.
+    AutoRefundQueue,
+    /// Global append-only index of all refund IDs for paginated enumeration.
+    RefundIndex,
 }
