@@ -1182,6 +1182,50 @@ pub struct SwapRefundCaller {
     pub amount: i128,
 }
 
+/// Emitted when an exact-output swap settles a merchant charge.
+///
+/// Contains the full hop path (token addresses in swap order), the actual
+/// input amount spent by the payer (after any surplus refund), and the
+/// exact output amount delivered to the merchant.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SwapExactSettled {
+    pub payment_id: String,
+    pub payer: Address,
+    pub merchant_id: Address,
+    pub path: soroban_sdk::Vec<Address>,
+    pub amount_in: i128,
+    pub amount_out: i128,
+}
+
+/// Emit a `SWAP/EXACT_SETTLED` event when an exact-output swap settles a
+/// merchant charge. Topics: `(SWAP, EXACT_SETTLED)`, data: full event payload.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_swap_exact_settled(
+    env: &Env,
+    payment_id: &String,
+    payer: &Address,
+    merchant_id: &Address,
+    path: &soroban_sdk::Vec<Address>,
+    amount_in: i128,
+    amount_out: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SWAP"),
+            Symbol::new(env, "EXACT_SETTLED"),
+        ),
+        (
+            payment_id.clone(),
+            payer.clone(),
+            merchant_id.clone(),
+            path.clone(),
+            amount_in,
+            amount_out,
+        ),
+    );
+}
+
 // ============================================================================
 // FX Oracle Events
 // ============================================================================
