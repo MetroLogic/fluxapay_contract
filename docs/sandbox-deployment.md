@@ -1,66 +1,70 @@
-# Sandbox Deployment Recipes
+# Soroban Sandbox Local Deployment Quickstart
 
-Quick developer setup for FluxaPay using Docker Compose templates (Issue #231).
+This guide walks through deploying and testing the full FluxaPay contract stack locally using the Stellar Soroban Sandbox network.
 
-## Prerequisites
+## 📋 Prerequisites
 
-- Docker Desktop or Docker Engine + Compose v2
-- Stellar CLI (`stellar`) on the host for `scripts/sandbox-init.sh`
-- Copy environment template: `cp .env.docker.example .env.docker`
+- Docker Desktop / Docker Engine
+- `stellar-cli` (v21.0.0+ installed via Cargo: `cargo install --locked stellar-cli`)
+- Node.js 18+
 
-## Local Standalone Sandbox
+## 🚀 Step-by-Step Walkthrough
 
-Runs a local Stellar/Soroban node via `stellar/quickstart`.
+### 1. Launch Local Soroban Sandbox
 
+Start local Stellar standalone network via Docker:
 ```bash
-docker compose up -d
-./scripts/sandbox-init.sh
+docker run --rm -it \
+  -p 8000:8000 \
+  --name soroban-preview \
+  stellar/quickstart:testing \
+  --standalone \
+  --enable-soroban-rpc
 ```
 
-Default endpoints:
+### 2. Initialize Network & Secret Keys
 
-| Service | URL |
-|---------|-----|
-| Soroban RPC | `http://localhost:8000/soroban/rpc` |
-| Horizon | `http://localhost:8000` |
-| Friendbot | `http://localhost:8000/friendbot?addr=<G-address>` |
-
-Build WASM inside Docker (optional profile):
-
+Run sandbox initialization script:
 ```bash
-docker compose --profile build up contract-builder
+bash scripts/sandbox-init.sh
 ```
 
-## Testnet Devbox
+### 3. Deploy Contract Stack
 
-Containerized Node.js workspace prewired for testnet RPC/HORIZON URLs.
-
+Deploy all 5 core Soroban smart contracts:
 ```bash
-docker compose -f docker-compose.testnet.yml up -d
-docker compose -f docker-compose.testnet.yml exec devbox bash
-cd sdk && npm install && npm run build
+# 1. PaymentProcessor
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/payment_processor.wasm --source alice --network standalone
+
+# 2. RefundManager
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/refund_manager.wasm --source alice --network standalone
+
+# 3. FXOracle
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/fx_oracle.wasm --source alice --network standalone
+
+# 4. MerchantRegistry
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/merchant_registry.wasm --source alice --network standalone
+
+# 5. PaymentLinkManager
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/payment_link_manager.wasm --source alice --network standalone
 ```
 
-Run SDK build check profile:
+### 4. Account Funding & Initializing Entrypoints
 
 ```bash
-docker compose -f docker-compose.testnet.yml --profile ci up sdk-check
+# Fund test accounts
+node scripts/fund-accounts.js
+
+# Invoke initialize on PaymentProcessor
+stellar contract invoke \
+  --id <PAYMENT_PROCESSOR_ID> \
+  --source alice \
+  --network standalone \
+  -- \
+  initialize --admin alice --fee_bps 100
 ```
 
-## Environment Variables
+## 🛠️ Troubleshooting
 
-See `.env.docker.example` for all supported variables. After deploying contracts, populate:
-
-- `PAYMENT_PROCESSOR_ID`
-- `MERCHANT_REGISTRY_ID`
-- `FX_ORACLE_ID`
-- `REFUND_MANAGER_ID`
-
-Then follow invoke recipes in [`local-invoke.md`](./local-invoke.md).
-
-## Tear Down
-
-```bash
-docker compose down -v
-docker compose -f docker-compose.testnet.yml down -v
-```
+- **`InsufficientFunds`**: Fund the invoking account using Friendbot: `curl "http://localhost:8000/friendbot?addr=<ACCOUNT_ADDRESS>"`.
+- **`ContractNotFound`**: Ensure the contract ID matches the deployment output saved in `.env`.
