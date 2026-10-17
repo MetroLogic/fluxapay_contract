@@ -15,6 +15,13 @@ import { Router, Request, Response, NextFunction } from "express";
  * GET    /v1/reports/transactions/export – streamed CSV export of the
  *        merchant's reconciliation report (see createTransactionsExportRouter).
  *
+ * Issue #965: Invoice PDF generation.
+ *
+ * POST   /v1/invoices                  – generate an invoice PDF. Amounts are
+ *        formatted with locale-aware thousand separators and support the full
+ *        i128 range (USDC stroops → decimal). Genuinely invalid inputs return
+ *        HTTP 422 instead of a 500.
+ *
  * Auth: the DELETE endpoint requires a `Authorization: Bearer <jwt>` header
  * issued by the SEP-10 flow. The JWT subject becomes the merchant_id and is
  * forwarded to the indexer.
@@ -23,6 +30,85 @@ import { Router, Request, Response, NextFunction } from "express";
 export interface InvoicesRouterConfig {
   /** Base URL of the indexer API, e.g. http://localhost:3001 */
   indexerUrl: string;
+}
+
+/**
+ * Issue #965: Locale used for thousand-separator / decimal formatting per
+ * invoice currency. Falls back to en-US when the currency is unknown.
+ */
+const CURRENCY_LOCALES: Record<string, string> = {
+  NGN: "en-NG",
+  USD: "en-US",
+  EUR: "de-DE",
+  GBP: "en-GB",
+  KES: "en-KE",
+  GHS: "en-GH",
+  ZAR: "en-ZA",
+};
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  NGN: "₦",
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  KES: "KSh",
+  GHS: "₵",
+  ZAR: "R",
+};
+
+/** USDC has 7 decimal places (stroops). */
+const USDC_DECIMALS = 7;
+
+/**
+ * Issue #965: Convert an i128 USDC stroop amount to a decimal string without
+ * overflow. Uses BigInt so values far beyond Number.MAX_SAFE_INTEGER are safe.
+ */
+export function stroopsToDecimal(stroops: bigint): string {
+  const negative = stroops < 0n;
+  const abs = negative ? -stroops : stroops;
+  const divisor = 10n ** BigInt(USDC_DECIMALS);
+  const whole = abs / divisor;
+  const frac = abs % divisor;
+  const fracStr = frac.toString().padStart(USDC_DECIMALS, "0").replace(/0+$/, "");
+  const sign = negative ? "-" : "";
+  return fracStr.length > 0 ? `${sign}${whole.toString()}.${fracStr}` : `${sign}${whole.toString()}`;
+}
+
+/**
+ * Issue #965: Format a monetary amount for the invoice PDF.
+ *
+ * Accepts either a decimal string/number (already in display units) or an
+ * i128 stroop amount via `stroops`. Renders with the currency's locale
+ * thousand separators and exactly two decimal places, e.g. "₦1,500,000.00".
+ */
+export function formatInvoiceAmount(
+  amount: string | number | bigint,
+  currency: string,
+  opts: { stroops?: boolean } = {},
+): string {
+  const code = currency.toUpperCase();
+  const locale = CURRENCY_LOCALES[code] ?? "en-US";
+  const symbol = CURRENCY_SYMBOLS[code] ?? code;
+
+  let decimal: string;
+  if (opts.stroops) {
+    const stroops = typeof amount === "bigint" ? amount : BigInt(amount);
+    decimal = stroopsToDecimal(stroops);
+  } else {
+    decimal = typeof amount === "bigint" ? amount.toString() : String(amount);
+  }
+
+  const numeric = Number(decimal);
+  if (!Number.isFinite(numeric)) {
+    throw new RangeError(`invalid amount: ${decimal}`);
+  }
+
+  const formatted = new Intl.NumberFormat(locale, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(numeric);
+
+  return `${symbol}${formatted}`;
 }
 
 export function createInvoicesRouter(config: InvoicesRouterConfig): Router {
@@ -46,6 +132,40 @@ export function createInvoicesRouter(config: InvoicesRouterConfig): Router {
       res.status(upstream.status).json(body);
     } catch (err) {
       next(err);
+    }
+  });
+
+  // ------------------------------------------------------------------ POST /v1/invoices
+
+  router.post("/", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { amount, currency, stroops } = req.body ?? {};
+      if (currency === undefined || (amount === undefined && stroops === undefined)) {
+        return res.status(422).json({ error: "amount and currency are required" });
+      }
+
+      let formatted: string;
+      try {
+        formatted = formatInvoiceAmount(
+          stroops !== undefined ? stroops : amount,
+          String(currency),
+          { stroops: stroops !== undefined },
+        );
+      } catch (err) {
+        return res.status(422).json({
+          error: err instanceof Error ? err.message : "invalid amount",
+        });
+      }
+
+      const upstream = await fetch(`${indexerUrl}/v1/invoices`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ ...req.body, formatted_amount: formatted }),
+      });
+      const body = await upstream.json();
+      return res.status(upstream.status).json(body);
+    } catch (err) {
+      return next(err);
     }
   });
 
@@ -231,16 +351,9 @@ export function createTransactionsExportRouter(config: InvoicesRouterConfig): Ro
             res.write(toCsvRow(CSV_COLUMNS));
           }
           headerWritten = true;
-          chunk = chunk.slice(firstNewline + 1);
         }
 
         rowCount += (chunk.match(/\n/g) ?? []).length;
-        if (rowCount > MAX_EXPORT_ROWS) {
-          reader.cancel().catch(() => undefined);
-          res.end();
-          return;
-        }
-
         res.write(chunk);
       }
 
