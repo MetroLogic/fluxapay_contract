@@ -18,6 +18,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #974: starts the Stellar Fee-Bump daemon that re-wraps stuck
+ * pending payments with a higher fee (CAP-0015).
  */
 
 const app = express();
@@ -114,10 +116,55 @@ app.use(
 
 app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
 
+/**
+ * Issue #974: Fee-Bump daemon configuration.
+ *
+ * `FEE_BUMP_THRESHOLD_SECS` — how long a payment may sit in `Pending` before
+ * it is considered stuck (default 30s).
+ * `FEE_BUMP_MAX_STROOPS` — the maximum fee (in stroops) FluxaPay is willing
+ * to pay when re-wrapping a stuck transaction. Charged to FluxaPay's
+ * operational fee account, never the merchant.
+ */
+const FEE_BUMP_THRESHOLD_SECS = Number(process.env.FEE_BUMP_THRESHOLD_SECS || 30);
+const FEE_BUMP_MAX_STROOPS = Number(process.env.FEE_BUMP_MAX_STROOPS || 10_000);
+const FEE_BUMP_INTERVAL_MS = 30_000;
+
+/**
+ * Issue #974: scan for payments stuck in `Pending` past the threshold and
+ * bump their fee via a CAP-0015 Fee-Bump transaction.
+ *
+ * The actual Horizon interaction lives in the indexer's fee-bump module; this
+ * daemon only schedules the sweep and logs the outcome so the backend process
+ * owns the lifecycle.
+ */
+async function runFeeBumpSweep(): Promise<void> {
+  try {
+    const { bumpStuckPayments } = await import("./services/feeBump");
+    const bumped = await bumpStuckPayments({
+      thresholdSecs: FEE_BUMP_THRESHOLD_SECS,
+      maxFeeStroops: FEE_BUMP_MAX_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    });
+    if (bumped > 0) {
+      console.log(`[fee-bump] bumped ${bumped} stuck pending payment(s)`);
+    }
+  } catch (err) {
+    console.error("[fee-bump] sweep failed", err);
+  }
+}
+
+function startFeeBumpDaemon(): NodeJS.Timeout {
+  const timer = setInterval(runFeeBumpSweep, FEE_BUMP_INTERVAL_MS);
+  // Do not keep the event loop alive solely for the daemon.
+  timer.unref?.();
+  return timer;
+}
+
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`FluxaPay backend listening on :${PORT}`);
   });
+  startFeeBumpDaemon();
 }
 
-export { app };
+export { app, startFeeBumpDaemon, runFeeBumpSweep };
