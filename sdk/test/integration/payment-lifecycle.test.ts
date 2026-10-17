@@ -13,7 +13,13 @@ const env = getTestnetEnv();
 
 test(
   "create -> verify -> settle payment lifecycle on testnet",
-  { skip: !env && "TESTNET_RPC_URL not set — skipping testnet integration test" },
+  {
+    timeout: 120_000,
+    skip:
+      !env || !process.env.STELLAR_TESTNET_SECRET_KEY
+        ? "Testnet integration credentials not set — skipping testnet integration test"
+        : false,
+  },
   async () => {
     if (!env) return;
     const client = makeTestnetClient(env);

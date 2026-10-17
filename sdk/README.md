@@ -239,7 +239,7 @@ either way.
 
 ## Contract IDs
 
-Every network environment (`mainnet`, `testnet`, `standalone`) has a canonical
+Every network environment (`mainnet`, `testnet`, `sandbox`, `standalone`) has a canonical
 set of deployed contract addresses exported as `FLUXAPAY_CONTRACT_IDS`:
 
 ```typescript
@@ -273,12 +273,25 @@ rather than making an RPC call to a nonsense address. CI runs
 placeholders — a reminder to update `sdk/src/network-profiles.ts` once the
 mainnet deployment lands.
 
+## Network profiles
+
+Select `mainnet`, `testnet`, or `sandbox` with the `network` option. The
+`sandbox` profile uses the local Soroban RPC endpoint; pass the contract ID
+from your local deployment:
+
+```typescript
+const client = new FluxapayClient({
+  network: "sandbox",
+  contractId: "C...", // locally deployed PaymentProcessor
+});
+```
+
 ## Features
 
 - **High-level Wrapper**: `FluxapayClient`, `RefundManagerClient`, `MerchantRegistryClient`, and `FxOracleClient` simplify complex contract interactions.
 - **Typed Interfaces**: Full TypeScript support for all contract models (`Merchant`, `PaymentCharge`, `Refund`, `FeeConfig`, etc.).
 - **Automatic Simulation**: Built-in support for Soroban transaction simulation.
-- **Network Presets**: Easy switching between `testnet` and `mainnet`.
+- **Network Presets**: Easy switching between `testnet`, `mainnet`, and local `sandbox`.
 - **SEP-10 Authentication**: Merchant API access via Stellar Web Authentication standard.
 
 ## SEP-10 Merchant Authentication
