@@ -79,7 +79,7 @@ export class RefundManagerClient {
    * @param idempotencyKey - Issue #638: optional idempotency key. When supplied,
    *   retrying with the same key and the same `(paymentId, refundAmount, reason)`
    *   returns the original refund ID instead of creating a duplicate; reusing the
-   * key with different parameters throws `DuplicateIdempotencyKey`. Keys are
+   *   key with different parameters throws `DuplicateIdempotencyKey`. Keys are
    *   retained for 30 days. Routes to the `create_refund_idempotent` entry point.
    * @returns A promise resolving to the refund ID
    * @throws Error if the refund creation fails
@@ -177,12 +177,12 @@ export class RefundManagerClient {
   /**
    * Retrieve all refunds for a specific payment.
    * @param paymentId - The ID of the payment
-   * @returns A promise resolving to an array of refund IDs for the payment
+   * @returns A promise resolving to an array of refund IDs of the payment
    * @throws Error if the payment is not found
    */
   async getPaymentRefunds(paymentId: string): Promise<string[]> {
     return withMappedContractError(() =>
-      this.getContract().get_payment_refunds(s
+      this.getContract().get_payment_refunds({
         payment_id: paymentId,
       }),
     );
@@ -243,6 +243,51 @@ export class RefundManagerClient {
    */
   async getRefundPolicy(): Promise<RefundPolicy> {
     return withMappedContractError(() => this.getContract().get_refund_policy());
+  }
+
+  /**
+   * Read the treasury balance for a specific settlement token.
+   *
+   * Fees are accrued per-token on-chain, so the token address must be
+   * supplied to avoid commingling balances from different settlement tokens.
+   * @param token - The settlement token address
+   * @returns A promise resolving to the treasury balance for that token
+   * @throws Error if the query fails
+   */
+  async getTreasuryBalance(token: string): Promise<bigint> {
+    return withMappedContractError(() =>
+      this.getContract().get_treasury_balance({
+        token: token,
+      }),
+    );
+  }
+
+  /**
+   * Withdraw accrued treasury fees in a specific settlement token.
+   *
+   * The token address is required so that the contract pays out only the
+   * fees actually collected in that token.
+   * @param admin - The administrator authorized to withdraw
+   * @param token - The settlement token address to withdraw
+   * @param amount - The amount to withdraw in stroops
+   * @param recipient - The address to receive the withdrawal
+   * @returns A promise that resolves when the withdrawal completes
+   * @throws Error if the withdrawal fails
+   */
+  async withdrawTreasury(
+    admin: string,
+    token: string,
+    amount: bigint,
+    recipient: string,
+  ): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().withdraw_treasury({
+        admin: admin,
+        token: token,
+        amount: amount,
+        recipient: recipient,
+      }),
+    );
   }
 }
 

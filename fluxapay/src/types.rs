@@ -695,6 +695,8 @@ pub struct TreasuryWithdrawal {
     pub destination: Address,
     pub admin: Address,
     pub withdrawn_at: u64,
+    /// Token contract address the withdrawal was paid out in.
+    pub token_address: Address,
 }
 
 /// Treasury withdrawal proposal with M-of-N multi-sig and timelock.
