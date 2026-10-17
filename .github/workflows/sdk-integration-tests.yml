@@ -1,15 +1,16 @@
 name: SDK Testnet Integration Tests
 
+# Run the SDK's integration test suite against real deployed Soroban testnet
+# contracts on a schedule, not for every pull request.
 # Issue #661: Run the SEA SDK's integration test suite (sdk/test/integration/)
 # against real deployed Soroban testnet contracts. Intentionally NOT run on
 # pull_request — these tests submit live testnet transactions and consume
 # testnet keypair nonces/balances, so they only run on merge to main.
 # For local setup and troubleshooting, see docs/integration-test-guide.md.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "sdk/**"
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +19,7 @@ jobs:
   integration:
     name: Testnet Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: sdk
@@ -48,3 +49,4 @@ jobs:
           TESTNET_ADMIN_SECRET_KEY: ${{ secrets.TESTNET_ADMIN_SECRET_KEY }}
           TESTNET_MERCHANT_SECRET_KEY: ${{ secrets.TESTNET_MERCHANT_SECRET_KEY }}
           TESTNET_PAYER_SECRET_KEY: ${{ secrets.TESTNET_PAYER_SECRET_KEY }}
+          STELLAR_TESTNET_SECRET_KEY: ${{ secrets.STELLAR_TESTNET_SECRET_KEY }}
