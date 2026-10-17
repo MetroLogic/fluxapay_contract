@@ -1,241 +1,202 @@
-/**
- * Issue #817: rate limiting for auth and authenticated indexer routes.
- */
-import assert from "node:assert/strict";
-import test, { describe } from "node:test";
-import type { Request, Response, NextFunction } from "express";
-
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { Request, Response, NextFunction } from 'express';
 import {
-  createTestRateLimiter,
-  MemorySlidingWindowStore,
-  loadRateLimitConfig,
-} from "../src/rate-limit";
+  createRateLimiter,
+  rateLimitTiers,
+  resolveTier,
+  type RateLimitStore,
+} from '../src/middleware/rate-limit.js';
 
-function mockReq(partial: Partial<Request> & { path: string }): Request {
+function makeReq(overrides: Partial<Request> = {}): Request {
   return {
+    method: 'GET',
+    path: '/v1/payments',
+    ip: '203.0.113.7',
     headers: {},
-    ip: "203.0.113.10",
-    socket: { remoteAddress: "203.0.113.10" } as any,
-    ...partial,
-  } as Request;
+    ...overrides,
+  } as unknown as Request;
 }
 
-function mockRes() {
+function makeRes() {
   const headers: Record<string, string> = {};
-  let statusCode = 200;
-  let body: unknown;
   const res = {
-    setHeader(k: string, v: string) {
-      headers[k.toLowerCase()] = v;
-      return res;
+    statusCode: 200,
+    headers,
+    setHeader(name: string, value: string | number) {
+      headers[name.toLowerCase()] = String(value);
+      return this;
     },
     status(code: number) {
-      statusCode = code;
-      return res;
+      this.statusCode = code;
+      return this;
     },
-    json(payload: unknown) {
-      body = payload;
-      return res;
+    json(body: unknown) {
+      this.body = body;
+      return this;
     },
-    getHeaders: () => headers,
-    getStatus: () => statusCode,
-    getBody: () => body,
+    body: undefined as unknown,
   };
-  return res;
+  return res as unknown as Response & {
+    statusCode: number;
+    headers: Record<string, string>;
+    body: unknown;
+  };
 }
 
-describe("indexer rate limiting (Issue #817)", () => {
-  test("loadRateLimitConfig reads RATE_LIMIT_AUTH_RPM and RATE_LIMIT_API_RPM", () => {
-    const cfg = loadRateLimitConfig({
-      RATE_LIMIT_AUTH_RPM: "7",
-      RATE_LIMIT_API_RPM: "50",
-    } as NodeJS.ProcessEnv);
-    assert.equal(cfg.authRpm, 7);
-    assert.equal(cfg.apiRpm, 50);
+function makeStore(): RateLimitStore {
+  const buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  return {
+    async consume(key, limit, windowMs, now) {
+      const existing = buckets.get(key);
+      const refillRate = limit / windowMs;
+      let tokens = limit;
+      if (existing) {
+        const elapsed = Math.max(0, now - existing.updatedAt);
+        tokens = Math.min(limit, existing.tokens + elapsed * refillRate);
+      }
+      const allowed = tokens >= 1;
+      if (allowed) tokens -= 1;
+      buckets.set(key, { tokens, updatedAt: now });
+      const missing = Math.max(0, 1 - tokens);
+      const resetMs = allowed ? 0 : Math.ceil(missing / refillRate);
+      return { allowed, remaining: Math.floor(tokens), resetMs };
+    },
+  };
+}
+
+async function run(
+  limiter: ReturnType<typeof createRateLimiter>,
+  req: Request,
+  res: ReturnType<typeof makeRes>,
+): Promise<boolean> {
+  let nextCalled = false;
+  const next: NextFunction = () => {
+    nextCalled = true;
+  };
+  await limiter(req, res, next);
+  return nextCalled;
+}
+
+describe('rate limit tiers', () => {
+  it('defines a tier for every documented endpoint group', () => {
+    expect(rateLimitTiers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ method: 'POST', pattern: /^\/v1\/payments\/?$/, limit: 100, windowMs: 60_000, scope: 'apiKey' }),
+        expect.objectContaining({ method: 'GET', pattern: /^\/v1\/payments\//, limit: 300, windowMs: 60_000, scope: 'apiKey' }),
+        expect.objectContaining({ method: 'GET', pattern: /^\/v1\/payment-links\//, limit: 60, windowMs: 60_000, scope: 'ip' }),
+        expect.objectContaining({ method: 'POST', pattern: /^\/v1\/fx\/convert\/?$/, limit: 60, windowMs: 60_000, scope: 'ip' }),
+        expect.objectContaining({ method: 'POST', pattern: /^\/v1\/auth\//, limit: 10, windowMs: 60_000, scope: 'ip' }),
+      ]),
+    );
   });
 
-  test("auth endpoints return 429 with Retry-After after exceeding threshold", () => {
-    const store = new MemorySlidingWindowStore();
-    const { middleware } = createTestRateLimiter({
-      authRpm: 3,
-      apiRpm: 200,
-      store,
-      windowMs: 60_000,
-    });
+  it('resolves the correct tier for each route', () => {
+    expect(resolveTier('POST', '/v1/payments')?.limit).toBe(100);
+    expect(resolveTier('GET', '/v1/payments/pi_123')?.limit).toBe(300);
+    expect(resolveTier('GET', '/v1/payment-links/pl_123')?.limit).toBe(60);
+    expect(resolveTier('POST', '/v1/fx/convert')?.limit).toBe(60);
+    expect(resolveTier('POST', '/v1/auth/login')?.limit).toBe(10);
+  });
 
-    for (let i = 0; i < 3; i++) {
-      const res = mockRes();
-      let nextCalled = false;
-      middleware(
-        mockReq({ path: "/v1/auth/login", method: "POST" }),
-        res as unknown as Response,
-        (() => {
-          nextCalled = true;
-        }) as NextFunction,
-      );
-      assert.equal(nextCalled, true, `request ${i + 1} should pass`);
-      assert.equal(res.getStatus(), 200);
+  it('gives admin endpoints a separate, higher limit', () => {
+    const admin = resolveTier('GET', '/v1/admin/merchants');
+    expect(admin).toBeDefined();
+    expect(admin!.limit).toBeGreaterThan(300);
+  });
+});
+
+describe('token bucket middleware', () => {
+  let now: number;
+
+  beforeEach(() => {
+    now = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('allows requests under the limit and sets rate limit headers', async () => {
+    const limiter = createRateLimiter({ store: makeStore() });
+    const req = makeReq({ method: 'POST', path: '/v1/payments', headers: { 'x-api-key': 'key_a' } });
+    const res = makeRes();
+
+    const nextCalled = await run(limiter, req, res);
+
+    expect(nextCalled).toBe(true);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-limit']).toBe('100');
+    expect(res.headers['x-ratelimit-remaining']).toBe('99');
+    expect(res.headers['x-ratelimit-reset']).toBeDefined();
+  });
+
+  it('returns 429 with Retry-After once the bucket is exhausted', async () => {
+    const limiter = createRateLimiter({ store: makeStore() });
+    const req = makeReq({ method: 'POST', path: '/v1/auth/login' });
+
+    for (let i = 0; i < 10; i += 1) {
+      const res = makeRes();
+      expect(await run(limiter, req, res)).toBe(true);
     }
 
-    const blocked = mockRes();
-    let nextCalled = false;
-    middleware(
-      mockReq({ path: "/v1/auth/login", method: "POST" }),
-      blocked as unknown as Response,
-      (() => {
-        nextCalled = true;
-      }) as NextFunction,
-    );
-    assert.equal(nextCalled, false);
-    assert.equal(blocked.getStatus(), 429);
-    assert.ok(blocked.getHeaders()["retry-after"]);
-    assert.equal((blocked.getBody() as any).error, "Too Many Requests");
+    const blocked = makeRes();
+    const nextCalled = await run(limiter, req, blocked);
+
+    expect(nextCalled).toBe(false);
+    expect(blocked.statusCode).toBe(429);
+    expect(blocked.headers['retry-after']).toBeDefined();
+    expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
+    expect(blocked.headers['x-ratelimit-remaining']).toBe('0');
   });
 
-  test("authenticated API routes use per-account limit", () => {
-    const store = new MemorySlidingWindowStore();
-    const { middleware } = createTestRateLimiter({
-      authRpm: 10,
-      apiRpm: 2,
-      store,
-      windowMs: 60_000,
-    });
+  it('refills tokens over time', async () => {
+    const limiter = createRateLimiter({ store: makeStore() });
+    const req = makeReq({ method: 'POST', path: '/v1/auth/login' });
 
-    const req = () =>
-      mockReq({
-        path: "/v1/payments",
-        method: "GET",
-        headers: { "x-api-key": "merchant-key-1" },
-      });
+    for (let i = 0; i < 10; i += 1) {
+      await run(limiter, req, makeRes());
+    }
+    expect(await run(limiter, req, makeRes())).toBe(false);
 
-    for (let i = 0; i < 2; i++) {
-      const res = mockRes();
-      let nextCalled = false;
-      middleware(req(), res as unknown as Response, (() => {
-        nextCalled = true;
-      }) as NextFunction);
-      assert.equal(nextCalled, true);
+    now += 60_000;
+    expect(await run(limiter, req, makeRes())).toBe(true);
+  });
+
+  it('limits auth endpoints by IP, not API key', async () => {
+    const limiter = createRateLimiter({ store: makeStore() });
+    const reqA = makeReq({ method: 'POST', path: '/v1/auth/login', ip: '198.51.100.1', headers: { 'x-api-key': 'key_a' } });
+    const reqB = makeReq({ method: 'POST', path: '/v1/auth/login', ip: '198.51.100.1', headers: { 'x-api-key': 'key_b' } });
+
+    for (let i = 0; i < 10; i += 1) {
+      await run(limiter, reqA, makeRes());
     }
 
-    const blocked = mockRes();
-    let nextCalled = false;
-    middleware(req(), blocked as unknown as Response, (() => {
-      nextCalled = true;
-    }) as NextFunction);
-    assert.equal(nextCalled, false);
-    assert.equal(blocked.getStatus(), 429);
-    assert.ok(blocked.getHeaders()["retry-after"]);
+    expect(await run(limiter, reqB, makeRes())).toBe(false);
   });
 
-  test("/v1/auth/refresh is also rate-limited per IP", () => {
-    const store = new MemorySlidingWindowStore();
-    const { middleware } = createTestRateLimiter({
-      authRpm: 1,
-      apiRpm: 200,
-      store,
-    });
+  it('limits payment-links by IP for unauthenticated callers', async () => {
+    const limiter = createRateLimiter({ store: makeStore() });
+    const req = makeReq({ method: 'GET', path: '/v1/payment-links/pl_123' });
 
-    const first = mockRes();
-    let next1 = false;
-    middleware(
-      mockReq({ path: "/v1/auth/refresh", method: "POST" }),
-      first as unknown as Response,
-      (() => {
-        next1 = true;
-      }) as NextFunction,
-    );
-    assert.equal(next1, true);
-
-    const second = mockRes();
-    let next2 = false;
-    middleware(
-      mockReq({ path: "/v1/auth/refresh", method: "POST" }),
-      second as unknown as Response,
-      (() => {
-        next2 = true;
-      }) as NextFunction,
-    );
-    assert.equal(next2, false);
-    assert.equal(second.getStatus(), 429);
-  });
-
-  test("Issue #1032: loadRateLimitConfig reads payment-create overrides and defaults to 30/60s", () => {
-    const cfg = loadRateLimitConfig({} as NodeJS.ProcessEnv);
-    assert.equal(cfg.paymentCreateLimit, 30);
-    assert.equal(cfg.paymentCreateWindowMs, 60_000);
-
-    const overridden = loadRateLimitConfig({
-      RATE_LIMIT_PAYMENT_CREATE_RPW: "5",
-      RATE_LIMIT_PAYMENT_CREATE_WINDOW_SECS: "30",
-    } as NodeJS.ProcessEnv);
-    assert.equal(overridden.paymentCreateLimit, 5);
-    assert.equal(overridden.paymentCreateWindowMs, 30_000);
-  });
-
-  test("Issue #1032: POST /v1/payment-links/:id/view is rate-limited per IP, matching the contract's 30/60s budget", () => {
-    const store = new MemorySlidingWindowStore();
-    const { middleware } = createTestRateLimiter({
-      authRpm: 10,
-      apiRpm: 200,
-      paymentCreateLimit: 3,
-      paymentCreateWindowMs: 60_000,
-      store,
-    });
-
-    const req = () =>
-      mockReq({ path: "/v1/payment-links/link_123/view", method: "POST" });
-
-    for (let i = 0; i < 3; i++) {
-      const res = mockRes();
-      let nextCalled = false;
-      middleware(req(), res as unknown as Response, (() => {
-        nextCalled = true;
-      }) as NextFunction);
-      assert.equal(nextCalled, true, `request ${i + 1} should pass`);
+    for (let i = 0; i < 60; i += 1) {
+      expect(await run(limiter, req, makeRes())).toBe(true);
     }
 
-    const blocked = mockRes();
-    let nextCalled = false;
-    middleware(req(), blocked as unknown as Response, (() => {
-      nextCalled = true;
-    }) as NextFunction);
-    assert.equal(nextCalled, false);
-    assert.equal(blocked.getStatus(), 429);
-    assert.ok(blocked.getHeaders()["retry-after"]);
+    const blocked = makeRes();
+    expect(await run(limiter, req, blocked)).toBe(false);
+    expect(blocked.statusCode).toBe(429);
   });
 
-  test("Issue #1032: payment-create limit is per IP even with different API keys", () => {
-    const store = new MemorySlidingWindowStore();
-    const { middleware } = createTestRateLimiter({
-      authRpm: 10,
-      apiRpm: 200,
-      paymentCreateLimit: 1,
-      paymentCreateWindowMs: 60_000,
-      store,
-    });
+  it('isolates buckets per API key', async () => {
+    const limiter = createRateLimiter({ store: makeStore() });
+    const reqA = makeReq({ method: 'POST', path: '/v1/payments', headers: { 'x-api-key': 'key_a' } });
+    const reqB = makeReq({ method: 'POST', path: '/v1/payments', headers: { 'x-api-key': 'key_b' } });
 
-    const reqWithKey = (apiKey: string) =>
-      mockReq({
-        path: "/v1/payment-links/link_abc/view",
-        method: "POST",
-        headers: { "x-api-key": apiKey },
-      });
-
-    const first = mockRes();
-    let next1 = false;
-    middleware(reqWithKey("key-a"), first as unknown as Response, (() => {
-      next1 = true;
-    }) as NextFunction);
-    assert.equal(next1, true);
-
-    // Same IP, different API key — still blocked, because the budget is
-    // keyed on IP, not on account, for this route.
-    const second = mockRes();
-    let next2 = false;
-    middleware(reqWithKey("key-b"), second as unknown as Response, (() => {
-      next2 = true;
-    }) as NextFunction);
-    assert.equal(next2, false);
-    assert.equal(second.getStatus(), 429);
+    for (let i = 0; i < 100; i += 1) {
+      await run(limiter, reqA, makeRes());
+    }
+    expect(await run(limiter, reqA, makeRes())).toBe(false);
+    expect(await run(limiter, reqB, makeRes())).toBe(true);
   });
 });

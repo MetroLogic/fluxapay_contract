@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "crypto";
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import {
   Keypair,
   Operation,
@@ -24,6 +24,62 @@ interface IssuedChallenge {
   expiresAt: number;
 }
 
+interface BucketState {
+  tokens: number;
+  updatedAt: number;
+}
+
+const AUTH_RATE_LIMIT = 10;
+const AUTH_RATE_WINDOW_MS = 60_000;
+
+function clientIp(req: Request): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+function createAuthRateLimiter() {
+  const buckets = new Map<string, BucketState>();
+  const refillRate = AUTH_RATE_LIMIT / AUTH_RATE_WINDOW_MS;
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    const key = clientIp(req);
+    const now = Date.now();
+    const existing = buckets.get(key);
+    const state: BucketState = existing
+      ? {
+          tokens: Math.min(
+            AUTH_RATE_LIMIT,
+            existing.tokens + (now - existing.updatedAt) * refillRate,
+          ),
+          updatedAt: now,
+        }
+      : { tokens: AUTH_RATE_LIMIT, updatedAt: now };
+
+    if (state.tokens < 1) {
+      const msUntilToken = Math.ceil((1 - state.tokens) / refillRate);
+      const retryAfter = Math.max(1, Math.ceil(msUntilToken / 1000));
+      buckets.set(key, state);
+      res.setHeader("Retry-After", String(retryAfter));
+      res.setHeader("X-RateLimit-Limit", String(AUTH_RATE_LIMIT));
+      res.setHeader("X-RateLimit-Remaining", "0");
+      res.setHeader("X-RateLimit-Reset", String(Math.ceil((now + msUntilToken) / 1000)));
+      res.status(429).json({ error: "Too Many Requests" });
+      return;
+    }
+
+    state.tokens -= 1;
+    buckets.set(key, state);
+    const msUntilFull = Math.ceil((AUTH_RATE_LIMIT - state.tokens) / refillRate);
+    res.setHeader("X-RateLimit-Limit", String(AUTH_RATE_LIMIT));
+    res.setHeader("X-RateLimit-Remaining", String(Math.floor(state.tokens)));
+    res.setHeader("X-RateLimit-Reset", String(Math.ceil((now + msUntilFull) / 1000)));
+    next();
+  };
+}
+
 export function createAuthRouter(config: AuthRouterConfig): Router {
   const router = Router();
   const serverKeypair = Keypair.fromSecret(config.serverSecretKey);
@@ -33,6 +89,7 @@ export function createAuthRouter(config: AuthRouterConfig): Router {
   const rpcUrl = config.rpcUrl || "https://soroban-testnet.stellar.org";
   const stellarRpc = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
   const challenges = new Map<string, IssuedChallenge>();
+  const rateLimiter = createAuthRateLimiter();
 
   const issueChallenge = async (req: Request, res: Response) => {
     const account = req.query.account;
@@ -145,9 +202,9 @@ export function createAuthRouter(config: AuthRouterConfig): Router {
     }
   };
 
-  router.get("/", issueChallenge);
-  router.get("/challenge", issueChallenge);
-  router.post("/", authenticate);
-  router.post("/token", authenticate);
+  router.get("/", rateLimiter, issueChallenge);
+  router.get("/challenge", rateLimiter, issueChallenge);
+  router.post("/", rateLimiter, authenticate);
+  router.post("/token", rateLimiter, authenticate);
   return router;
 }
