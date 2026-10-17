@@ -5,6 +5,7 @@ import { createAuthRouter } from "./routes/auth";
 import { createAnalyticsRouter } from "./routes/analytics";
 import { createSettlementRouter } from "./routes/settlements";
 import { createInvoicesRouter } from "./routes/invoices";
+import { createPayoutChannelsRouter } from "./routes/payoutChannels";
 import { requireJsonContentType } from "./middleware/requireJsonContentType";
 
 /**
@@ -18,6 +19,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #962: also exposes merchant payout channel configuration
+ * (`/v1/merchants/:id/payout-channels`) for bank/mobile money settlement.
  */
 
 const app = express();
@@ -109,6 +112,17 @@ app.use(
   "/v1/invoices",
   createInvoicesRouter({
     indexerUrl: process.env.INDEXER_URL || "http://localhost:3001",
+  }),
+);
+
+/**
+ * Issue #962: merchant payout channel configuration. Account numbers are
+ * encrypted at rest; the settlement service reads the default channel.
+ */
+app.use(
+  "/v1/merchants",
+  createPayoutChannelsRouter({
+    encryptionKey: process.env.PAYOUT_ENCRYPTION_KEY || JWT_SECRET,
   }),
 );
 
