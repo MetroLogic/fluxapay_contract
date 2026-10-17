@@ -28,6 +28,44 @@ services:
     volumes:
       - stellar-sandbox-data:/opt/stellar
 
+  indexer:
+    build:
+      context: ./indexer
+    container_name: fluxapay-indexer
+    depends_on:
+      stellar-quickstart:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "${INDEXER_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+    container_name: fluxapay-backend
+    depends_on:
+      indexer:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   contract-builder:
     profiles: ["build"]
     image: rust:1.82-bookworm
