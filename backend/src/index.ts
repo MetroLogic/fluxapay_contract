@@ -19,6 +19,7 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
  * Issue #998: token bucket rate limiting on all public API endpoints.
+ * Issue #999: interactive API reference served at `/api-docs` (offline).
  */
 
 const app = express();
@@ -137,6 +138,47 @@ app.use((req, res, next) => {
     return res.status(429).json({ error: "too many requests" });
   }
   return next();
+});
+
+/**
+ * Issue #999: interactive API reference at `/api-docs`.
+ *
+ * Serves a self-contained Redoc page that loads `docs/openapi.yaml` from the
+ * same origin. The Redoc bundle is loaded from a local path (`/api-docs/redoc.standalone.js`)
+ * so the reference works offline / on localhost with no CDN dependency.
+ *
+ * The spec documents checkout and payment link endpoints, inline JSON schema
+ * for request bodies, and example payloads for every error code
+ * (400, 401, 404, 422, 429, 500).
+ */
+const API_DOCS_HTML = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>FluxaPay API Reference</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <redoc spec-url="/api-docs/openapi.yaml"></redoc>
+    <script src="/api-docs/redoc.standalone.js"></script>
+  </body>
+</html>`;
+
+app.get("/api-docs", (_req, res) => {
+  res.type("html").send(API_DOCS_HTML);
+});
+
+app.get("/api-docs/openapi.yaml", (_req, res) => {
+  res.sendFile("openapi.yaml", { root: "docs" }, (err) => {
+    if (err) res.status(404).json({ error: "openapi spec not found" });
+  });
+});
+
+app.get("/api-docs/redoc.standalone.js", (_req, res) => {
+  res.sendFile("redoc.standalone.js", { root: "docs" }, (err) => {
+    if (err) res.status(404).json({ error: "redoc bundle not found" });
+  });
 });
 
 app.use(
