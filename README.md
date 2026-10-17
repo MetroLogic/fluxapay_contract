@@ -332,5 +332,7 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
 
+<!-- handsoff-issue-980 -->
+- #980: feat: add input validation for payment amount field on checkout page
 <!-- handsoff-issue-969 -->
 - #969: feat: add date range and currency filters to dashboard transactions table

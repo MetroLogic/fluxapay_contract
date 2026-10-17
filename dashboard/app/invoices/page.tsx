@@ -52,6 +52,33 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+// ------------------------------------------------------------------ skeleton
+
+function SkeletonRow() {
+  return (
+    <tr className="animate-pulse">
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-20 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-16 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-16 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+    </tr>
+  );
+}
+
 // ------------------------------------------------------------------ helpers
 
 function formatAmount(raw: string | null): string {
@@ -210,6 +237,12 @@ export default function InvoicesPage() {
         )}
 
         {/* Table */}
+        <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+          <table
+            className="min-w-full divide-y divide-gray-200 text-sm"
+            aria-busy={loading}
+          >
+            <thead className="bg-gray-50">
         <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
           <table className="min-w-full divide-y divide-gray-200 text-sm dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-900">
@@ -227,6 +260,9 @@ export default function InvoicesPage() {
                 )}
               </tr>
             </thead>
+            <tbody className="divide-y divide-gray-100">
+              {loading ? (
+                Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
               {loading && invoices.length === 0 ? (
                 <tr>
@@ -246,6 +282,7 @@ export default function InvoicesPage() {
                     <td className="px-4 py-3 font-mono text-xs text-gray-700 dark:text-gray-300">
                       {inv.invoiceId}
                     </td>
+                    <td className="px-4 py-3 text-gray-900">
                     <td className="px-4 py-3 text-gray-900 dark:text-gray-100">
                       {formatAmount(inv.totalAmount)}
                     </td>
@@ -263,11 +300,13 @@ export default function InvoicesPage() {
                         <button
                           onClick={() => void handleVoid(inv.invoiceId)}
                           disabled={voidingId === inv.invoiceId}
+                          className="text-xs font-medium text-red-600 hover:text-red-800 disabled:opacity-50"
                           className="text-sm font-medium text-red-600 hover:text-red-800 disabled:opacity-50 dark:text-red-400 dark:hover:text-red-300"
                         >
                           {voidingId === inv.invoiceId ? "Voiding…" : "Void"}
                         </button>
                       ) : (
+                        <span className="text-xs text-gray-400">—</span>
                         <span className="text-gray-400 dark:text-gray-500">—</span>
                       )}
                     </td>
