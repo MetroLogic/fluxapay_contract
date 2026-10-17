@@ -34,6 +34,7 @@ pub enum DataKey {
     DisputeIndex,
     Stream(String),
     TreasuryBalance,
+    TreasuryBalanceByToken(Address),
     UsdcToken,
     Paused,
     CreationPaused,
@@ -148,6 +149,7 @@ pub enum DataKey {
     TreasuryWithdrawalProposal(String),
     /// Per-token treasury balance for multi-token support.
     TokenTreasuryBalance(Address),
+    /// Per-token treasury balance keyed by token address (issue: RefundManager.TreasuryBalance).
     /// Issue #485: Marks a payment as created from a direct_transfer payment link.
     /// Prevents future disputes from being created for this payment.
     DirectTransferPayment(String),

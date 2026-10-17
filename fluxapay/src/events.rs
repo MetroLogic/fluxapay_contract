@@ -1088,6 +1088,7 @@ pub struct ContractUpgraded {
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct TreasuryWithdrawn {
+    pub token_address: Address,
     pub amount: i128,
     pub recipient: Address,
 }
