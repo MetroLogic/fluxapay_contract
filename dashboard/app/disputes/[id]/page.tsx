@@ -22,6 +22,20 @@ interface DisputeEvent {
   data: Record<string, unknown>;
 }
 
+// Issue #979: skeleton rows shown while the dispute event stream is still
+// connecting and no events have arrived yet.
+function SkeletonRow() {
+  return (
+    <li className="animate-pulse p-4">
+      <div className="flex items-center justify-between">
+        <div className="h-4 w-32 rounded bg-gray-200 dark:bg-gray-700" />
+        <div className="h-3 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </div>
+      <div className="mt-2 h-12 rounded bg-gray-200 dark:bg-gray-700" />
+    </li>
+  );
+}
+
 export default function DisputeDetailPage({ params }: { params: { id: string } }) {
   const disputeId = params.id;
   const [events, setEvents] = useState<DisputeEvent[]>([]);
@@ -71,6 +85,8 @@ export default function DisputeDetailPage({ params }: { params: { id: string } }
     };
   }, [apiUrl, disputeId]);
 
+  const isLoading = events.length === 0 && !error;
+
   return (
     <main className="min-h-screen bg-gray-50 p-6">
       <div className="mx-auto max-w-3xl">
@@ -92,7 +108,13 @@ export default function DisputeDetailPage({ params }: { params: { id: string } }
         )}
 
         <div className="rounded-lg border border-gray-200 bg-white shadow-sm">
-          {events.length === 0 ? (
+          {isLoading ? (
+            <ul aria-busy="true" aria-label="Loading dispute updates" className="divide-y divide-gray-100">
+              {Array.from({ length: 5 }).map((_, index) => (
+                <SkeletonRow key={index} />
+              ))}
+            </ul>
+          ) : events.length === 0 ? (
             <p className="p-6 text-center text-sm text-gray-400">
               No status updates yet. This page updates live as the dispute progresses —
               opened, responded, escalated, voted on, and resolved.

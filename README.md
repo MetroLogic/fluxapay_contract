@@ -334,3 +334,11 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 
 <!-- handsoff-issue-989 -->
 - #989: test: add Playwright end-to-end tests for payment link checkout flow
+<!-- handsoff-issue-996 -->
+- #996: feat: add dashboard 'Copy Payment Link' button directly to payments table row
+<!-- handsoff-issue-973 -->
+- #973: feat: implement Soroban smart contract event listener for on-chain escrow releases in streams
+<!-- handsoff-issue-980 -->
+- #980: feat: add input validation for payment amount field on checkout page
+<!-- handsoff-issue-969 -->
+- #969: feat: add date range and currency filters to dashboard transactions table
