@@ -24,3 +24,7 @@ package-lock.json
 
 # actionlint binary (installed at CI runtime via rhysd/actionlint action)
 /actionlint
+
+# Generated and local logs
+*.log
+fluxapay/*.log

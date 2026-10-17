@@ -508,14 +508,14 @@ export class FluxapayClient {
   }
 
   private getMerchantRegistry(): MerchantRegistryClient {
+    const profile = this.networkSwitcher.getProfile();
     const contractId = resolveContractId(
       this.config.merchantRegistryContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].merchantRegistry,
+      FLUXAPAY_CONTRACT_IDS[profile.environment].merchantRegistry,
       "merchantRegistryContractId",
     );
 
     if (!this.merchantRegistryClient) {
-      const profile = this.networkSwitcher.getProfile();
       this.merchantRegistryClient = new MerchantRegistryClient({
         network: profile.environment,
         rpcUrl: this.config.rpcUrl || profile.rpcUrl,
@@ -531,14 +531,14 @@ export class FluxapayClient {
    * provided, falling back to `FLUXAPAY_CONTRACT_IDS[network].fxOracle`.
    */
   fxOracle(): FxOracleClient {
+    const profile = this.networkSwitcher.getProfile();
     const oracleContractId = resolveContractId(
       this.config.oracleContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].fxOracle,
+      FLUXAPAY_CONTRACT_IDS[profile.environment].fxOracle,
       "oracleContractId",
     );
 
     if (!this.fxOracleClient) {
-      const profile = this.networkSwitcher.getProfile();
       this.fxOracleClient = new FxOracleClient({
         network: profile.environment,
         rpcUrl: this.config.rpcUrl || profile.rpcUrl,
@@ -1333,14 +1333,14 @@ export class FluxapayClient {
   }
 
   private getPaymentLinkManager(): PaymentLinkManagerClient {
+    const profile = this.networkSwitcher.getProfile();
     const contractId = resolveContractId(
       this.config.paymentLinkContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].paymentLinkManager,
+      FLUXAPAY_CONTRACT_IDS[profile.environment].paymentLinkManager,
       "paymentLinkContractId",
     );
 
     if (!this.paymentLinkManagerClient) {
-      const profile = this.networkSwitcher.getProfile();
       this.paymentLinkManagerClient = new PaymentLinkManagerClient({
         network: profile.environment,
         rpcUrl: this.config.rpcUrl || profile.rpcUrl,
@@ -1621,6 +1621,5 @@ export {
   type GasEstimate,
   type GasOperation,
 } from "./contracts/gas-estimator.js";
-
 
 
