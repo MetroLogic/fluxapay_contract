@@ -65,6 +65,26 @@ export interface SetMerchantFeeWaiverParams {
   expiresAt?: bigint | null;
 }
 
+export interface AddCurrencyPayoutParams {
+  merchant: string;
+  currency: string;
+  payoutAddress: string;
+}
+
+export interface CurrencyPayout {
+  currency: string;
+  payoutAddress: string;
+}
+
+export interface BankAccount {
+  address: string;
+}
+
+export interface MerchantPage {
+  merchants: any[];
+  nextCursor: string | null;
+}
+
 /**
  * MerchantRegistryClient provides a high-level interface for interacting with the MerchantRegistry contract.
  * Manages merchant registration, verification, and account status operations.
@@ -137,6 +157,22 @@ export class MerchantRegistryClient {
   async getMerchant(merchantId: string): Promise<any> {
     return withMappedContractError(() =>
       this.getContract().get_merchant({
+        merchant_id: merchantId,
+      }),
+    );
+  }
+
+  /**
+   * Get the merchant's accumulated pending settlement balance (the amount
+   * collected from confirmed payments that has not yet been swept to the
+   * merchant's payout address).
+   *
+   * Used by the `useMerchantBalance` React hook for dashboard balance
+   * widgets; returns `0n` for a merchant with nothing pending.
+   */
+  async getPendingSettlement(merchantId: string): Promise<bigint> {
+    return withMappedContractError(() =>
+      this.getContract().get_pending_settlement({
         merchant_id: merchantId,
       }),
     );
@@ -283,16 +319,162 @@ export class MerchantRegistryClient {
    *
    * Emits `(MERCHANT, FEE_WAIVER_SET)` on success.
    */
-  async setMerchantFeeWaiver(params: SetMerchantFeeWaiverParams): Promise<void> {
+  /**
+   * Add a per-currency payout address for a merchant (issue #216).
+   * Requires the merchant's signature.
+   */
+  async addCurrencyPayout(params: AddCurrencyPayoutParams): Promise<void> {
     return withMappedContractError(() =>
-      this.getContract().set_merchant_fee_waiver({
-        admin: params.admin,
-        merchant_id: params.merchantId,
-        expires_at:
-          params.expiresAt === null || params.expiresAt === undefined
-            ? null
-            : params.expiresAt,
+      this.getContract().add_currency_payout({
+        merchant_id: params.merchant,
+        currency: params.currency,
+        payout_address: params.payoutAddress,
       }),
     );
+  }
+
+  /**
+   * Get the payout address configured for a specific currency for a merchant (issue #216).
+   * Returns null if no payout address is configured for the given currency.
+   */
+  async getCurrencyPayout(merchantId: string, currency: string): Promise<string | null> {
+    return withMappedContractError(() =>
+      this.getContract().get_currency_payout({
+        merchant_id: merchantId,
+        currency: currency,
+      }),
+    );
+  }
+
+  /**
+   * Get all currency payout mappings for a merchant (issue #216).
+   * Returns a map of currency code to payout address.
+   */
+  async getAllCurrencyPayouts(merchantId: string): Promise<Record<string, string>> {
+    const result = await withMappedContractError(() =>
+      this.getContract().get_all_currency_payouts({
+        merchant_id: merchantId,
+      }),
+    );
+    const payouts: Record<string, string> = {};
+    for (const [currency, address] of Object.entries(result as Record<string, string>)) {
+      payouts[currency] = address;
+    }
+    return payouts;
+  }
+
+  /**
+   * Issue #630 / #529: Set a merchant-specific payment tolerance (in the
+   * smallest currency unit). Pass `null` to clear the override and fall back to
+   * the global default. The contract requires the **merchant's** signature
+   * (`merchant_id.require_auth()`), and caps the effective tolerance at 1% of
+   * each payment amount.
+   *
+   * Maps to `MerchantRegistry.set_merchant_payment_tolerance`.
+   */
+  async setMerchantPaymentTolerance(
+    merchantId: string,
+    tolerance: bigint | null,
+  ): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().set_merchant_payment_tolerance({
+        merchant_id: merchantId,
+        tolerance: tolerance === null ? null : tolerance,
+      }),
+    );
+  }
+
+  /**
+   * Issue #630 / #529: Read a merchant's effective payment tolerance — the
+   * merchant-specific override if one is set, otherwise the global default.
+   *
+   * Read-only — no authorization required.
+   */
+  async getMerchantPaymentTolerance(merchantId: string): Promise<bigint> {
+    const merchant = (await this.getMerchant(merchantId)) as {
+      payment_tolerance?: bigint | null;
+    };
+    if (merchant?.payment_tolerance !== undefined && merchant?.payment_tolerance !== null) {
+      return BigInt(merchant.payment_tolerance);
+    }
+    return this.getGlobalPaymentTolerance();
+  }
+
+  /**
+   * Issue #630 / #529: Set the global default payment tolerance (basis for any
+   * merchant without a specific override). The contract requires the registry
+   * **admin's** signature and rejects negative values; an unauthorized caller
+   * surfaces as a mapped `Unauthorized` `FluxapayError`.
+   *
+   * Maps to `MerchantRegistry.set_global_payment_tolerance`.
+   */
+  async setGlobalPaymentTolerance(admin: string, tolerance: bigint): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().set_global_payment_tolerance({
+        admin,
+        tolerance,
+      }),
+    );
+  }
+
+  /**
+   * Issue #630 / #529: Read the global default payment tolerance.
+   *
+   * Read-only — no authorization required.
+   */
+  async getGlobalPaymentTolerance(): Promise<bigint> {
+    const result = await withMappedContractError(() =>
+      this.getContract().get_global_payment_tolerance(),
+    );
+    const value = (result as { result?: unknown }).result ?? result;
+    return BigInt(value as number | bigint);
+  }
+
+  /**
+   * List merchants using cursor-based pagination (Issue #774).
+   *
+   * @param cursor Pagination cursor (or null for the first page)
+   * @param limit Number of items per page (maximum 50)
+   */
+  async listMerchants(cursor?: string | null, limit: number = 50): Promise<MerchantPage> {
+    const result = await withMappedContractError(() =>
+      this.getContract().list_merchants({
+        cursor: cursor ?? null,
+        limit,
+      }),
+    );
+    const page = (result as { result?: any }).result ?? result;
+    return {
+      merchants: page.merchants ?? [],
+      nextCursor: page.next_cursor ?? null,
+    };
+  }
+
+  /**
+   * Async iterator yielding all merchants across pages without manual cursor management.
+   */
+  async *listMerchantsIterator(pageSize: number = 50): AsyncGenerator<any, void, unknown> {
+    let cursor: string | null = null;
+    while (true) {
+      const page = await this.listMerchants(cursor, pageSize);
+      for (const merchant of page.merchants) {
+        yield merchant;
+      }
+      if (!page.nextCursor) {
+        break;
+      }
+      cursor = page.nextCursor;
+    }
+  }
+
+  /**
+   * Fetch all merchants across pages into a single flat array.
+   */
+  async fetchAllMerchants(pageSize: number = 50): Promise<any[]> {
+    const all: any[] = [];
+    for await (const merchant of this.listMerchantsIterator(pageSize)) {
+      all.push(merchant);
+    }
+    return all;
   }
 }

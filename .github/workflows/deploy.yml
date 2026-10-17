@@ -33,15 +33,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
+          toolchain: 1.94.1
           targets: wasm32-unknown-unknown
 
       - name: Cache Stellar CLI
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         id: cache-stellar-cli
         with:
           path: ~/.cargo/bin/stellar
@@ -63,7 +64,7 @@ jobs:
         run: stellar --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: |
             ~/.cargo/registry
@@ -127,7 +128,7 @@ jobs:
           STELLAR_NETWORK: ${{ inputs.stellar_network }}
           STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
         run: |
-          bash scripts/deploy_testnet.sh
+          bash scripts/deploy-testnet.sh
           # Expose contract IDs to subsequent steps
           source .env.testnet
           echo "payment_processor_id=$PAYMENT_PROCESSOR_ID" >> $GITHUB_OUTPUT
@@ -136,7 +137,7 @@ jobs:
           echo "fx_oracle_id=$FX_ORACLE_ID"                 >> $GITHUB_OUTPUT
 
       - name: Upload .env.testnet artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: env-testnet-${{ github.sha }}
           path: .env.testnet
@@ -180,7 +181,7 @@ jobs:
           npm publish --access public
 
       - name: Commit generated bindings
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403  # v5.2.0
         with:
           commit_message: "chore: update contract bindings [${{ inputs.environment_name }}]"
           file_pattern: 'bindings/*'
@@ -207,18 +208,4 @@ jobs:
           # Verify contract is accessible
           echo "✓ Contract deployed and accessible on mainnet"
           
-          # Get and log admin address (verification step)
-          echo "Contract Address: ${CONTRACT_ADDRESS:-'Not configured'}"
-          
-          # Note: Actual get_admin invocation would require the deployed contract address
-          # stellar contract invoke --id ${CONTRACT_ADDRESS} --network mainnet -- get_admin
-          
-          echo "✓ Post-deployment verification complete"
-          echo "======================================="
-
-      - name: Upload deployment artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-${{ inputs.environment_name }}-${{ github.sha }}
-          path: target/wasm32-unknown-unknown/release/fluxapay.wasm
-          retention-days: ${{ inputs.retention_days }}
+       

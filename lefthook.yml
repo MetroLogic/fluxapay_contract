@@ -1,0 +1,47 @@
+pre-commit:
+  parallel: true
+  commands:
+    cargo-fmt:
+      glob: "*.rs"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping cargo fmt"
+          exit 0
+        fi
+        cd fluxapay && cargo fmt --check
+    cargo-clippy:
+      glob: "*.rs"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping cargo clippy"
+          exit 0
+        fi
+        cd fluxapay && cargo clippy --all-targets -- -D warnings
+    typescript-typecheck:
+      glob: "*.ts"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping TypeScript typecheck"
+          exit 0
+        fi
+        cd sdk && npx tsc --noEmit
+    eslint:
+      glob: "{sdk,indexer,backend,dashboard}/**/*.{ts,tsx}"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping eslint"
+          exit 0
+        fi
+        npx eslint {staged_files}
+    secret-scan:
+      glob: "*"
+      run: |
+        if [ "$SKIP_HOOKS" = "1" ]; then
+          echo "SKIP_HOOKS=1 set, skipping secret scan"
+          exit 0
+        fi
+        if ! command -v gitleaks >/dev/null 2>&1; then
+          echo "gitleaks not installed; see CONTRIBUTING.md#4a-pre-commit-hooks to install it. Skipping scan."
+          exit 0
+        fi
+        gitleaks protect --staged --source . --redact --no-banner

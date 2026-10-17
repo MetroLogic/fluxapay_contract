@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS dispute_bonds (
   recipient VARCHAR(255) NOT NULL,
   amount BIGINT NOT NULL,
   status VARCHAR(50) NOT NULL, -- BOND_RETURNED | BOND_FORFEITED
-  created_at TIMESTAMP,
-  INDEX idx_bond_dispute_id (dispute_id),
-  INDEX idx_bond_status (status)
+  created_at TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_bond_dispute_id ON dispute_bonds (dispute_id);
+CREATE INDEX IF NOT EXISTS idx_bond_status ON dispute_bonds (status);

@@ -10,7 +10,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-soroban-sdk = { version = "26", features = ["testutils"] }
+# Issue #1036: kept in lockstep with the root Cargo.toml's bump to "29"
+# (this crate deliberately isn't a workspace member, see below, so it pins
+# its own soroban-sdk version rather than inheriting from [workspace.dependencies]).
+soroban-sdk = { version = "29", features = ["testutils"] }
 
 [dependencies.fluxapay]
 path = ".."
@@ -31,6 +34,36 @@ bench = false
 [[bin]]
 name = "fuzz_create_payment_id_parse"
 path = "fuzz_targets/fuzz_create_payment_id_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Issue #1024: refund fee / dispute bond / stream accrual / metadata targets.
+
+[[bin]]
+name = "fuzz_refund_fee_calculation"
+path = "fuzz_targets/fuzz_refund_fee_calculation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dispute_bond_computation"
+path = "fuzz_targets/fuzz_dispute_bond_computation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stream_accrual"
+path = "fuzz_targets/fuzz_stream_accrual.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_metadata_validation"
+path = "fuzz_targets/fuzz_metadata_validation.rs"
 test = false
 doc = false
 bench = false

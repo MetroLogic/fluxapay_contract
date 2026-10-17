@@ -155,6 +155,62 @@ stellar contract invoke \
   --memo_type "Text"
 ```
 
+#### Muxed account (M-address) payment routing (Issue #841)
+
+Stellar muxed accounts embed a 64-bit sub-account ID in an M-address so merchants
+can route many customers through one G-address without extra keypairs.
+
+On-chain type:
+
+```rust
+pub struct MuxedAccount {
+    pub account: Address, // underlying G-address
+    pub id: u64,          // sub-account / memo ID
+}
+```
+
+Create a payment that only confirms when the payer's muxed ID matches:
+
+```bash
+# Expected muxed sub-account ID for this customer
+MUXED_ID=42000
+
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $TEST_MERCHANT_ADDRESS \
+  -- create_payment \
+  --payment_id "inv_muxed_001" \
+  --merchant_id $TEST_MERCHANT_ADDRESS \
+  --amount 1000000000 \
+  --currency USDC \
+  --deposit_address $ADMIN_ADDRESS \
+  --expires_at $EXPIRES_AT \
+  --payer_muxed_id $MUXED_ID
+```
+
+When the oracle later calls `verify_payment`, it must pass the same
+`--payer_muxed_id`. A mismatch returns `MuxedAccountMismatch` (#70).
+If `payer_muxed_id` is omitted at create time, any payer (G- or M-address) is accepted.
+
+SDK equivalent:
+
+```ts
+import { FluxapayClient, encodeMuxedAddress, decodeMuxedAddress } from "@fluxapay/sdk";
+
+const mAddress = encodeMuxedAddress(customerGAddress, 42000n);
+const { gAddress, id } = decodeMuxedAddress(mAddress);
+
+await client.createPayment({
+  paymentId: "inv_muxed_001",
+  merchantId: MERCHANT,
+  amount: 1_000_000_000n,
+  currency: "USDC",
+  depositAddress: DEPOSIT,
+  muxedPayer: mAddress, // M-address string
+});
+```
+
 #### Expected Output
 
 Success returns a `PaymentCharge` object:
@@ -249,6 +305,124 @@ Returns the full `PaymentCharge` object with current status:
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `PaymentNotFound` | Payment ID doesn't exist | Verify payment ID matches created payment |
+
+---
+
+## Stream Functions
+
+### 4. Create Stream
+
+Create a time-based payout stream. The sender funds the contract with an upfront deposit and chooses a rate in tokens per second.
+
+#### Invoke Command
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $SENDER_ADDRESS \
+  -- create_stream \
+  --sender $SENDER_ADDRESS \
+  --receiver $RECEIVER_ADDRESS \
+  --token $USDC_TOKEN_ADDRESS \
+  --rate_per_second 100 \
+  --deposit 1000000 \
+  --stream_id "stream_001"
+```
+
+#### Expected Output
+
+Returns the stream record:
+
+```json
+{
+  "stream_id": "stream_001",
+  "sender": "G...",
+  "receiver": "G...",
+  "destination": null,
+  "token": "C...",
+  "rate_per_second": 100,
+  "min_rate_per_second": 1,
+  "remaining_deposit": 1000000,
+  "last_checkpoint_at": 1711776000,
+  "accrued_at_checkpoint": 0,
+  "status": "Active",
+  "milestones_approved": false
+}
+```
+
+#### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Unauthorized` | Sender is not the account signing the transaction | Use the stream sender as `--source` |
+| `InvalidRate` | `rate_per_second <= 0` | Set a positive rate |
+| `InvalidDeposit` | `deposit <= 0` | Set a positive deposit |
+| `StreamAlreadyExists` | A stream with the same ID already exists | Use a unique `--stream_id` |
+
+---
+
+### 5. Withdraw All For Recipient
+
+Withdraw all currently accrued funds from active streams owned by a recipient, limited to `max_streams` in one call.
+
+#### Invoke Command
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $RECEIVER_ADDRESS \
+  -- withdraw_all_for_recipient \
+  --recipient $RECEIVER_ADDRESS \
+  --max_streams 5
+```
+
+#### Expected Output
+
+Returns a vector of processed stream IDs:
+
+```json
+["stream_001", "stream_003"]
+```
+
+#### Notes
+
+- The recipient must have a matching `receiver` on each stream.
+- Streams with `milestones_approved = false` are skipped until the sender approves the milestone.
+- The call stops once it processes `max_streams` eligible streams.
+
+---
+
+### 6. Cancel Stream
+
+Cancel an active stream and refund any unaccrued deposit back to the sender while paying the accrued amount to the receiver.
+
+#### Invoke Command
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $SENDER_ADDRESS \
+  -- cancel_stream \
+  --sender $SENDER_ADDRESS \
+  --stream_id "stream_001"
+```
+
+#### Expected Output
+
+```json
+null
+```
+
+#### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Unauthorized` | Caller is not the original stream sender | Use the original sender address |
+| `StreamNotFound` | The stream ID does not exist | Verify the stream ID |
+| `StreamNotActive` | The stream is paused, cancelled, or exhausted | Use an active stream or create a new one |
 
 ---
 
@@ -883,7 +1057,7 @@ stellar contract invoke \
 
 ### Deploy to Testnet
 
-Use `scripts/deploy_testnet.sh` to build the WASM and deploy all contracts to testnet. The script writes the resulting contract IDs to `.env.testnet`.
+Use `scripts/deploy-testnet.sh` to build the WASM and deploy all contracts to testnet. The script writes the resulting contract IDs to `.env.testnet`.
 
 #### Prerequisites
 
@@ -898,7 +1072,7 @@ export STELLAR_SECRET_KEY=<YOUR_SECRET_KEY>
 export STELLAR_NETWORK=testnet          # or mainnet
 
 # 2. Run the deploy script
-bash scripts/deploy_testnet.sh
+bash scripts/deploy-testnet.sh
 
 # 3. Load the deployed contract IDs
 source .env.testnet
@@ -932,6 +1106,29 @@ Contract IDs written to .env.testnet
 | `STELLAR_SECRET_KEY` not set | Script exits with error before building |
 | `STELLAR_NETWORK` not set | Script exits with error before building |
 | `stellar contract deploy` fails | Script exits immediately (non-zero exit code) |
+
+---
+
+## Indexer: Bulk FX Rates (`GET /v1/fx/rates`)
+
+Returns every FX pair currently held in the indexer's rate cache, so clients
+need one call instead of one `/v1/fx/convert` call per currency. Requires an
+API key and shares the 60 req/min limit, counted per key.
+
+```bash
+curl -H "Authorization: Bearer $INDEXER_API_KEY" http://localhost:3000/v1/fx/rates
+```
+
+```json
+{
+  "rates": [
+    { "from": "USDC", "to": "NGN", "rate": "1620.5", "updated_at": "2026-10-15T20:00:00.000Z", "stale": false }
+  ],
+  "staleness_threshold_secs": 300
+}
+```
+
+A pair is `"stale": true` once it is older than `FX_STALENESS_SECS` (default 300).
 
 ---
 

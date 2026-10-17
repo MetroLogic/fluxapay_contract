@@ -6,6 +6,31 @@ pub const MAX_METADATA_KEYS: u32 = 20;
 pub const MAX_METADATA_KEY_LEN: u32 = 64;
 /// Maximum length of a metadata value (characters).
 pub const MAX_METADATA_VALUE_LEN: u32 = 256;
+pub const MAX_CONTRACT_VERSION_LEN: u32 = 32;
+
+/// Validate a numeric `x.y.z` contract version with non-empty components.
+pub fn is_valid_contract_version(version: &String) -> bool {
+    let bytes = version.to_bytes();
+    let len = bytes.len();
+    if len == 0 || len > MAX_CONTRACT_VERSION_LEN {
+        return false;
+    }
+
+    let mut component_len = 0u32;
+    let mut separators = 0u32;
+    for i in 0..len {
+        match bytes.get(i) {
+            Some(b'0'..=b'9') => component_len += 1,
+            Some(b'.') if component_len > 0 && separators < 2 => {
+                separators += 1;
+                component_len = 0;
+            }
+            _ => return false,
+        }
+    }
+
+    separators == 2 && component_len > 0
+}
 
 /// Validate metadata map size and key/value length limits.
 ///
@@ -22,15 +47,18 @@ pub fn validate_metadata(meta_map: &Map<String, String>) -> Result<(), crate::Er
     Ok(())
 }
 
-/// Validates that a string is a valid IPFS multihash (CIDv0 or CIDv1).
+/// Validates that a string is a valid IPFS CID (CIDv0 or CIDv1).
 ///
-/// CIDv0: Base58-encoded SHA2-256 multihash, always starts with "Qm" and is 46 chars.
-/// CIDv1: Multibase-encoded, typically starts with "bafy" (base32 SHA2-256) and is ≥ 59 chars.
+/// Issue #622: Strengthened from length-only to prefix + length structural check.
+///
+/// CIDv0: Base58-encoded SHA2-256 multihash. Always starts with "Qm" and is exactly 46 chars.
+/// CIDv1 base32 (most common): Starts with "bafy" or "BAFY" (base32 SHA2-256) and is ≥ 59 chars.
+/// CIDv1 base16 (hex): Starts with "f" followed by hex digits, at least 34 chars.
 ///
 /// This performs a lightweight structural check (prefix + length) without
 /// a full base58/base32 decode, which is not feasible in `no_std` without
 /// additional crates.
-pub fn validate_ipfs_multihash(s: &String) -> bool {
+pub fn is_valid_cid(s: &String) -> bool {
     let len = s.len() as usize;
 
     // Need at least 4 bytes to check prefix
@@ -48,20 +76,12 @@ pub fn validate_ipfs_multihash(s: &String) -> bool {
     }
 
     // CIDv1 base32 (most common): starts with "bafy" and is at least 59 characters
-    if buf[0] == b'b'
-        && buf[1] == b'a'
-        && buf[2] == b'f'
-        && buf[3] == b'y'
-    {
+    if buf[0] == b'b' && buf[1] == b'a' && buf[2] == b'f' && buf[3] == b'y' {
         return len >= 59;
     }
 
     // CIDv1 base32 upper: starts with "BAFY"
-    if buf[0] == b'B'
-        && buf[1] == b'A'
-        && buf[2] == b'F'
-        && buf[3] == b'Y'
-    {
+    if buf[0] == b'B' && buf[1] == b'A' && buf[2] == b'F' && buf[3] == b'Y' {
         return len >= 59;
     }
 
@@ -73,19 +93,35 @@ pub fn validate_ipfs_multihash(s: &String) -> bool {
     false
 }
 
+/// Alias for [`is_valid_cid`] — kept for backward compatibility.
+#[inline]
+pub fn validate_ipfs_multihash(s: &String) -> bool {
+    is_valid_cid(s)
+}
+
 /// Validates a user-supplied ID (payment_id, dispute_id, etc.).
 ///
 /// Rules (issue #404):
 /// - Length: 3–64 characters (inclusive)
 /// - Allowed characters: ASCII alphanumeric, `-`, `_`
+///
+/// Issue #792: Rejects any input containing a null byte (`\x00`) or other
+/// non-printable/control bytes. Soroban strings can hold arbitrary bytes, so
+/// the parser must never assume valid UTF-8 or printable content; it operates
+/// purely on raw bytes and returns `false` (a validation error at the call
+/// site) instead of panicking.
 pub fn validate_id(s: &String) -> bool {
     let len = s.len() as usize;
-    if len < 3 || len > 64 {
+    if !(3..=64).contains(&len) {
         return false;
     }
     let mut buf = [0u8; 64];
     s.copy_into_slice(&mut buf[..len]);
     for b in buf[..len].iter() {
+        // Reject null bytes and any other control/non-printable byte.
+        if *b == 0x00 || *b < 0x20 || *b == 0x7f {
+            return false;
+        }
         let valid = b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_';
         if !valid {
             return false;
@@ -213,5 +249,34 @@ mod tests {
         let id1 = format_id(&env, "refund_", 1);
         let id2 = format_id(&env, "refund_", 2);
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_validate_id_rejects_null_bytes() {
+        let env = Env::default();
+        // Reproducer from fuzz_create_payment_id_parse: "\x00\x00" plus padding.
+        let id = String::from_bytes(&env, &[0x00, 0x00, b'a', b'b']);
+        assert!(!validate_id(&id));
+    }
+
+    #[test]
+    fn test_validate_id_rejects_embedded_null_byte() {
+        let env = Env::default();
+        let id = String::from_bytes(&env, &[b'a', b'b', 0x00, b'c']);
+        assert!(!validate_id(&id));
+    }
+
+    #[test]
+    fn test_validate_id_rejects_control_bytes() {
+        let env = Env::default();
+        let id = String::from_bytes(&env, &[b'a', b'b', 0x1f, b'c']);
+        assert!(!validate_id(&id));
+    }
+
+    #[test]
+    fn test_validate_id_accepts_valid() {
+        let env = Env::default();
+        let id = String::from_bytes(&env, b"pay_123-abc");
+        assert!(validate_id(&id));
     }
 }

@@ -63,6 +63,7 @@ export interface CreatePaymentArgs {
   memo_type: Option<string>;
   token_address: Option<string>;
   client_token: Option<string>;
+  idempotency_key: Option<string>;
   metadata_hash: Option<Buffer>;
   /**
    * Optional payment metadata.
@@ -71,6 +72,19 @@ export interface CreatePaymentArgs {
    */
   metadata: Option<Record<string, string>>;
   fee_waiver_code: Option<string>;
+  allow_partial?: Option<boolean>;
+  /** Issue #482 */
+  retry_of_payment_id?: Option<string>;
+  /** Issue #841: expected muxed sub-account ID (from M-address). */
+  payer_muxed_id?: Option<u64 | bigint>;
+  /** Issue #516 */
+  payer?: Option<string>;
+  /**
+   * Issue #844: when true, confirmPayment may accept tipAmount.
+   * Issue #1025 makes this enforceable: `verifyPayment`/`confirmPayment`
+   * validate and record a tip, capped at `MAX_TIP_BPS`, only when `true`.
+   */
+  tip_enabled: boolean;
 }
 
 export interface Merchant {
@@ -174,6 +188,10 @@ export interface PaymentCharge {
   payment_id: string;
   status: PaymentStatus;
   transaction_hash: Option<Buffer>;
+  /** Issue #1025: Whether this payment accepts an optional tip/gratuity. */
+  tip_enabled: boolean;
+  /** Issue #1025: Tip amount recorded by `verify_payment`, if any. */
+  tip_amount: Option<i128>;
 }
 
 export type PaymentStatus =
@@ -201,6 +219,30 @@ export const FXOracleError = {
 export type OracleDataKey =
   | { tag: "Rate"; values: readonly [string] }
   | { tag: "StalenessThreshold"; values: void };
+
+export interface SwapAndPayArgs {
+  payer: string;
+  payment_id: string;
+  merchant_id: string;
+  amount: i128;
+  currency: string;
+  deposit_address: string;
+  token_in: string;
+  amount_in: i128;
+  amount_out_min: i128;
+  path: Array<string>;
+  expires_at?: Option<u64>;
+  dex_router: string;
+  fx_oracle?: Option<string>;
+  oracle_pair?: Option<string>;
+  max_deviation_bps: u32;
+}
+
+export interface SwapRoute {
+  router: string;
+  path: Array<string>;
+  amount_in: i128;
+}
 
 export interface Client {
   /**
@@ -429,6 +471,29 @@ export interface Client {
       transaction_hash,
       payer_address,
       amount_received,
+      tip_amount,
+    }: {
+      oracle: string;
+      payment_id: string;
+      transaction_hash: Buffer;
+      payer_address: string;
+      amount_received: i128;
+      /** Issue #1025: Tip/gratuity portion of `amount_received`, if any. */
+      tip_amount?: Option<i128>;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentStatus>>>;
+
+  /**
+   * Construct and simulate a confirm_payment transaction.
+   */
+  confirm_payment: (
+    {
+      oracle,
+      payment_id,
+      transaction_hash,
+      payer_address,
+      amount_received,
     }: {
       oracle: string;
       payment_id: string;
@@ -470,6 +535,54 @@ export interface Client {
     { payment_id }: { payment_id: string },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<Array<Dispute>>>>;
+
+  /**
+   * Construct and simulate a get_payment_disputes_by_status transaction.
+   */
+  get_payment_disputes_by_status: (
+    { payment_id, status }: { payment_id: string; status: DisputeStatus },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<Dispute>>>>;
+
+  /**
+   * Construct and simulate a swap_and_pay transaction.
+   */
+  swap_and_pay: (
+    { args }: { args: SwapAndPayArgs },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
+
+  /**
+   * Construct and simulate a swap_and_pay_multi_route transaction.
+   */
+  swap_and_pay_multi_route: (
+    {
+      args,
+      routes,
+      min_output_amount,
+    }: {
+      args: SwapAndPayArgs;
+      routes: Array<SwapRoute>;
+      min_output_amount: i128;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
+
+  /**
+   * Construct and simulate a cancel_multiple_streams transaction.
+   */
+  cancel_multiple_streams: (
+    { sender, stream_ids }: { sender: string; stream_ids: Array<string> },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<string>>>>;
+
+  /**
+   * Construct and simulate a top_up_multiple_streams transaction.
+   */
+  top_up_multiple_streams: (
+    { sender, top_ups }: { sender: string; top_ups: Array<[string, i128]> },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a refund_renounce_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -542,7 +655,13 @@ export interface Client {
       merchant_id,
       offset,
       limit,
-    }: { merchant_id: string; offset: u32; limit: u32 },
+      status_filter,
+    }: {
+      merchant_id: string;
+      offset: u32;
+      limit: u32;
+      status_filter?: PaymentStatus | null;
+    },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Array<string>>>;
 
@@ -724,10 +843,16 @@ export class Client extends ContractClient {
     expire_payment: (json: string) => (this as any).txFromJSON(json),
     settle_payment: (json: string) => (this as any).txFromJSON(json),
     verify_payment: (json: string) => (this as any).txFromJSON(json),
+    confirm_payment: (json: string) => (this as any).txFromJSON(json),
     refund_grant_role: (json: string) => (this as any).txFromJSON(json),
     refund_revoke_role: (json: string) => (this as any).txFromJSON(json),
     get_payment_refunds: (json: string) => (this as any).txFromJSON(json),
     get_payment_disputes: (json: string) => (this as any).txFromJSON(json),
+    get_payment_disputes_by_status: (json: string) => (this as any).txFromJSON(json),
+    swap_and_pay: (json: string) => (this as any).txFromJSON(json),
+    swap_and_pay_multi_route: (json: string) => (this as any).txFromJSON(json),
+    cancel_multiple_streams: (json: string) => (this as any).txFromJSON(json),
+    top_up_multiple_streams: (json: string) => (this as any).txFromJSON(json),
     refund_renounce_role: (json: string) => (this as any).txFromJSON(json),
     payment_grant_role: (json: string) => (this as any).txFromJSON(json),
     refund_transfer_admin: (json: string) => (this as any).txFromJSON(json),

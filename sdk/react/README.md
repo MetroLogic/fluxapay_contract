@@ -36,7 +36,27 @@ export default function App({ children }: { children: React.ReactNode }) {
 Then use the hooks anywhere below the provider:
 
 ```tsx
-import { usePayment, useMerchant, useMerchantPayments, useCreatePayment, useRefund } from "@fluxapay/react";
+import {
+  usePayment,
+  useMerchant,
+  useMerchantPayments,
+  useCreatePayment,
+  useRefund,
+  useMerchantBalance,
+  useStreamAccrual,
+
+  useDispute,
+  usePaymentDisputes,
+  useMerchantAnalytics,
+  useStream,
+  useSenderStreams,
+  useCreateStream,
+  useCreateDispute,
+  type Dispute,
+  type DisputeStatus,
+  type MerchantAnalytics,
+  type PaymentStream,
+} from "@fluxapay/react";
 
 function PaymentStatus({ paymentId }: { paymentId: string }) {
   const { data: payment, loading, error } = usePayment(paymentId);
@@ -66,6 +86,136 @@ function RecentPayments({ merchantId }: { merchantId: string }) {
 function RefundDetails({ refundId }: { refundId: string }) {
   const { data: refund, loading } = useRefund(refundId);
   return loading ? <p>Loading...</p> : <p>{refund?.reason}</p>;
+}
+
+function MerchantBalanceWidget({ merchantId }: { merchantId: string }) {
+  const { balance, loading, error, refresh } = useMerchantBalance(merchantId);
+
+  if (loading) return <p>Loading...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+  return (
+    <div>
+      <p>Pending balance: {balance?.toString() ?? "0"}</p>
+      <button onClick={refresh}>Refresh</button>
+    </div>
+  );
+}
+
+function StreamStatus({ streamId }: { streamId: string }) {
+  // Polls every 5s by default; the displayed amount animates smoothly
+  // between polls using the contract's accrual formula client-side.
+  const { accrued, remainingDeposit, loading, error } = useStreamAccrual(streamId);
+
+  if (loading) return <p>Loading...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+  return (
+    <p>
+      Accrued: {accrued?.toString() ?? "0"} / remaining deposit: {remainingDeposit?.toString() ?? "0"}
+    </p>
+
+function DisputeDetails({ disputeId }: { disputeId: string }) {
+  const { data: dispute, loading, error } = useDispute(disputeId);
+  if (loading) return <p>Loading dispute...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+  return <p>Status: {dispute?.status}</p>;
+}
+
+function PaymentDisputesList({ paymentId }: { paymentId: string }) {
+  const { data: disputes, loading } = usePaymentDisputes(paymentId);
+  if (loading) return <p>Loading disputes...</p>;
+  return (
+    <ul>
+      {disputes?.map((dispute) => (
+        <li key={dispute.dispute_id}>{dispute.dispute_id}: {dispute.reason}</li>
+      ))}
+    </ul>
+  );
+}
+
+function MerchantMetrics({ merchantId }: { merchantId: string }) {
+  const { data: analytics, loading, error } = useMerchantAnalytics(
+    merchantId,
+    Date.now() / 1000 - 30 * 24 * 60 * 60,
+    Date.now() / 1000,
+  );
+
+  if (loading) return <p>Loading analytics...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+
+  return (
+    <dl>
+      <dt>Total payments</dt>
+      <dd>{analytics?.totalPayments}</dd>
+      <dt>Total volume</dt>
+      <dd>{analytics?.totalVolume.toString()}</dd>
+    </dl>
+  );
+}
+
+function StreamDetails({ streamId }: { streamId: string }) {
+  const { data: stream, loading, error } = useStream(streamId);
+
+  if (loading) return <p>Loading stream...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+  return <p>Stream status: {stream?.status}</p>;
+}
+
+function SenderStreams({ sender }: { sender: string }) {
+  const { data: streams, loading } = useSenderStreams(sender, 0, 10);
+
+  if (loading) return <p>Loading streams...</p>;
+  return (
+    <ul>
+      {streams?.map((stream: PaymentStream) => (
+        <li key={stream.streamId}>{stream.streamId}: {stream.status}</li>
+      ))}
+    </ul>
+  );
+}
+
+function CreateStreamForm() {
+  const { mutate, loading, status } = useCreateStream();
+
+  const onSubmit = async () => {
+    const stream = await mutate({
+      sender: "G_SENDER...",
+      receiver: "G_RECEIVER...",
+      token: "USDC",
+      ratePerSecond: 100n,
+      deposit: 10_000_000n,
+      streamId: "stream_123",
+    });
+
+    console.log("Created stream", stream.streamId);
+  };
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {status === "loading" ? "Creating stream..." : "Create stream"}
+    </button>
+  );
+}
+
+function CreateDisputeForm({ paymentId }: { paymentId: string }) {
+  const { mutate, loading, status, error } = useCreateDispute();
+
+  const onSubmit = async () => {
+    const disputeId = await mutate({
+      paymentId,
+      amount: 5_000n,
+      reason: "Unauthorized charge",
+      evidence: "ipfs://example",
+      disputer: "G...",
+    });
+
+    console.log("Created dispute", disputeId);
+  };
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {status === "loading" ? "Creating dispute..." : "Create dispute"}
+    </button>
+  );
 }
 
 function CreatePaymentForm() {
@@ -156,11 +306,150 @@ the pattern used by React Query / SWR consumers.
 - `useMerchant(merchantId)` — fetch a single merchant.
 - `useMerchantPayments(merchantId, { offset?, limit? })` — fetch a merchant's paginated payments.
 - `useRefund(refundId)` — fetch a single refund.
+- `useDispute(disputeId)` — fetch a single dispute.
+- `usePaymentDisputes(paymentId)` — fetch all disputes for a payment.
+- `useMerchantAnalytics(merchantId, from, to)` — fetch merchant dashboard summary metrics for a date range.
+- `useStream(streamId)` — fetch a payment stream by ID.
+- `useSenderStreams(sender, offset?, limit?)` — fetch paginated streams for a sender address.
+- `useCreateStream()` — returns `{ mutate, data, status, loading, error }` for creating a payment stream.
+- `useCreateDispute()` — returns `{ mutate, data, status, loading, error }` for creating a dispute.
 - `useCreatePayment()` — returns `{ mutate, data, status, loading, error }` for creating a payment.
+- `useMerchantBalance(merchantId)` — returns `{ balance, loading, error, refresh }` for the merchant's current pending settlement balance. Polls in the background (every 10s) and exposes `refresh()` for an immediate update, e.g. right after your own app observes a confirmed-payment event.
+- `useStreamAccrual(streamId, pollIntervalMs = 5000)` — returns `{ accrued, remainingDeposit, loading, error }` for a payment stream's live accrued amount. Re-fetches the on-chain record every `pollIntervalMs`, and smoothly extrapolates the displayed value between polls client-side using the same accrual formula as the contract (`compute_total_accrued`).
+
+- `useSubscriptionPlan(planId)` — fetch a subscription plan by ID.
+- `useSubscription(subscriptionId)` — fetch a subscription by ID.
+- `useCreateSubscriptionPlan()` — returns `{ mutate, data, status, loading, error }` for creating a plan.
+- `useSubscribeToPlan()` — returns `{ mutate, data, status, loading, error }` for subscribing a payer to a plan.
+
+## Subscription Plan Example
+
+```tsx
+import {
+  useSubscriptionPlan,
+  useCreateSubscriptionPlan,
+  useSubscribeToPlan,
+  type SubscriptionPlan,
+} from "@fluxapay/react";
+
+function PlanDetails({ planId }: { planId: string }) {
+  const { data: plan, loading } = useSubscriptionPlan(planId);
+  if (loading) return <p>Loading plan...</p>;
+  return <p>{plan?.name}: {plan?.amount.toString()} {plan?.currency}/{plan?.billingInterval}</p>;
+}
+
+function CreatePlanForm({ merchantId }: { merchantId: string }) {
+  const { mutate, loading, error } = useCreateSubscriptionPlan();
+
+  const onSubmit = async () => {
+    await mutate({
+      merchant: merchantId,
+      planId: "plan_weekly",
+      name: "Weekly Pro",
+      description: "Unlimited weekly access",
+      amount: 1_000_000n,
+      currency: "USDC",
+      billingInterval: "Weekly",
+    });
+  };
+
+  return (
+    <button onClick={onSubmit} disabled={loading}>
+      {loading ? "Creating..." : "Create plan"}
+    </button>
+  );
+}
+
+function SubscribeButton({ payer, planId }: { payer: string; planId: string }) {
+  const { mutate, loading } = useSubscribeToPlan();
+
+  const onSubscribe = async () => {
+    await mutate({
+      payer,
+      planId,
+      paymentId: `sub_${planId}_${payer.slice(0, 8)}`,
+    });
+  };
+
+  return (
+    <button onClick={onSubscribe} disabled={loading}>
+      {loading ? "Subscribing..." : "Subscribe"}
+    </button>
+  );
+}
+```
 - `useInvoice(invoiceId)` — fetch a single invoice.
 - `useMerchantInvoices(merchantId)` — fetch a merchant's invoice ids.
 - `useCreateInvoice()` — returns `{ mutate, data, status, loading, error }` for creating an invoice.
 - `useMarkInvoicePaid()` — returns `{ mutate, status, loading, error }` for marking an invoice as paid.
+
+### Real-Time Event Streaming (`usePaymentEvents`)
+
+Connects to the indexer SSE stream for live payment updates:
+
+```tsx
+import { usePaymentEvents } from "@fluxapay/react";
+
+function LivePaymentFeed({ merchantId, token }: { merchantId: string; token: string }) {
+  const { events, latestEvent, status, error, close } = usePaymentEvents({
+    baseUrl: "https://indexer.fluxapay.com",
+    merchantId,
+    token,
+    eventTypes: ["payment.confirmed", "payment.failed"],
+    onEvent: (event) => {
+      console.log("New payment event received:", event);
+    },
+  });
+
+  return (
+    <div>
+      <div>Connection Status: {status}</div>
+      {latestEvent && (
+        <div>Latest Event: {latestEvent.event_type} - {latestEvent.payment_id}</div>
+      )}
+      <ul>
+        {events.map((e, idx) => (
+          <li key={idx}>{e.event_type}: {e.payment_id}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+### Payment Status Polling (`usePaymentStatus`)
+
+Issue #769: Polls payment status with exponential backoff, stopping automatically on terminal statuses or when the component unmounts:
+
+```tsx
+import { usePaymentStatus } from "@fluxapay/react";
+
+function PaymentStatusTracker({ paymentId }: { paymentId: string }) {
+  const { status, payment, error, loading, refetch } = usePaymentStatus(paymentId, {
+    pollIntervalMs: 2000, // initial interval (2s)
+    maxBackoffMs: 30000,  // maximum backoff cap (30s)
+    stopOnStatuses: ["confirmed", "failed", "expired"],
+  });
+
+  if (loading && !payment) return <p>Checking status...</p>;
+  if (error) {
+    return (
+      <div>
+        <p>Error polling status: {error.message}</p>
+        <button onClick={refetch}>Retry</button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p>Current Status: {status}</p>
+      {payment && <p>Amount: {payment.amount.toString()}</p>}
+      <button onClick={refetch}>Refresh Status</button>
+    </div>
+  );
+}
+```
 
 ## License
 

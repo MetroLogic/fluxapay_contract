@@ -16,7 +16,7 @@ Install the official SDK from npm:
 npm install @fluxapay/sdk
 ```
 
-See [sdk/README.md](sdk/README.md) for usage examples and [sdk/CHANGELOG.md](sdk/CHANGELOG.md) for release notes.
+See [sdk/README.md](sdk/README.md) for usage examples, [docs/integration-test-guide.md](docs/integration-test-guide.md) for testnet integration testing, and [sdk/CHANGELOG.md](sdk/CHANGELOG.md) for release notes.
 
 ## CI/CD
 
@@ -28,7 +28,9 @@ Automated testing and deployment pipeline using GitHub Actions:
 - **CD:** Auto-deploys to development and staging on merge to main; production requires manual approval
 - All tests must pass before deployment
 
-### Security and Dependency Checks (Local)
+### Security and Dependency Checks
+
+Automated in CI workflow (`ci.yml`) and runnable locally:
 
 - `cargo audit --deny warnings`
 - `cargo deny check bans licenses advisories`
@@ -74,12 +76,13 @@ Fluxapay solves this by enabling _USDC-in → fiat-out_ payments with a merchant
 
 •⁠ ⁠*Merchant API for Seamless Integration*
 
-- Create payments/charges
+- Create payments/charges (with optional `allow_partial: true` for installment funding)
 - Fetch payment status
 - Issue refunds (where supported)
 - Manage customers & metadata
   - **Metadata limits:** ≤20 keys; each key ≤64 chars; each value ≤256 chars
   - Violations return `MetadataTooLarge` / `MetadataValueTooLong`
+- **Partial payment accumulation:** Allow customers to fund payments in multiple transactions. Emits `PAYMENT/PARTIAL_RECEIVED` events and automatically refunds partial funds on expiry.
   •⁠ ⁠*Webhooks*
 - ⁠ payment.created ⁠, ⁠ payment.pending ⁠, ⁠ payment.confirmed ⁠, ⁠ payment.failed ⁠, ⁠ payment.settled ⁠
 - Also: `refund.*` and `dispute.*` lifecycle events
@@ -115,6 +118,33 @@ Fluxapay solves this by enabling _USDC-in → fiat-out_ payments with a merchant
 •⁠ ⁠Merchant generates a payment link (amount, currency, description)
 •⁠ ⁠Customer pays using Stellar USDC
 •⁠ ⁠Merchant is notified via dashboard + webhook/email (optional)
+
+### 3) Recurring billing with subscriptions
+
+•⁠ ⁠Merchant creates a subscription plan with a fixed amount and billing interval
+•⁠ ⁠Customer subscribes and is charged automatically on each cycle
+•⁠ ⁠Daemon retries failed charges through the grace-period workflow
+•⁠ ⁠Merchant monitors subscription lifecycle events via webhooks or dashboard alerts
+
+See the full guide: [docs/subscription-guide.md](docs/subscription-guide.md)
+
+### 4) Dispute handling and resolution
+
+•⁠ ⁠Customer raises a dispute against a confirmed payment; the merchant co-authorizes creation and both parties post a bond
+•⁠ ⁠Operator reviews the case and resolves or rejects it
+•⁠ ⁠Time-based escalation and arbitrator voting protect the process from stalls
+•⁠ ⁠Bond return / forfeiture and merchant score impacts are enforced on-chain
+
+Merchant lifecycle and response steps: [docs/disputes.md](docs/disputes.md). For operator details, see the [full dispute resolution guide](docs/dispute-resolution-guide.md).
+
+### 5) Streaming payroll and milestone payouts
+
+•⁠ ⁠Sender funds a deposit and the contract releases tokens over time at a fixed rate
+•⁠ ⁠Receiver can withdraw accrued funds, pause or resume flow, or top up the deposit
+•⁠ ⁠Milestone approvals and destination-based withdrawals support governance-heavy payouts
+•⁠ ⁠Rate changes refund surplus deposit when the stream is slowed down
+
+See the full guide: [docs/payment-streams-guide.md](docs/payment-streams-guide.md)
 
 ## Tech Stack (Planned)
 
@@ -275,6 +305,29 @@ For a detailed understanding of the contract structure, cross-contract interacti
 
 For a unified reference of every contract error code (`PaymentProcessor`, `RefundManager`, `AccessControl`, `Stream`, `FXOracle`, `MerchantRegistry`, `MerchantAuth`, `DexRouter`, `AccountAbstraction`) with common causes and remediation steps, see [docs/error-codes.md](docs/error-codes.md).
 
+## FAQ
+
+Common questions from merchants and developers: [docs/faq.md](docs/faq.md)
+
+## Scripts
+
+Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](scripts/README.md)
+
 ## Telegram link
 
 <https://t.me/+m23gN14007w0ZmQ0>
+
+## Handsoff notes
+
+<!-- handsoff-issue-830 -->
+- #830: feat: add payment overpayment policy — configurable accept / reject / partial-accept for overpaid amounts
+<!-- handsoff-issue-824 -->
+- #824: docs: document the full payment lifecycle state diagram with Mermaid chart in architecture.md
+<!-- handsoff-issue-794 -->
+- #794: feat: add get_payment_summary view — single call returning payment + all refunds + stream info
+<!-- handsoff-issue-791 -->
+- #791: feat: on-chain merchant score decay — reduce score over time if no new payments are confirmed
+<!-- handsoff-issue-805 -->
+- #805: bug: merchant_registry_test.rs tests share a single Soroban test environment, causing test order dependency
+<!-- handsoff-issue-826 -->
+- #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically

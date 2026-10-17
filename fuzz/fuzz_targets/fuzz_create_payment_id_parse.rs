@@ -15,6 +15,11 @@
 //!    consistently with `validate_id`'s documented contract and must never
 //!    panic while doing so.
 //!
+//! Issue #792: inputs containing null bytes (`\x00`) previously caused an
+//! unhandled panic in the parser. `validate_id` must reject such strings
+//! (returning `false`) rather than panicking, so the contract below treats
+//! `\x00` as an invalid character alongside any other non-alphanumeric byte.
+//!
 //! NOTE: this intentionally exercises `format_id`/`validate_id` directly
 //! rather than calling `PaymentProcessor::create_payment` end-to-end.
 //! `CreatePaymentArgs` gained fields (`retry_of_payment_id`,
@@ -67,7 +72,8 @@ fuzz_target!(|input: Input| {
 
     // 2. Client-supplied IDs must be classified consistently, and must
     //    never panic, regardless of Unicode content, length, or empty
-    //    input.
+    //    input. Null bytes (`\x00`) are explicitly exercised here: they
+    //    must be rejected, not panic (issue #792).
     let bytes = input.external_id.as_bytes();
     let capped = if bytes.len() > MAX_EXTERNAL_ID_LEN {
         &bytes[..MAX_EXTERNAL_ID_LEN]
@@ -88,4 +94,14 @@ fuzz_target!(|input: Input| {
         "validate_id disagreed with its documented contract for external_id derived from {:?}",
         input.external_id
     );
+
+    // 3. Regression guard for issue #792: a null byte anywhere in the
+    //    candidate must be rejected without panicking.
+    if capped.contains(&0u8) {
+        assert!(
+            !is_valid,
+            "validate_id accepted an ID containing a null byte: {:?}",
+            input.external_id
+        );
+    }
 });

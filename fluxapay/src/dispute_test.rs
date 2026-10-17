@@ -49,9 +49,13 @@ fn create_payment_args(
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        tip_enabled: false,
     }
 }
 
@@ -77,6 +81,7 @@ fn setup_open_dispute<'a>(
         &BytesN::from_array(env, &[7u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
 
     let token_address = env.as_contract(&refund_client.address, || {
@@ -98,18 +103,14 @@ fn setup_open_dispute<'a>(
         &customer,
         &vec![env],
     );
-    refund_client.grant_role(
-        &admin,
-        &Symbol::new(env, "SETTLEMENT_OPERATOR"),
-        &operator,
-    );
+    refund_client.grant_role(&admin, &Symbol::new(env, "SETTLEMENT_OPERATOR"), &operator);
 
     (admin, operator, refund_client, dispute_id)
 }
 
 fn has_dispute_event(env: &Env, event_name: &str) -> bool {
     use soroban_sdk::xdr::{ContractEventBody, ScVal};
-    env.events().all().events().iter().any(|event| {
+    env.events().all().iter().any(|event| {
         let ContractEventBody::V0(v0) = &event.body;
         let topics = &v0.topics;
         if topics.len() != 2 {
@@ -126,12 +127,81 @@ fn has_dispute_event(env: &Env, event_name: &str) -> bool {
     })
 }
 
+fn count_dispute_events(env: &Env, event_name: &str) -> usize {
+    use soroban_sdk::xdr::{ContractEventBody, ScVal};
+    env.events()
+        .all()
+        .iter()
+        .filter(|event| {
+            let ContractEventBody::V0(v0) = &event.body;
+            let topics = &v0.topics;
+            if topics.len() != 2 {
+                return false;
+            }
+            let namespace: Result<Symbol, _> = ScVal::from(topics[0].clone()).try_into_val(env);
+            let name: Result<Symbol, _> = ScVal::from(topics[1].clone()).try_into_val(env);
+            matches!(
+                (namespace, name),
+                (Ok(namespace), Ok(name))
+                    if namespace == Symbol::new(env, "DISPUTE")
+                        && name == Symbol::new(env, event_name)
+            )
+        })
+        .count()
+}
+
+fn create_batch_dispute(
+    env: &Env,
+    admin: &Address,
+    payment_client: &PaymentProcessorClient<'_>,
+    refund_client: &RefundManagerClient<'_>,
+    payment_id_text: &str,
+) -> (String, Address, Address) {
+    let merchant = Address::generate(env);
+    let customer = Address::generate(env);
+    let payment_id = String::from_str(env, payment_id_text);
+
+    payment_client.grant_role(admin, &Symbol::new(env, "MERCHANT"), &merchant);
+    payment_client.create_payment(&create_payment_args(env, &payment_id, &merchant, 1_000));
+
+    let oracle = Address::generate(env);
+    payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::from_array(env, &[9u8; 32]),
+        &customer,
+        &1_000,
+        &None::<u64>,
+    );
+
+    let token_address = env.as_contract(&refund_client.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken)
+            .unwrap()
+    });
+    let token_admin_client = token::StellarAssetClient::new(env, &token_address);
+    token_admin_client.mint(&customer, &100_000);
+    token_admin_client.mint(&merchant, &100_000);
+
+    refund_client.register_payment(&payment_id, &merchant, &1_000, &Symbol::new(env, "USDC"));
+    let dispute_id = refund_client.create_dispute(
+        &payment_id,
+        &1_000,
+        &String::from_str(env, "Batch resolution coverage"),
+        &String::from_str(env, "Batch evidence"),
+        &customer,
+        &vec![env],
+    );
+    (dispute_id, customer, merchant)
+}
+
 #[test]
 fn test_operator_sets_dispute_deadline() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_, operator, refund_client, dispute_id) =
-        setup_open_dispute(&env, "deadline_stored");
+    let (_, operator, refund_client, dispute_id) = setup_open_dispute(&env, "deadline_stored");
     let deadline = env.ledger().timestamp() + 3600;
 
     refund_client.set_dispute_deadline(&operator, &dispute_id, &deadline);
@@ -145,8 +215,7 @@ fn test_operator_sets_dispute_deadline() {
 fn test_non_operator_cannot_set_dispute_deadline() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_, _, refund_client, dispute_id) =
-        setup_open_dispute(&env, "deadline_unauthorized");
+    let (_, _, refund_client, dispute_id) = setup_open_dispute(&env, "deadline_unauthorized");
     let non_operator = Address::generate(&env);
 
     let result = refund_client.try_set_dispute_deadline(
@@ -163,8 +232,7 @@ fn test_past_dispute_deadline_escalates_immediately() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(100);
-    let (_, operator, refund_client, dispute_id) =
-        setup_open_dispute(&env, "deadline_past");
+    let (_, operator, refund_client, dispute_id) = setup_open_dispute(&env, "deadline_past");
 
     refund_client.set_dispute_deadline(&operator, &dispute_id, &99);
 
@@ -177,14 +245,9 @@ fn test_past_dispute_deadline_escalates_immediately() {
 fn test_future_dispute_deadline_does_not_escalate() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_, operator, refund_client, dispute_id) =
-        setup_open_dispute(&env, "deadline_future");
+    let (_, operator, refund_client, dispute_id) = setup_open_dispute(&env, "deadline_future");
 
-    refund_client.set_dispute_deadline(
-        &operator,
-        &dispute_id,
-        &(env.ledger().timestamp() + 3600),
-    );
+    refund_client.set_dispute_deadline(&operator, &dispute_id, &(env.ledger().timestamp() + 3600));
 
     assert!(!refund_client.get_dispute(&dispute_id).escalated);
 }
@@ -193,8 +256,7 @@ fn test_future_dispute_deadline_does_not_escalate() {
 fn test_cannot_set_deadline_on_resolved_dispute() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_, operator, refund_client, dispute_id) =
-        setup_open_dispute(&env, "deadline_resolved");
+    let (_, operator, refund_client, dispute_id) = setup_open_dispute(&env, "deadline_resolved");
     refund_client.reject_dispute(
         &operator,
         &dispute_id,
@@ -232,7 +294,14 @@ fn test_create_dispute() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -241,8 +310,14 @@ fn test_create_dispute() {
     let dispute_reason = String::from_str(&env, "Product not received");
     let evidence = String::from_str(&env, "Tracking shows delivery failed");
 
-    let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
+    let dispute_id = refund_client.create_dispute(
+        &payment_id,
+        &amount,
+        &dispute_reason,
+        &evidence,
+        &customer,
+        &vec![&env],
+    );
 
     // Verify dispute was created
     let dispute: Dispute = refund_client.get_dispute(&dispute_id);
@@ -277,7 +352,14 @@ fn test_review_dispute() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -286,8 +368,14 @@ fn test_review_dispute() {
     let dispute_reason = String::from_str(&env, "Wrong item received");
     let evidence = String::from_str(&env, "Photo evidence attached");
 
-    let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
+    let dispute_id = refund_client.create_dispute(
+        &payment_id,
+        &amount,
+        &dispute_reason,
+        &evidence,
+        &customer,
+        &vec![&env],
+    );
 
     // Review dispute
     refund_client.review_dispute(&operator, &dispute_id);
@@ -319,7 +407,14 @@ fn test_check_dispute_deadline_escalates_once() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
 
@@ -335,22 +430,22 @@ fn test_check_dispute_deadline_escalates_once() {
     let now = env.ledger().timestamp();
     refund_client.set_dispute_deadline(&operator, &dispute_id, &(now + 10));
 
-    let events_after_deadline = env.events().all().events().len();
+    let events_after_deadline = env.events().all().len();
 
     refund_client.check_dispute_deadline(&dispute_id);
     let dispute = refund_client.get_dispute(&dispute_id);
     assert!(!dispute.escalated);
-    assert_eq!(env.events().all().events().len(), events_after_deadline);
+    assert_eq!(env.events().all().len(), events_after_deadline);
 
     env.ledger().set_timestamp(now + 11);
     refund_client.check_dispute_deadline(&dispute_id);
 
     let escalated = refund_client.get_dispute(&dispute_id);
     assert!(escalated.escalated);
-    assert_eq!(env.events().all().events().len(), events_after_deadline + 1);
+    assert_eq!(env.events().all().len(), events_after_deadline + 1);
 
     refund_client.check_dispute_deadline(&dispute_id);
-    assert_eq!(env.events().all().events().len(), events_after_deadline + 1);
+    assert_eq!(env.events().all().len(), events_after_deadline + 1);
 }
 
 #[test]
@@ -378,7 +473,14 @@ fn test_resolve_dispute_with_refund() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -387,8 +489,14 @@ fn test_resolve_dispute_with_refund() {
     let dispute_reason = String::from_str(&env, "Defective product");
     let evidence = String::from_str(&env, "Video evidence of defect");
 
-    let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
+    let dispute_id = refund_client.create_dispute(
+        &payment_id,
+        &amount,
+        &dispute_reason,
+        &evidence,
+        &customer,
+        &vec![&env],
+    );
 
     // Resolve dispute with refund
     let resolution_notes = String::from_str(&env, "Dispute valid, issuing full refund");
@@ -438,7 +546,14 @@ fn test_reject_dispute() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -447,8 +562,14 @@ fn test_reject_dispute() {
     let dispute_reason = String::from_str(&env, "Unauthorized charge");
     let evidence = String::from_str(&env, "No evidence provided");
 
-    let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
+    let dispute_id = refund_client.create_dispute(
+        &payment_id,
+        &amount,
+        &dispute_reason,
+        &evidence,
+        &customer,
+        &vec![&env],
+    );
 
     // Reject dispute
     let resolution_notes = String::from_str(&env, "Insufficient evidence, dispute rejected");
@@ -482,7 +603,14 @@ fn test_get_payment_disputes() {
     let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
-    payment_client.verify_payment(&oracle, &payment_id, &transaction_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -509,6 +637,92 @@ fn test_get_payment_disputes() {
     // Get all disputes for payment
     let disputes = refund_client.get_payment_disputes(&payment_id);
     assert_eq!(disputes.len(), 2);
+}
+
+/// Issue #575: Filter payment disputes by DisputeStatus.
+#[test]
+fn test_get_payment_disputes_by_status() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, refund_client) = setup_contracts(&env);
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+
+    let payment_id = String::from_str(&env, "payment_status_filter");
+    let amount = 2000i128;
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    let args = create_payment_args(&env, &payment_id, &merchant, amount);
+    payment_client.create_payment(&args);
+
+    let transaction_hash = BytesN::from_array(&env, &[0u8; 32]);
+    let oracle = Address::generate(&env);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &transaction_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
+
+    refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
+
+    // Create dispute 1
+    let dispute_id1 = refund_client.create_dispute(
+        &payment_id,
+        &500i128,
+        &String::from_str(&env, "First dispute"),
+        &String::from_str(&env, "Evidence 1"),
+        &customer,
+        &vec![&env],
+    );
+
+    // Create dispute 2
+    let dispute_id2 = refund_client.create_dispute(
+        &payment_id,
+        &700i128,
+        &String::from_str(&env, "Second dispute"),
+        &String::from_str(&env, "Evidence 2"),
+        &customer,
+        &vec![&env],
+    );
+
+    // Initial status: both are Open
+    let open_disputes =
+        refund_client.get_payment_disputes_by_status(&payment_id, &DisputeStatus::Open);
+    assert_eq!(open_disputes.len(), 2);
+
+    let review_disputes =
+        refund_client.get_payment_disputes_by_status(&payment_id, &DisputeStatus::UnderReview);
+    assert_eq!(review_disputes.len(), 0);
+
+    // Transition dispute 1 to UnderReview
+    let operator = Address::generate(&env);
+    refund_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    refund_client.review_dispute(&operator, &dispute_id1);
+
+    // Now dispute 1 is UnderReview, dispute 2 is Open
+    let open_after =
+        refund_client.get_payment_disputes_by_status(&payment_id, &DisputeStatus::Open);
+    assert_eq!(open_after.len(), 1);
+    assert_eq!(open_after.get(0).unwrap().id, dispute_id2);
+
+    let review_after =
+        refund_client.get_payment_disputes_by_status(&payment_id, &DisputeStatus::UnderReview);
+    assert_eq!(review_after.len(), 1);
+    assert_eq!(review_after.get(0).unwrap().id, dispute_id1);
+
+    // Status with no matches returns empty vec
+    let resolved =
+        refund_client.get_payment_disputes_by_status(&payment_id, &DisputeStatus::Resolved);
+    assert_eq!(resolved.len(), 0);
+
+    // Backward-compatible original method still returns all
+    let all = refund_client.get_payment_disputes(&payment_id);
+    assert_eq!(all.len(), 2);
 }
 
 #[test]
@@ -561,7 +775,14 @@ fn test_resolve_dispute_with_only_operator_auth() {
     let oracle = Address::generate(&env);
     payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(&env);
-    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &tx_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     // Register payment with refund manager for amount validation
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
@@ -626,7 +847,14 @@ fn setup_dispute_under_review(
     let oracle = Address::generate(env);
     payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
     let tx_hash = BytesN::<32>::random(env);
-    payment_client.verify_payment(&oracle, payment_id, &tx_hash, &customer, &amount);
+    payment_client.verify_payment(
+        &oracle,
+        payment_id,
+        &tx_hash,
+        &customer,
+        &amount,
+        &None::<u64>,
+    );
 
     refund_client.register_payment(payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
 
@@ -739,21 +967,42 @@ fn test_vote_dispute_duplicate_vote_blocked() {
 
 #[test]
 fn test_vote_dispute_non_arbitrator_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, refund_client) = setup(&env);
+
+    let payment_id = String::from_str(&env, "payment_vote_non_arb");
+    let dispute_id = setup_dispute_under_review(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        &payment_id,
+        400i128,
+    );
+
+    let stranger = Address::generate(&env);
+    let err =
+        refund_client.try_vote_dispute(&stranger, &dispute_id, &ArbitratorVoteChoice::Approve);
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+}
+
 const VALID_CID_V0: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 const VALID_CID_V1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
-fn valid_evidence(env: &Env) -> String {
-    String::from_str(env, "f000000000000000000000000000000000")
-}
-
-fn setup_confirmed_payment_for_dispute(
-    env: &Env,
-    payment_client: &PaymentProcessorClient,
-    refund_client: &RefundManagerClient,
-    admin: &Address,
+fn setup_confirmed_payment_for_dispute<'a>(
+    env: &'a Env,
     payment_id_text: &str,
     amount: i128,
-) -> (Address, Address, String) {
+) -> (
+    Address,
+    Address,
+    Address,
+    PaymentProcessorClient<'a>,
+    RefundManagerClient<'a>,
+    String,
+) {
+    let (admin, payment_client, refund_client) = setup_contracts(env);
     let merchant = Address::generate(env);
     let customer = Address::generate(env);
     let payment_id = String::from_str(env, payment_id_text);
@@ -769,6 +1018,7 @@ fn setup_confirmed_payment_for_dispute(
         &BytesN::from_array(env, &[7u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
 
     let token_address = env.as_contract(&refund_client.address, || {
@@ -778,12 +1028,19 @@ fn setup_confirmed_payment_for_dispute(
             .unwrap()
     });
     let token_admin_client = token::StellarAssetClient::new(env, &token_address);
-    token_admin_client.mint(&customer, &10_000_000);
-    token_admin_client.mint(&merchant, &10_000_000);
+    token_admin_client.mint(&customer, &1_000_000);
+    token_admin_client.mint(&merchant, &1_000_000);
 
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
 
-    (admin, merchant, customer, payment_client, refund_client, payment_id)
+    (
+        admin,
+        merchant,
+        customer,
+        payment_client,
+        refund_client,
+        payment_id,
+    )
 }
 
 #[test]
@@ -848,6 +1105,7 @@ fn test_dispute_rate_limit_sixth_open_rejected() {
         &BytesN::from_array(&env, &[9u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
     let token_address = env.as_contract(&refund_client.address, || {
         env.storage()
@@ -928,6 +1186,7 @@ fn test_dispute_global_hourly_rate_limit() {
         &BytesN::from_array(&env, &[3u8; 32]),
         &customer,
         &amount,
+        &None::<u64>,
     );
     let token_address = env.as_contract(&refund_client.address, || {
         env.storage()
@@ -1023,11 +1282,6 @@ fn test_create_dispute_evidence_empty_allowed() {
         &vec![&env],
     );
     assert!(!dispute_id.is_empty());
-    token_admin_client.mint(&customer, &1_000_000);
-    token_admin_client.mint(&merchant, &1_000_000);
-
-    refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
-    (merchant, customer, payment_id)
 }
 
 #[test]
@@ -1038,7 +1292,7 @@ fn test_batch_create_disputes_full_success() {
 
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..3u32 {
-        let pid = format!("batch_ok_{i}");
+        let pid = crate::utils::format_id(&env, "batch_ok_", i as u64);
         let (merchant, customer, payment_id) = setup_confirmed_payment_for_dispute(
             &env,
             &payment_client,
@@ -1098,7 +1352,8 @@ fn test_batch_create_disputes_mixed_success_fail() {
     );
 
     let impostor = Address::generate(&env);
-    let err = refund_client.try_vote_dispute(&impostor, &dispute_id, &ArbitratorVoteChoice::Approve);
+    let err =
+        refund_client.try_vote_dispute(&impostor, &dispute_id, &ArbitratorVoteChoice::Approve);
     assert_eq!(err, Err(Ok(Error::Unauthorized)));
     let (_m1, c1, pay1) = setup_confirmed_payment_for_dispute(
         &env,
@@ -1208,7 +1463,7 @@ fn test_batch_create_disputes_rejects_oversized() {
     let mut batch = soroban_sdk::vec![&env];
     for i in 0..21u32 {
         batch.push_back(crate::CreateDisputeArgs {
-            payment_id: String::from_str(&env, &format!("p{i}")),
+            payment_id: crate::utils::format_id(&env, "p", i as u64),
             amount: 1i128,
             reason: String::from_str(&env, "r"),
             evidence: valid_evidence(&env),
@@ -1222,4 +1477,190 @@ fn test_batch_create_disputes_rejects_oversized() {
 
     let result2 = refund_client.try_batch_create_disputes(&soroban_sdk::vec![&env], &21u32);
     assert_eq!(result2, Err(Ok(crate::Error::BatchTooLarge)));
+}
+
+#[test]
+fn test_batch_resolve_disputes_all_succeed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, refund_client) = setup_contracts(&env);
+    let operator = Address::generate(&env);
+    refund_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    let (dispute_id_1, customer_1, _) = create_batch_dispute(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        "batch_resolve_1",
+    );
+    let (dispute_id_2, _, merchant_2) = create_batch_dispute(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        "batch_resolve_2",
+    );
+    let event_count_before = count_dispute_events(&env, "RESOLVED");
+    let resolutions = soroban_sdk::vec![
+        &env,
+        crate::DisputeResolution {
+            dispute_id: dispute_id_1.clone(),
+            in_favor_of: customer_1,
+            notes: String::from_str(&env, "Customer evidence confirmed"),
+        },
+        crate::DisputeResolution {
+            dispute_id: dispute_id_2.clone(),
+            in_favor_of: merchant_2,
+            notes: String::from_str(&env, "Merchant evidence confirmed"),
+        },
+    ];
+
+    let results = refund_client.batch_resolve_disputes(&operator, &resolutions);
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(0), Some(Ok(())));
+    assert_eq!(results.get(1), Some(Ok(())));
+    assert_eq!(
+        refund_client.get_dispute(&dispute_id_1).status,
+        DisputeStatus::Resolved
+    );
+    assert_eq!(
+        refund_client.get_dispute(&dispute_id_2).status,
+        DisputeStatus::Resolved
+    );
+    assert_eq!(
+        count_dispute_events(&env, "RESOLVED"),
+        event_count_before + 2
+    );
+}
+
+#[test]
+fn test_batch_resolve_disputes_failure_does_not_block_other_items() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, refund_client) = setup_contracts(&env);
+    let operator = Address::generate(&env);
+    refund_client.grant_role(&admin, &Symbol::new(&env, "ADMIN"), &operator);
+    let (first_id, first_customer, _) = create_batch_dispute(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        "batch_partial_1",
+    );
+    let (last_id, last_customer, _) = create_batch_dispute(
+        &env,
+        &admin,
+        &payment_client,
+        &refund_client,
+        "batch_partial_2",
+    );
+    let event_count_before = count_dispute_events(&env, "RESOLVED");
+    let resolutions = soroban_sdk::vec![
+        &env,
+        crate::DisputeResolution {
+            dispute_id: first_id.clone(),
+            in_favor_of: first_customer,
+            notes: String::from_str(&env, "First dispute resolved"),
+        },
+        crate::DisputeResolution {
+            dispute_id: String::from_str(&env, "missing_dispute"),
+            in_favor_of: Address::generate(&env),
+            notes: String::from_str(&env, "This dispute does not exist"),
+        },
+        crate::DisputeResolution {
+            dispute_id: last_id.clone(),
+            in_favor_of: last_customer,
+            notes: String::from_str(&env, "Last dispute resolved"),
+        },
+    ];
+
+    let results = refund_client.batch_resolve_disputes(&operator, &resolutions);
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.get(0), Some(Ok(())));
+    assert_eq!(results.get(1), Some(Err(crate::Error::DisputeNotFound)));
+    assert_eq!(results.get(2), Some(Ok(())));
+    assert_eq!(
+        refund_client.get_dispute(&first_id).status,
+        DisputeStatus::Resolved
+    );
+    assert_eq!(
+        refund_client.get_dispute(&last_id).status,
+        DisputeStatus::Resolved
+    );
+    assert_eq!(
+        count_dispute_events(&env, "RESOLVED"),
+        event_count_before + 2
+    );
+
+    // Too early
+    let early = payment_client.try_execute_upgrade(&admin, &String::from_str(&env, "2.0.0"));
+    assert_eq!(early, Err(Ok(Error::TimelockNotExpired)));
+
+    // Cancel clears
+    payment_client.cancel_upgrade(&admin);
+    assert!(payment_client.get_pending_upgrade().is_none());
+}
+
+#[test]
+fn test_open_dispute_stores_evidence_hash_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let opener = Address::generate(&env);
+    let payment_id = 42u64;
+    let disputed_amount = 100_000_000i128; // 10 USDC
+    let bond_amount = 10_000_000i128; // 1 USDC
+    let evidence_hash = BytesN::from_array(&env, &[0xab; 32]);
+
+    let dispute_id = crate::dispute::open_dispute(
+        &env,
+        opener.clone(),
+        payment_id,
+        disputed_amount,
+        bond_amount,
+        evidence_hash.clone(),
+    )
+    .expect("open_dispute should succeed");
+
+    assert_eq!(dispute_id, 1);
+
+    // Verify stored evidence hash via read-only view function
+    let stored_hash =
+        crate::dispute::verify_evidence(&env, dispute_id).expect("verify_evidence should succeed");
+    assert_eq!(stored_hash, evidence_hash);
+
+    // Check DISPUTE/OPENED event was published
+    assert!(has_dispute_event(&env, "OPENED"));
+}
+
+#[test]
+fn test_batch_resolve_disputes_rejects_oversized_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, refund_client) = setup_contracts(&env);
+    let operator = Address::generate(&env);
+    refund_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    let mut resolutions = soroban_sdk::vec![&env];
+    for _ in 0..=crate::MAX_DISPUTE_BATCH {
+        resolutions.push_back(crate::DisputeResolution {
+            dispute_id: String::from_str(&env, "unused_dispute"),
+            in_favor_of: Address::generate(&env),
+            notes: String::from_str(&env, "Oversized batch"),
+        });
+    }
+
+    let result = refund_client.try_batch_resolve_disputes(&operator, &resolutions);
+    assert_eq!(result, Err(Ok(crate::Error::BatchTooLarge)));
+}
+
+#[test]
+fn test_batch_resolve_disputes_requires_admin_or_settlement_operator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _payment_client, refund_client) = setup_contracts(&env);
+    let unauthorized = Address::generate(&env);
+    let result = refund_client.try_batch_resolve_disputes(&unauthorized, &soroban_sdk::vec![&env]);
+    assert_eq!(result, Err(Ok(crate::Error::Unauthorized)));
 }

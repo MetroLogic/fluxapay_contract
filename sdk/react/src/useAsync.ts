@@ -1,9 +1,9 @@
 import * as React from "react";
 
-export interface AsyncState<T> {
+export interface AsyncState<T, E extends Error = Error> {
   data: T | undefined;
   loading: boolean;
-  error: Error | undefined;
+  error: E | undefined;
   refetch: () => void;
 }
 
@@ -12,14 +12,14 @@ export interface AsyncState<T> {
  * shape compatible with React Query / SWR consumers. Skips fetching entirely
  * when `enabled` is false (e.g. a required id is not yet available).
  */
-export function useAsync<T>(
+export function useAsync<T, E extends Error = Error>(
   fetcher: () => Promise<T>,
   deps: React.DependencyList,
   enabled: boolean = true,
-): AsyncState<T> {
+): AsyncState<T, E> {
   const [data, setData] = React.useState<T | undefined>(undefined);
   const [loading, setLoading] = React.useState<boolean>(enabled);
-  const [error, setError] = React.useState<Error | undefined>(undefined);
+  const [error, setError] = React.useState<E | undefined>(undefined);
   const [tick, setTick] = React.useState(0);
 
   React.useEffect(() => {
@@ -41,7 +41,7 @@ export function useAsync<T>(
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err : new Error(String(err)));
+          setError((err instanceof Error ? err : new Error(String(err))) as E);
           setLoading(false);
         }
       });

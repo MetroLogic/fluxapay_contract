@@ -49,6 +49,18 @@ Emitted by `settle_payment` when funds are released to the merchant.
 
 ---
 
+### PAYMENT / CANCELLED
+
+Emitted by `cancel_payment`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `payment_id` | `String` | Payment identifier |
+| `merchant_id` | `Address` | Merchant receiving the payment |
+| `cancelled_by` | `Address` | Address that authorized the cancellation |
+
+---
+
 ### PAYMENT / EXPIRED
 
 Emitted by `expire_payment`.
@@ -209,6 +221,7 @@ Emitted by `register_merchant`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `merchant_id` | `Address` | Merchant address |
+| `reason` | `String` | Suspension reason |
 
 ---
 
@@ -217,6 +230,7 @@ Emitted by `register_merchant`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `merchant_id` | `Address` | Merchant address |
+| `reinstated_by` | `Address` | Admin address that reinstated the merchant |
 
 ---
 
@@ -229,22 +243,48 @@ Emitted by `create_link`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `link_id` | `String` | Link identifier |
-| `merchant_id` | `Address` | Owner |
+| `merchant_id` | `Address` | Merchant that owns the link |
 
 ---
 
 ### LINK / USED
 
+Emitted by `use_link` when a payer completes a payment from a link.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `link_id` | `String` | Link identifier |
 | `payer` | `Address` | Who used the link |
-| `amount` | `i128` | Amount paid |
+| `amount` | `i128` | Resolved USDC amount paid |
 | `payment_id` | `String` | Generated payment ID |
+| `metadata` | `Option<Map<String, String>>` | Optional link metadata copied to the payment |
 
 ---
 
 ### LINK / DEACTIVATED
+
+Emitted by `deactivate_link`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `link_id` | `String` | Link identifier |
+
+---
+
+### LINK / EXPIRED
+
+Emitted by `expire_link` when an expired, still-active link is auto-deactivated.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `link_id` | `String` | Link identifier |
+
+---
+
+### LINK / VIEWED
+
+Emitted by `record_link_view`. The viewer must authorize the call and pass the
+per-viewer rate limit before the event is emitted.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -470,6 +510,107 @@ Emitted by `update_rate`.
 
 ---
 
+## INVOICE
+
+### INVOICE / CREATED
+
+Emitted by `create_invoice` and `create_payment_link_invoice`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Unique invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+| `amount` | `i128` | Total invoice amount |
+
+---
+
+### INVOICE / PAID
+
+Emitted by `mark_invoice_paid`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+
+---
+
+### INVOICE / OVERDUE
+
+Emitted when an invoice is marked overdue.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoice_id` | `String` | Invoice identifier |
+| `merchant_id` | `Address` | Merchant address |
+
+---
+
+## SESSION
+
+Session-key events use a 3-tuple topic `(SESSION, ACTION, account)`, matching `register_session_key` and `revoke_session_key`. `account` is the parent account that delegated the key.
+
+### SESSION / POLICY_REGISTERED
+
+Emitted by `register_session_key_with_policy` after the key is stored.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_key` | `Address` | Delegated signer |
+| `policy` | `SessionPolicy` | Spend caps and contract/function allowlists |
+
+### SESSION / POLICY_VIOLATION
+
+Emitted by `execute_with_session` when a configured policy rejects the call. The storage write for that call is not applied.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_key` | `Address` | Delegated signer |
+| `reason` | `Symbol` | `max_per_tx`, `window_budget`, `contract`, or `function` |
+
+### SESSION / WINDOW_ROLLOVER
+
+Emitted by `execute_with_session` when an expired spend window is reset on an accepted call.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_key` | `Address` | Delegated signer |
+| `previous_start` | `u64` | Timestamp when the expired window opened |
+| `window_start` | `u64` | Timestamp when the new window opened |
+
+---
+
+## META_TX
+
+Sponsored meta-transactions. Emitted by `execute_meta_transaction`.
+
+### META_TX / EXECUTED
+
+The relayer submitted a valid merchant signature and the inner action succeeded.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `relayer` | `Address` | Account that submitted the transaction and paid the fee |
+| `merchant_id` | `Address` | Merchant the signature authorized |
+| `target_function` | `Symbol` | `create_charge`, `authorize_refund`, `rotate_webhook_key`, or `set_fee_recipient` |
+| `nonce` | `u64` | Sequence number consumed by this payload |
+| `gas` | `MetaTxGas` | Estimated instructions, ledger reads/writes, events, and resource fee |
+
+### META_TX / FAILED
+
+The signature was valid and the nonce was consumed, but the inner action failed.
+Validation failures (deadline, domain, nonce, signature) do not emit this event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `relayer` | `Address` | Relayer that submitted the payload |
+| `merchant_id` | `Address` | Merchant the signature authorized |
+| `target_function` | `Symbol` | Requested action |
+| `nonce` | `u64` | Sequence number consumed |
+| `gas` | `MetaTxGas` | Estimated resource use |
+
+---
+
 ## Topic Format Reference
 
 Every event uses a **2-tuple** topic:
@@ -482,3 +623,4 @@ env.events().publish(
 ```
 
 This ensures consistent indexing and filtering by off-chain listeners via the Stellar Horizon API `?topic[]=...` filter parameter.
+

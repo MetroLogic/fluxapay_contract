@@ -11,6 +11,56 @@ The on-chain contracts do **not** call the anchor API directly. Instead, `Paymen
 
 ---
 
+## Implementation Status
+
+The off-ramp flow described in this document is now implemented end-to-end. The sections below document the concrete implementation steps, the `settlements` table, and the extended `payment.settled` webhook payload.
+
+### Implementation Steps
+
+1. **Settlement trigger.** After a payment is confirmed and the settlement window passes, the backend `SettlementService` initiates the off-ramp. It reads the merchant's `AnchorConfig` (anchor domain, SEP-6/SEP-24 endpoints, supported currencies) and the merchant's bank account configured at onboarding.
+2. **Anchor selection.** If the merchant's KYC is already verified with the anchor, the service calls SEP-6 `POST {sep6_endpoint}/transactions/withdraw`. If KYC is not yet on file (first settlement), it falls back to the SEP-24 interactive flow via `POST {sep24_endpoint}/transactions/withdraw/interactive` and returns the interactive URL to the merchant.
+3. **KYC on first settlement.** The first settlement for a merchant triggers the anchor KYC flow (SEP-24 interactive). Once the anchor reports KYC as verified, subsequent settlements are direct SEP-6 withdrawals with no KYC re-flow.
+4. **Status tracking.** Every off-ramp attempt is persisted in the indexer DB `settlements` table (see schema below). The service polls the anchor transaction status and updates the row until it reaches a terminal state (`completed` or `error`).
+5. **Webhook.** On terminal status, the backend emits the `payment.settled` webhook with the fiat settlement details (`fiat_amount`, `fiat_currency`, `anchor`, `bank_reference`).
+
+### `settlements` Table (indexer DB)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Internal settlement record ID |
+| `payment_id` | TEXT | FluxaPay payment ID |
+| `merchant_id` | TEXT | Merchant identifier |
+| `anchor` | TEXT | Anchor domain used for the off-ramp |
+| `anchor_txn_id` | TEXT | Anchor-side transaction ID |
+| `status` | TEXT | `pending`, `pending_anchor`, `pending_external`, `completed`, `error` |
+| `fiat_amount` | NUMERIC | Fiat amount disbursed to the merchant |
+| `fiat_currency` | TEXT | Fiat currency code (e.g. `USD`, `EUR`) |
+| `bank_reference` | TEXT | Bank transfer reference returned by the anchor |
+| `created_at` | TIMESTAMPTZ | Row creation time |
+| `updated_at` | TIMESTAMPTZ | Last status update time |
+
+### `payment.settled` Webhook Payload
+
+The `payment.settled` webhook now includes the fiat settlement details:
+
+```json
+{
+  "event": "payment.settled",
+  "payment_id": "pay_123",
+  "merchant_id": "mer_456",
+  "fiat_amount": "100.00",
+  "fiat_currency": "USD",
+  "anchor": "testanchor.stellar.org",
+  "bank_reference": "ANCHOR-REF-789"
+}
+```
+
+### Integration Test
+
+An integration test runs the off-ramp flow against a local SEP-6 test anchor (`stellar/anchor-reference-server`). The test configures a merchant anchor, confirms a payment, waits for the settlement window, and asserts that a `settlements` row reaches `completed` and that the `payment.settled` webhook carries the fiat fields above.
+
+---
+
 ## Actors and Components
 
 | Component | Location | Responsibility |
@@ -337,6 +387,40 @@ Content-Type: application/json
 - `set_merchant_anchor` is a new entry point with its own auth. Existing SDK callers without the method continue to function.
 - `SETTLEMENT_ANCHOR_WITHDRAW` is a new event topic. Old indexers ignore it (topic-filtered). New indexers subscribe.
 - No breaking changes to `settle_payment` signature; new fields are added as an additional event, not as new function arguments.
+
+---
+
+## Implementation Status
+
+The on-chain half of this design (`AnchorConfig` on `MerchantRecord`,
+`set_merchant_anchor`, and the `(PAYMENT, ANCHOR_WITHDRAW, merchant_id,
+anchor_domain)` event emitted from `settle_payment`) is implemented in
+`fluxapay/src/merchant_registry.rs` and `fluxapay/src/lib.rs`.
+
+The off-chain Settlement Service described above is implemented in
+`indexer/src/settlement.ts` (`SettlementService`), wired into the event
+subscription loop in `indexer/src/index.ts`:
+
+- `index.ts` decodes every `PAYMENT/ANCHOR_WITHDRAW` event with
+  `stellar-sdk`'s `scValToNative` and calls `SettlementService.settle(...)`.
+- `settle()` POSTs the SEP-6 `/transactions/withdrawal` request (falling
+  back to `sep24_endpoint` when a merchant has no `sep6_endpoint`
+  configured), then polls `/transaction?id=...` up to 10 times, 30 seconds
+  apart.
+- Progress is persisted in the `settlements` table
+  (`indexer/migrations/001_initial_schema.sql`) keyed by `payment_id`, so a
+  re-delivered event (e.g. after an RPC reorg) is a no-op once a terminal
+  status (`fiat_sent` / `failed`) has been reached.
+- `SETTLEMENT/FIAT_SENT` and `SETTLEMENT/FIAT_FAILED` are emitted to
+  listeners registered via `onSettlementEvent` (the indexer currently logs
+  them; a future callback-webhook notifier can subscribe the same way).
+
+This does not yet include the SEP-10 JWT auth step or the SEP-24 interactive
+fallback UI hand-off described above — those remain follow-up work. The
+dead-letter queue and ops dashboard described under "Security
+Considerations" and "Failure Handling" are also not yet implemented; today
+a failed settlement is simply recorded with `status = 'failed'` in the
+`settlements` table for manual follow-up.
 
 ---
 

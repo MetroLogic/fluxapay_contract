@@ -23,7 +23,8 @@ When a payment (or refund/dispute) transitions state, FluxaPay’s off-chain ind
 | `payment.created` | Charge created | `PAYMENT/CREATED` |
 | `payment.pending` | Awaiting on-chain confirmation | payment still `Pending` |
 | `payment.confirmed` | Deposit verified | `PAYMENT/CONFIRMED` / verify |
-| `payment.failed` | Expired or failed | `PAYMENT/EXPIRED` / failed status |
+| `payment.expired` | Payment TTL elapsed before funding | `PAYMENT/EXPIRED` |
+| `payment.failed` | Failed or invalid | failed status |
 | `payment.settled` | Merchant settled | `PAYMENT/SETTLED` |
 
 ### Refund events (`REFUND/*`)
@@ -75,6 +76,7 @@ All webhooks share a common envelope:
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique event delivery id (not the payment id) |
+| `event_id` | string | **Idempotency key** — stable across retries of the same event; use to deduplicate deliveries |
 | `type` | string | Event name (see tables above) |
 | `created_at` | number | Unix timestamp (seconds) |
 | `api_version` | string | Payload schema version |
@@ -84,6 +86,25 @@ All webhooks share a common envelope:
 | `data.currency` | string | e.g. `USDC` |
 | `data.status` | string | Current status snapshot |
 | `data.metadata` | object\|null | Merchant metadata from create |
+
+### Payment expired payload (`payment.expired`)
+
+```json
+{
+  "id": "evt_01HEXP1234567890",
+  "type": "payment.expired",
+  "created_at": 1710003600,
+  "api_version": "2024-01-01",
+  "data": {
+    "payment_id": "pay_abc123",
+    "merchant_id": "GA7NQQNLFQC7OQF6...MERCHANT",
+    "amount": "10000000",
+    "currency": "USDC",
+    "status": "expired",
+    "expires_at": 1710003600
+  }
+}
+```
 
 ### Refund payload extras
 
@@ -120,31 +141,102 @@ Dedup key for disputes: `dispute_id`.
 
 ---
 
-## HMAC-SHA256 signature verification
+## Webhook Signature Verification (HMAC-SHA256 & Ed25519)
+
+FluxaPay supports two signing algorithms for webhooks:
+- **HMAC-SHA256** (`hmac_sha256`, default): Uses a merchant-specific shared secret.
+- **Ed25519** (`ed25519`): Platform signs raw payloads with a dedicated Ed25519 keypair. Fast to verify, compact, and natively aligns with Stellar keypairs.
+
+The `X-FluxaPay-Signature` header is prefixed with the signing algorithm:
+- `sha256=<hex_signature>`
+- `ed25519=<hex_signature>`
 
 Every request includes:
 
 | Header | Description |
 |--------|-------------|
-| `X-FluxaPay-Signature` | Hex-encoded HMAC-SHA256 of `{timestamp}.{raw_body}` |
-| `X-FluxaPay-Timestamp` | Unix seconds when the webhook was signed |
+| `X-FluxaPay-Signature` | Algorithm-prefixed signature (`sha256=...` or `ed25519=...`) |
+| `X-FluxaPay-Timestamp` | Unix seconds when the webhook was delivered |
 | `X-FluxaPay-Event` | Same as JSON `type` (convenience) |
-
-### Algorithm
-
-1. Read the **raw request body** (do not re-serialize JSON).
-2. Build the signed payload: `` `${timestamp}.${rawBody}` ``
-3. Compute `HMAC-SHA256(webhook_secret, signed_payload)` → hex digest.
-4. Compare to `X-FluxaPay-Signature` using a **constant-time** compare.
-5. Reject if `|now - timestamp| > 300` seconds (replay window).
-
-Your webhook secret is issued in the merchant dashboard (or sandbox env). Never log the secret.
+| `X-FluxaPay-Delivery` | Unique delivery attempt ID |
 
 ---
 
+### Algorithm 1: HMAC-SHA256
+
+1. Read the **raw request body** (do not re-serialize JSON).
+2. Strip prefix `sha256=` from `X-FluxaPay-Signature`.
+3. Compute `HMAC-SHA256(webhook_secret, signed_payload)` where `signed_payload = ${timestamp}.${rawBody}`.
+4. Compare using constant-time comparison (`crypto.timingSafeEqual`).
+5. Reject if `|now - timestamp| > 300` seconds (replay window).
+
+---
+
+### Algorithm 2: Ed25519
+
+1. Retrieve the platform's active Ed25519 public key from `GET /webhooks/public-key`.
+2. Read the **raw request body**.
+3. Strip prefix `ed25519=` from `X-FluxaPay-Signature`.
+4. Verify the 64-byte Ed25519 signature over the raw payload buffer using the platform public key.
+5. Check `X-FluxaPay-Timestamp` to ensure the delivery is within the 300-second window.
+
+#### Active Public Key Endpoint
+
+```http
+GET /webhooks/public-key
+```
+
+Response:
+```json
+{
+  "algorithm": "ed25519",
+  "public_key": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+}
+```
+
+---
+
+### Key Rotation Procedure
+
+To rotate the platform's Ed25519 signing key without downtime:
+1. **Pre-publish new key**: Deploy the new public key alongside the existing active key in key management.
+2. **Grace period**: Backends can cache the public key with a TTL (e.g., 1 hour). When a signature verification fails, backends should re-fetch `GET /webhooks/public-key`.
+3. **Switch active key**: Set `WEBHOOK_ED25519_PRIVATE_KEY` and `WEBHOOK_ED25519_PUBLIC_KEY` in the indexer environment.
+4. **Verification fallback**: Verifiers should fall back to querying `/webhooks/public-key` on cache misses.
+
+---
+
+### Verification with the FluxaPay SDK
+
+The FluxaPay SDK provides `verifyWebhookSignature` which automatically detects the algorithm from the header prefix:
+
+```typescript
+import { verifyWebhookSignature } from "@fluxapay/sdk";
+
+// Verifies either HMAC-SHA256 or Ed25519 seamlessly:
+const isValid = verifyWebhookSignature(
+  rawBodyString,
+  req.headers["x-fluxapay-signature"],
+  secretOrPublicKey,
+);
+```
+
 ## Retry policy
 
-If your endpoint does not return HTTP `2xx`:
+Each webhook endpoint has its own retry policy. If your endpoint does not return HTTP `2xx`, FluxaPay retries using that endpoint’s configured policy.
+
+### Default policy
+
+The default policy matches the historical fixed behaviour:
+
+| Field | Default |
+|-------|---------|
+| `max_retries` | `3` |
+| `initial_delay_ms` | `1000` |
+| `backoff_multiplier` | `2.0` |
+| `max_delay_ms` | `300000` |
+
+With the defaults, delivery attempts are spaced as follows:
 
 | Attempt | Delay before retry |
 |---------|--------------------|
@@ -154,8 +246,30 @@ If your endpoint does not return HTTP `2xx`:
 | 4 (final) | ~4s |
 
 - **Max retries:** 3 retries after the first delivery (**4 total attempts**).
-- **Backoff:** exponential (base ~1s).
+- **Backoff:** exponential (base ~1s, multiplier 2.0).
 - After exhaustion, the event is marked failed; you can replay from the dashboard or indexer.
+
+### Customizing the retry policy
+
+Update an endpoint’s policy with `PATCH /v1/webhooks/{endpoint_id}`:
+
+```json
+{
+  "max_retries": 10,
+  "initial_delay_ms": 1000,
+  "backoff_multiplier": 2.0,
+  "max_delay_ms": 300000
+}
+```
+
+| Field | Type | Constraints | Description |
+|-------|------|-------------|-------------|
+| `max_retries` | integer | `1`–`20` | Retries after the first delivery |
+| `initial_delay_ms` | integer | `500`–`60000` | Delay before the first retry, in milliseconds |
+| `backoff_multiplier` | number | `1.0`–`3.0` | Multiplier applied to the delay after each attempt |
+| `max_delay_ms` | integer | `>= 1` | Upper bound on any single retry delay, in milliseconds |
+
+Values outside these ranges are rejected with a descriptive `400` error. The delay before retry `n` is `min(initial_delay_ms * backoff_multiplier^(n-1), max_delay_ms)`.
 
 Return `200` as soon as the event is durably queued; do heavy work out-of-band.
 
@@ -274,84 +388,33 @@ async def fluxapay_webhook(
     raw = await request.body()
     try:
         ts = int(x_fluxapay_timestamp)
-    except ValueError as exc:
-        raise HTTPException(401, "bad timestamp") from exc
+    except ValueError:
+        raise HTTPException(status_code=401, detail="invalid timestamp")
 
     if abs(time.time() - ts) > 300:
-        raise HTTPException(401, "stale timestamp")
+        raise HTTPException(status_code=401, detail="stale timestamp")
 
-    signed = f"{ts}.".encode() + raw
+    signed = f"{x_fluxapay_timestamp}.".encode() + raw
     expected = hmac.new(WEBHOOK_SECRET, signed, hashlib.sha256).hexdigest()
+
     if not hmac.compare_digest(expected, x_fluxapay_signature):
-        raise HTTPException(401, "invalid signature")
+        raise HTTPException(status_code=401, detail="invalid signature")
 
     event = await request.json()
-    payment_id = (event.get("data") or {}).get("payment_id")
-    # TODO: idempotent upsert keyed by payment_id (or event["id"])
-    return {"received": True, "payment_id": payment_id}
+    dedup_key = (
+        event.get("data", {}).get("payment_id")
+        or event.get("data", {}).get("dispute_id")
+        or event.get("id")
+    )
+
+    # TODO: skip if dedup_key already processed
+    print("received", event.get("type"), dedup_key)
+
+    return {"received": True}
 ```
 
 ---
 
-## Testing with the subscription daemon
+## Testing webhooks locally
 
-[`scripts/subscription-daemon.js`](../scripts/subscription-daemon.js) polls due subscriptions and invokes `process_due_subscriptions`. Use it locally to generate recurring payment lifecycle traffic that your webhook stack can observe end-to-end.
-
-### Setup
-
-1. Copy `.env.example` → `.env` and set:
-
-   ```bash
-   STELLAR_RPC_URL=https://soroban-testnet.stellar.org
-   CONTRACT_ID=C...
-   OPERATOR_SECRET=S...
-   POLL_INTERVAL_MS=60000
-   NETWORK_PASSPHRASE=Test SDF Network ; September 2015
-   SUBSCRIPTION_INDEX_PATH=/tmp/fluxapay_subscriptions.json
-   ```
-
-2. Ensure an off-chain index (or the JSON fallback file) lists active subscriptions.
-
-3. Run:
-
-   ```bash
-   node scripts/subscription-daemon.js
-   ```
-
-4. Point your local Express/FastAPI webhook at a tunnel (e.g. ngrok) and register that URL in sandbox.
-
-5. When the daemon bills a subscription, expect `payment.created` → `payment.confirmed` → (optionally) `payment.settled` deliveries.
-
-### Manual signature check
-
-```bash
-BODY='{"id":"evt_test","type":"payment.created","created_at":1710000000,"api_version":"2024-01-01","data":{"payment_id":"pay_test","amount":"100"}}'
-TS=$(date +%s)
-SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$FLUXAPAY_WEBHOOK_SECRET" | awk '{print $2}')
-curl -X POST http://localhost:3000/webhooks/fluxapay \
-  -H "Content-Type: application/json" \
-  -H "X-FluxaPay-Timestamp: $TS" \
-  -H "X-FluxaPay-Signature: $SIG" \
-  -H "X-FluxaPay-Event: payment.created" \
-  -d "$BODY"
-```
-
----
-
-## Security checklist
-
-- [ ] Verify HMAC on **raw** body
-- [ ] Enforce timestamp skew ≤ 5 minutes
-- [ ] Deduplicate with `payment_id` (or entity id)
-- [ ] Respond `2xx` only after durable accept
-- [ ] Rotate webhook secrets without downtime (accept dual secrets briefly)
-- [ ] Prefer HTTPS-only endpoints
-
----
-
-## Related docs
-
-- [On-chain event catalog](events.md)
-- [Architecture & settlement webhooks](architecture.md)
-- [SEP-6 / SEP-24 anchor callbacks](sep6-sep24-anchor-integration.md)
-- [Local invoke recipes](local-invoke.md)
+Use a tunnel (ngrok, cloudflared) to expose your local server, register the URL in the sandbox dashboard, and trigger events from the sandbox. Verify signatures with the sandbox secret before going live.

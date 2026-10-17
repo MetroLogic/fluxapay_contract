@@ -19,6 +19,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "node --input-type=module -e \"import { usePayment, useMerchant, useMerchantPayments, useRefund, useCreatePayment, useMerchantBalance, useStreamAccrual } from './dist/index.js'; for (const [name, fn] of Object.entries({ usePayment, useMerchant, useMerchantPayments, useRefund, useCreatePayment, useMerchantBalance, useStreamAccrual })) { if (typeof fn !== 'function') { throw new Error('Missing hook export: ' + name); } } console.log('All hooks exported correctly.');\"",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

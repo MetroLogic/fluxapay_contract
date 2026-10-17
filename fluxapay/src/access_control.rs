@@ -1,5 +1,19 @@
-use soroban_sdk::{contracterror, contracttype, vec, Address, Env, String, Symbol, Vec};
+// events::publish is deprecated in favour of #[contractevent]; migration tracked separately.
+#![allow(deprecated)]
+#![allow(dead_code)]
 use crate::merchant_registry::KycTier;
+use soroban_sdk::{contracterror, contracttype, vec, Address, Env, Symbol, Vec};
+
+/// Canonical role registry — single source of truth for `grant_role` /
+/// `revoke_role` validation (Issue #815). Typo'd or invented role symbols
+/// (e.g. `SETLMENT_OPERATOR`) are rejected with `UnknownRole`.
+pub const KNOWN_ROLES: &[&str] = &[
+    "ADMIN",
+    "ORACLE",
+    "MERCHANT",
+    "SETTLEMENT_OPERATOR",
+    "ARBITRATOR",
+];
 
 // Role-based access control implementation
 pub fn role_admin(env: &Env) -> Symbol {
@@ -22,6 +36,16 @@ pub fn role_arbitrator(env: &Env) -> Symbol {
     Symbol::new(env, "ARBITRATOR")
 }
 
+/// Returns `true` when `role` is listed in [`KNOWN_ROLES`].
+pub fn is_known_role(env: &Env, role: &Symbol) -> bool {
+    for name in KNOWN_ROLES {
+        if *role == Symbol::new(env, name) {
+            return true;
+        }
+    }
+    false
+}
+
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccessControlError {
@@ -39,6 +63,8 @@ pub enum AccessControlError {
     ProposalThresholdNotMet = 12,
     PendingAdminTransfer = 13,
     InvalidRecovery = 14,
+    /// Role symbol is not in the [`KNOWN_ROLES`] registry.
+    UnknownRole = 15,
 }
 
 #[contracttype]
@@ -99,6 +125,10 @@ pub enum AccessControlDataKey {
     Proposal(u64),
 }
 
+/// Issue #764: Minimum timelock period before proposed admin transfer can be accepted.
+/// ~1 day in ledgers (assuming ~5 seconds per ledger on Stellar network: 86,400 / 5 = 17,280 ledgers).
+pub const MIN_TIMELOCK_LEDGERS: u32 = 17_280;
+
 pub struct AccessControl;
 
 impl AccessControl {
@@ -107,32 +137,32 @@ impl AccessControl {
             .persistent()
             .set(&AccessControlDataKey::Admin, &admin);
         Self::grant_role_internal(env, &role_admin(env), &admin);
-        
+
         // Set default multi-sig config: threshold 1, only admin as signer
         let signers = vec![env, admin.clone()];
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::MultisigConfig, &(1u32, signers));
-        
+
         // Initialize next proposal nonce
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::NextProposalNonce, &0u64);
-        
+
         // Set default admin transfer lock-in to 7 days
         let lock_in = 7 * 24 * 60 * 60; // 7 days in seconds
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::AdminTransferLockIn, &lock_in);
     }
-    
+
     pub fn initialize_with_recovery(env: &Env, admin: Address, recovery_key: Address) {
         Self::initialize(env, admin.clone());
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::RecoveryKey, &recovery_key);
     }
-    
+
     pub fn set_multisig_config(
         env: &Env,
         admin: Address,
@@ -143,7 +173,7 @@ impl AccessControl {
         if !Self::has_role(env, &role_admin(env), &admin) {
             return Err(AccessControlError::Unauthorized);
         }
-        if threshold == 0 || threshold > signers.len() as u32 {
+        if threshold == 0 || threshold > signers.len() {
             return Err(AccessControlError::InvalidAdmin);
         }
         env.storage()
@@ -151,7 +181,7 @@ impl AccessControl {
             .set(&AccessControlDataKey::MultisigConfig, &(threshold, signers));
         Ok(())
     }
-    
+
     pub fn get_multisig_config(env: &Env) -> (u32, Vec<Address>) {
         env.storage()
             .persistent()
@@ -201,11 +231,7 @@ impl AccessControl {
         Ok(nonce)
     }
 
-    pub fn vote_proposal(
-        env: &Env,
-        signer: Address,
-        nonce: u64,
-    ) -> Result<(), AccessControlError> {
+    pub fn vote_proposal(env: &Env, signer: Address, nonce: u64) -> Result<(), AccessControlError> {
         signer.require_auth();
         let (_, signers) = Self::get_multisig_config(env);
         if !signers.iter().any(|s| s == signer) {
@@ -240,7 +266,10 @@ impl AccessControl {
         Ok(())
     }
 
-    pub fn execute_proposal(env: &Env, nonce: u64) -> Result<Option<AdminAction>, AccessControlError> {
+    pub fn execute_proposal(
+        env: &Env,
+        nonce: u64,
+    ) -> Result<Option<AdminAction>, AccessControlError> {
         let (threshold, _) = Self::get_multisig_config(env);
         let proposal: AdminProposal = env
             .storage()
@@ -304,7 +333,7 @@ impl AccessControl {
 
         Ok(remaining_action)
     }
-    
+
     pub fn get_proposal(env: &Env, nonce: u64) -> Option<AdminProposal> {
         env.storage()
             .persistent()
@@ -322,12 +351,16 @@ impl AccessControl {
             return Err(AccessControlError::Unauthorized);
         }
 
+        if !is_known_role(env, &role) {
+            return Err(AccessControlError::UnknownRole);
+        }
+
         if Self::has_role(env, &role, &account) {
             return Err(AccessControlError::RoleAlreadyGranted);
         }
 
         Self::grant_role_internal(env, &role, &account);
-        
+
         // Emit event
         let now = env.ledger().timestamp();
         env.events().publish(
@@ -337,10 +370,10 @@ impl AccessControl {
             ),
             (role, account.clone(), admin.clone(), now),
         );
-        
+
         Ok(())
     }
-    
+
     const REVOCATION_COOLDOWN_SECS: u64 = 24 * 60 * 60; // 24 hours
 
     pub fn revoke_role(
@@ -354,13 +387,17 @@ impl AccessControl {
             return Err(AccessControlError::Unauthorized);
         }
 
+        if !is_known_role(env, &role) {
+            return Err(AccessControlError::UnknownRole);
+        }
+
         if !Self::has_role(env, &role, &account) {
             return Err(AccessControlError::RoleNotGranted);
         }
-        
+
         // Check if this is a critical role needing cooldown
         let is_critical = role == role_oracle(env) || role == role_settlement_operator(env);
-        
+
         if is_critical {
             // Start cooldown period
             let pending = PendingRevocation {
@@ -368,10 +405,11 @@ impl AccessControl {
                 account: account.clone(),
                 created_at: env.ledger().timestamp(),
             };
-            env.storage()
-                .persistent()
-                .set(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone()), &pending);
-                
+            env.storage().persistent().set(
+                &AccessControlDataKey::PendingRevocation(role.clone(), account.clone()),
+                &pending,
+            );
+
             env.events().publish(
                 (
                     Symbol::new(env, "ACCESS_CONTROL"),
@@ -379,12 +417,12 @@ impl AccessControl {
                 ),
                 (role, account.clone(), pending.created_at),
             );
-                
+
             Ok(())
         } else {
             // Revoke immediately for non-critical roles
             Self::revoke_role_internal(env, &role, &account);
-            
+
             let now = env.ledger().timestamp();
             env.events().publish(
                 (
@@ -393,11 +431,11 @@ impl AccessControl {
                 ),
                 (role, account.clone(), admin.clone(), now),
             );
-            
+
             Ok(())
         }
     }
-    
+
     pub fn finalize_revocation(
         env: &Env,
         admin: Address,
@@ -408,26 +446,33 @@ impl AccessControl {
         if !Self::has_role(env, &role_admin(env), &admin) {
             return Err(AccessControlError::Unauthorized);
         }
-        
-        let pending: PendingRevocation = env.storage()
+
+        let pending: PendingRevocation = env
+            .storage()
             .persistent()
-            .get(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone()))
+            .get(&AccessControlDataKey::PendingRevocation(
+                role.clone(),
+                account.clone(),
+            ))
             .ok_or(AccessControlError::NoPendingRevocation)?;
-            
+
         let now = env.ledger().timestamp();
         if now < pending.created_at + Self::REVOCATION_COOLDOWN_SECS {
             return Err(AccessControlError::RevocationCooldownActive);
         }
-        
+
         if !Self::has_role(env, &role, &account) {
             return Err(AccessControlError::RoleNotGranted);
         }
-        
+
         Self::revoke_role_internal(env, &role, &account);
         env.storage()
             .persistent()
-            .remove(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone()));
-            
+            .remove(&AccessControlDataKey::PendingRevocation(
+                role.clone(),
+                account.clone(),
+            ));
+
         env.events().publish(
             (
                 Symbol::new(env, "ACCESS_CONTROL"),
@@ -435,10 +480,10 @@ impl AccessControl {
             ),
             (role, account.clone(), admin.clone(), now),
         );
-        
+
         Ok(())
     }
-    
+
     pub fn cancel_revocation(
         env: &Env,
         admin: Address,
@@ -449,17 +494,25 @@ impl AccessControl {
         if !Self::has_role(env, &role_admin(env), &admin) {
             return Err(AccessControlError::Unauthorized);
         }
-        
-        if !env.storage()
+
+        if !env
+            .storage()
             .persistent()
-            .has(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone())) {
+            .has(&AccessControlDataKey::PendingRevocation(
+                role.clone(),
+                account.clone(),
+            ))
+        {
             return Err(AccessControlError::NoPendingRevocation);
         }
-        
+
         env.storage()
             .persistent()
-            .remove(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone()));
-            
+            .remove(&AccessControlDataKey::PendingRevocation(
+                role.clone(),
+                account.clone(),
+            ));
+
         let now = env.ledger().timestamp();
         env.events().publish(
             (
@@ -468,10 +521,10 @@ impl AccessControl {
             ),
             (role, account.clone(), admin.clone(), now),
         );
-        
+
         Ok(())
     }
-    
+
     pub fn emergency_revoke_role(
         env: &Env,
         admin: Address,
@@ -482,22 +535,30 @@ impl AccessControl {
         if !Self::has_role(env, &role_admin(env), &admin) {
             return Err(AccessControlError::Unauthorized);
         }
-        
+
         if !Self::has_role(env, &role, &account) {
             return Err(AccessControlError::RoleNotGranted);
         }
-        
+
         Self::revoke_role_internal(env, &role, &account);
-        
+
         // Clean up any pending revocation if exists
-        if env.storage()
+        if env
+            .storage()
             .persistent()
-            .has(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone())) {
+            .has(&AccessControlDataKey::PendingRevocation(
+                role.clone(),
+                account.clone(),
+            ))
+        {
             env.storage()
                 .persistent()
-                .remove(&AccessControlDataKey::PendingRevocation(role.clone(), account.clone()));
+                .remove(&AccessControlDataKey::PendingRevocation(
+                    role.clone(),
+                    account.clone(),
+                ));
         }
-        
+
         let now = env.ledger().timestamp();
         env.events().publish(
             (
@@ -506,11 +567,15 @@ impl AccessControl {
             ),
             (role, account.clone(), admin.clone(), now),
         );
-        
+
         Ok(())
     }
-    
-    pub fn get_pending_revocation(env: &Env, role: Symbol, account: Address) -> Option<PendingRevocation> {
+
+    pub fn get_pending_revocation(
+        env: &Env,
+        role: Symbol,
+        account: Address,
+    ) -> Option<PendingRevocation> {
         env.storage()
             .persistent()
             .get(&AccessControlDataKey::PendingRevocation(role, account))
@@ -537,7 +602,7 @@ impl AccessControl {
         }
 
         Self::revoke_role_internal(env, &role, &account);
-        
+
         let now = env.ledger().timestamp();
         env.events().publish(
             (
@@ -546,7 +611,7 @@ impl AccessControl {
             ),
             (role, account.clone(), now),
         );
-        
+
         Ok(())
     }
 
@@ -567,21 +632,24 @@ impl AccessControl {
         {
             return Err(AccessControlError::PendingAdminTransfer);
         }
-        
-        // Start pending transfer instead of immediate
-        let now = env.ledger().timestamp();
-        env.storage()
-            .persistent()
-            .set(&AccessControlDataKey::PendingAdminTransfer, &(new_admin.clone(), now));
-            
+
+        let current_ledger = env.ledger().sequence();
+        let earliest_acceptance_ledger = current_ledger + MIN_TIMELOCK_LEDGERS;
+
+        // Stores pending admin and the earliest acceptance ledger
+        env.storage().persistent().set(
+            &AccessControlDataKey::PendingAdminTransfer,
+            &(new_admin.clone(), earliest_acceptance_ledger),
+        );
+
         env.events().publish(
             (
                 Symbol::new(env, "ACCESS_CONTROL"),
                 Symbol::new(env, "ADMIN_TRANSFER_PROPOSED"),
             ),
-            (new_admin.clone(), now),
+            (new_admin.clone(), earliest_acceptance_ledger),
         );
-        
+
         Ok(())
     }
 
@@ -592,24 +660,28 @@ impl AccessControl {
     ) -> Result<(), AccessControlError> {
         Self::propose_admin(env, current_admin, new_admin)
     }
-    
-    pub fn claim_admin(
-        env: &Env,
-        new_admin: Address,
-    ) -> Result<(), AccessControlError> {
+
+    /// Issue #764: Accept admin transfer after timelock period has elapsed.
+    /// Panics if called before the timelock expires or by a non-pending address.
+    pub fn accept_admin(env: &Env, new_admin: Address) -> Result<(), AccessControlError> {
         new_admin.require_auth();
-        let (pending_admin, _proposed_at): (Address, u64) = env.storage()
+        let (pending_admin, earliest_ledger): (Address, u32) = env
+            .storage()
             .persistent()
             .get(&AccessControlDataKey::PendingAdminTransfer)
-            .ok_or(AccessControlError::PendingAdminTransfer)?;
-            
+            .unwrap_or_else(|| panic!("No pending admin transfer"));
+
         if pending_admin != new_admin {
-            return Err(AccessControlError::Unauthorized);
+            panic!("Caller is not the pending admin");
         }
 
-        let now = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < earliest_ledger {
+            panic!("Admin transfer timelock has not expired");
+        }
+
         let old_admin = Self::get_admin(env).unwrap();
-        
+
         Self::revoke_role_internal(env, &role_admin(env), &old_admin);
         Self::grant_role_internal(env, &role_admin(env), &new_admin);
 
@@ -619,7 +691,8 @@ impl AccessControl {
         env.storage()
             .persistent()
             .remove(&AccessControlDataKey::PendingAdminTransfer);
-            
+
+        let now = env.ledger().timestamp();
         env.events().publish(
             (
                 Symbol::new(env, "ACCESS_CONTROL"),
@@ -631,13 +704,15 @@ impl AccessControl {
         Ok(())
     }
 
-    pub fn accept_admin_transfer(
-        env: &Env,
-        new_admin: Address,
-    ) -> Result<(), AccessControlError> {
-        Self::claim_admin(env, new_admin)
+    pub fn claim_admin(env: &Env, new_admin: Address) -> Result<(), AccessControlError> {
+        Self::accept_admin(env, new_admin)
     }
-    
+
+    pub fn accept_admin_transfer(env: &Env, new_admin: Address) -> Result<(), AccessControlError> {
+        Self::accept_admin(env, new_admin)
+    }
+
+    /// Issue #764: Abort pending admin transfer, clearing the pending proposal.
     pub fn cancel_admin_transfer(
         env: &Env,
         current_admin: Address,
@@ -646,21 +721,32 @@ impl AccessControl {
         if !Self::has_role(env, &role_admin(env), &current_admin) {
             return Err(AccessControlError::Unauthorized);
         }
-        
-        if !env.storage()
+
+        if !env
+            .storage()
             .persistent()
-            .has(&AccessControlDataKey::PendingAdminTransfer) {
+            .has(&AccessControlDataKey::PendingAdminTransfer)
+        {
             return Err(AccessControlError::PendingAdminTransfer);
         }
-        
+
         env.storage()
             .persistent()
             .remove(&AccessControlDataKey::PendingAdminTransfer);
-            
+
+        let now = env.ledger().timestamp();
+        env.events().publish(
+            (
+                Symbol::new(env, "ACCESS_CONTROL"),
+                Symbol::new(env, "ADMIN_TRANSFER_CANCELLED"),
+            ),
+            (current_admin, now),
+        );
+
         Ok(())
     }
-    
-    pub fn get_pending_admin_transfer(env: &Env) -> Option<(Address, u64)> {
+
+    pub fn get_pending_admin_transfer(env: &Env) -> Option<(Address, u32)> {
         env.storage()
             .persistent()
             .get(&AccessControlDataKey::PendingAdminTransfer)
@@ -669,7 +755,7 @@ impl AccessControl {
     pub fn get_admin(env: &Env) -> Option<Address> {
         env.storage().persistent().get(&AccessControlDataKey::Admin)
     }
-    
+
     pub fn set_recovery_key(
         env: &Env,
         admin: Address,
@@ -684,37 +770,40 @@ impl AccessControl {
             .set(&AccessControlDataKey::RecoveryKey, &recovery_key);
         Ok(())
     }
-    
+
     pub fn get_recovery_key(env: &Env) -> Option<Address> {
         env.storage()
             .persistent()
             .get(&AccessControlDataKey::RecoveryKey)
     }
-    
+
     pub fn recovery_initiate_admin_transfer(
         env: &Env,
         recovery_key: Address,
         new_admin: Address,
     ) -> Result<(), AccessControlError> {
         recovery_key.require_auth();
-        let stored_recovery: Address = env.storage()
+        let stored_recovery: Address = env
+            .storage()
             .persistent()
             .get(&AccessControlDataKey::RecoveryKey)
             .ok_or(AccessControlError::RecoveryKeyNotSet)?;
-            
+
         if recovery_key != stored_recovery {
             return Err(AccessControlError::Unauthorized);
         }
-        
+
         let now = env.ledger().timestamp();
-        let lock_in = 30 * 24 * 60 * 60; // 30 days for recovery-initiated transfer
-        env.storage()
-            .persistent()
-            .set(&AccessControlDataKey::PendingAdminTransfer, &(new_admin.clone(), now));
+        let earliest_ledger = env.ledger().sequence() + MIN_TIMELOCK_LEDGERS;
+        env.storage().persistent().set(
+            &AccessControlDataKey::PendingAdminTransfer,
+            &(new_admin.clone(), earliest_ledger),
+        );
+        let lock_in = 7 * 24 * 60 * 60; // 7 days in seconds
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::AdminTransferLockIn, &lock_in);
-            
+
         env.events().publish(
             (
                 Symbol::new(env, "ACCESS_CONTROL"),
@@ -722,7 +811,7 @@ impl AccessControl {
             ),
             (new_admin.clone(), now),
         );
-        
+
         Ok(())
     }
 

@@ -9,8 +9,62 @@
 //! - Confirmed → Settled (payment is settled)
 //! - Confirmed → Disputed (dispute is created on confirmed payment)
 //! - Disputed → Settled (dispute is resolved with settlement)
+//!
+//! ## Transition table
+//!
+//! | From          | To            |
+//! |---------------|---------------|
+//! | Pending       | Confirmed     |
+//! | Pending       | Expired       |
+//! | Pending       | Failed        |
+//! | Pending       | PartiallyPaid |
+//! | Pending       | Overpaid      |
+//! | Confirmed     | Settled       |
+//! | Confirmed     | Disputed      |
+//! | Disputed      | Settled       |
+//!
+//! Any pair not listed above is invalid.
 
 use crate::{Error, PaymentStatus};
+
+/// Returns `true` if the transition from `from` to `to` is allowed by the
+/// payment state machine. This is the single source of truth for valid
+/// transitions; adding a new status only requires updating this match.
+fn is_valid_transition(from: &PaymentStatus, to: &PaymentStatus) -> bool {
+    matches!(
+        (from, to),
+        // From Pending
+        (PaymentStatus::Pending, PaymentStatus::Confirmed)
+            | (PaymentStatus::Pending, PaymentStatus::Expired)
+            | (PaymentStatus::Pending, PaymentStatus::Failed)
+            | (PaymentStatus::Pending, PaymentStatus::PartiallyPaid)
+            | (PaymentStatus::Pending, PaymentStatus::Overpaid)
+            // From PartiallyPaid (Issue #767)
+            | (PaymentStatus::PartiallyPaid, PaymentStatus::PartiallyPaid)
+            | (PaymentStatus::PartiallyPaid, PaymentStatus::Confirmed)
+            | (PaymentStatus::PartiallyPaid, PaymentStatus::Overpaid)
+            | (PaymentStatus::PartiallyPaid, PaymentStatus::Expired)
+            | (PaymentStatus::PartiallyPaid, PaymentStatus::Failed)
+            // From Confirmed
+            | (PaymentStatus::Confirmed, PaymentStatus::Settled)
+            | (PaymentStatus::Confirmed, PaymentStatus::Disputed)
+            // From Disputed
+            | (PaymentStatus::Disputed, PaymentStatus::Settled)
+    )
+}
+
+/// Validates a payment status transition without performing it.
+///
+/// Returns `Ok(())` if the transition from `from` to `to` is valid, or an
+/// `InvalidStatusTransition` error otherwise. Callers that need the resulting
+/// status should use [`transition_status`].
+pub fn validate_transition(from: PaymentStatus, to: PaymentStatus) -> Result<(), Error> {
+    if is_valid_transition(&from, &to) {
+        Ok(())
+    } else {
+        Err(Error::InvalidStatusTransition)
+    }
+}
 
 /// Validates and transitions a payment between statuses.
 /// Returns the new status or an InvalidStatusTransition error if the transition is invalid.
@@ -18,26 +72,8 @@ pub fn transition_status(
     current: &PaymentStatus,
     next: PaymentStatus,
 ) -> Result<PaymentStatus, Error> {
-    let is_valid = match (current, &next) {
-        // From Pending
-        (PaymentStatus::Pending, PaymentStatus::Confirmed) => true,
-        (PaymentStatus::Pending, PaymentStatus::Expired) => true,
-        (PaymentStatus::Pending, PaymentStatus::Failed) => true,
-        (PaymentStatus::Pending, PaymentStatus::PartiallyPaid) => true,
-        (PaymentStatus::Pending, PaymentStatus::Overpaid) => true,
-
-        // From Confirmed
-        (PaymentStatus::Confirmed, PaymentStatus::Settled) => true,
-
-        // Invalid transitions (including circular, backward, or impossible transitions)
-        _ => false,
-    };
-
-    if is_valid {
-        Ok(next)
-    } else {
-        Err(Error::InvalidStatusTransition)
-    }
+    validate_transition(current.clone(), next.clone())?;
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -87,6 +123,20 @@ mod tests {
     }
 
     #[test]
+    fn test_valid_confirmed_to_disputed() {
+        let result = transition_status(&PaymentStatus::Confirmed, PaymentStatus::Disputed);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PaymentStatus::Disputed);
+    }
+
+    #[test]
+    fn test_valid_disputed_to_settled() {
+        let result = transition_status(&PaymentStatus::Disputed, PaymentStatus::Settled);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PaymentStatus::Settled);
+    }
+
+    #[test]
     fn test_invalid_confirmed_to_pending() {
         let result = transition_status(&PaymentStatus::Confirmed, PaymentStatus::Pending);
         assert!(result.is_err());
@@ -120,5 +170,15 @@ mod tests {
     fn test_same_status_invalid() {
         let result = transition_status(&PaymentStatus::Confirmed, PaymentStatus::Confirmed);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_transition_ok() {
+        assert!(validate_transition(PaymentStatus::Pending, PaymentStatus::Confirmed).is_ok());
+    }
+
+    #[test]
+    fn test_validate_transition_err() {
+        assert!(validate_transition(PaymentStatus::Settled, PaymentStatus::Pending).is_err());
     }
 }

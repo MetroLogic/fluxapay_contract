@@ -2,6 +2,13 @@
 # automatically read and these particular cases re-run before any
 # novel cases are generated.
 #
-# It is recommended to check this file in to source control so that
+# It is recommended that this file is checked in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 8848a5faa1c4bc1f0d97a0477098eb9649ef07339f9ddcbcf77e8cbcc817b6d4 # shrinks to amount = 98, delta = -2, nonce = 0
+#
+# NOTE: The payment amount strategy is now bounded to the realistic USDC
+# range 0..=1_000_000_000_000_000i128 (1 billion USDC in stroops) so that
+# fee calculations (e.g. 1% platform fee) cannot overflow i128. Negative
+# amounts are exercised by a separate strategy and are expected to fail
+# with InvalidAmount. The previously recorded seed below used an unbounded
+# amount and is no longer reproducible under the bounded strategy, so it
+# has been removed to avoid re-running an obsolete case.

@@ -17,20 +17,50 @@ for the full reference):
 
 ```bash
 # 1. Request a challenge transaction for your merchant account
-curl "https://api.fluxapay.example/auth/challenge?account=GABC...YOUR_ACCOUNT"
+curl "https://api.fluxapay.example/auth?account=GABC...YOUR_ACCOUNT"
 
 # 2. Sign the returned transaction XDR with your Stellar keypair (client-side),
 #    then exchange it for a JWT
-curl -X POST https://api.fluxapay.example/auth/token \
+curl -X POST https://api.fluxapay.example/auth \
   -H "Content-Type: application/json" \
-  -d '{"transaction": "<signed XDR>", "account": "GABC...YOUR_ACCOUNT"}'
+  -d '{"transaction": "<signed XDR>"}'
 ```
 
-The response is a JWT containing `merchant_id`, `iat`, and `exp` claims,
-valid for 24 hours. Include it as `Authorization: Bearer <token>` on
+The response is a JWT containing `sub`, `merchant_id`, `iat`, and `exp` claims.
+Its lifetime defaults to 24 hours and can be configured with `JWT_EXPIRY_SECS`.
+Include it as `Authorization: Bearer <token>` on
 subsequent API calls. The SDK's `SEP10Authenticator` (`sdk/src/sep10.ts`)
 implements the client-side signing/verification flow if you'd rather not
 call the REST endpoints directly.
+
+### Auto-refreshing expiring tokens (Issue #793)
+
+Long-running applications shouldn't have to re-authenticate manually when the
+JWT expires. Pass an optional `refreshCredentials` callback to `FluxapayClient`
+and the SDK will transparently renew the token before it expires:
+
+```typescript
+const client = new FluxapayClient({
+  network: "testnet",
+  contractId: process.env.PAYMENT_PROCESSOR_ID!,
+  merchantRegistryContractId: process.env.MERCHANT_REGISTRY_ID!,
+  // Called automatically when the current token is within
+  // `refreshThresholdMs` (default 5 minutes) of expiry.
+  refreshCredentials: async () => {
+    // Re-run your SEP-10 challenge/sign/token exchange and return the new JWT.
+    return await sep10.authenticate();
+  },
+  // Optional: override the default 5-minute refresh threshold.
+  refreshThresholdMs: 5 * 60 * 1000,
+});
+```
+
+Behavior:
+
+- Before each authenticated request the SDK checks `token.exp - Date.now() < refreshThresholdMs`.
+- If the token is within the threshold, `refreshCredentials` is invoked once and the new token is stored and used for the request.
+- Concurrent requests during a refresh are queued behind a mutex, so only one refresh happens and the others wait for the new token.
+- If `refreshCredentials` throws, the original `401 Unauthorized` is surfaced to the caller.
 
 ## 2. Install the SDK
 
@@ -79,7 +109,25 @@ const payment = await client.createPayment({
   depositAddress: "GABC...MERCHANT_DEPOSIT_ADDRESS",
   durationSecs: 3600n, // charge expires in 1 hour
 });
+
+// Issue #767: Partial Payments
+// Set allowPartial: true to let customers fund a payment across multiple transactions:
+const partialPayment = await client.createPayment({
+  paymentId: "payment_partial_001",
+  merchantId: "merchant_acme_001",
+  amount: 50_000_000n, // 5.00 USDC
+  currency: "USDC",
+  depositAddress: "GABC...MERCHANT_DEPOSIT_ADDRESS",
+  durationSecs: 7200n,
+  allowPartial: true, // Enables installment / multi-transaction funding
+});
 ```
+
+When `allowPartial: true` is set:
+- Customers can fund the payment in increments via `confirm_payment`.
+- Each increment emits a `PAYMENT/PARTIAL_RECEIVED` event with `(amount_received, total_received, remaining)`.
+- The payment transitions to `Confirmed` once `total_received >= amount`.
+- If the payment expires before reaching the required amount, all partially contributed funds are automatically refunded to the payer.
 
 ## 6. Share the payment link with your customer
 
@@ -90,6 +138,7 @@ const { linkId, shareableUrl, qrCodeData } = await client.createPaymentLink({
   merchant: "GABC...MERCHANT_ADDRESS",
   amount: 10_000_000n,
   usdcToken: process.env.USDC_TOKEN_ADDRESS!,
+  maxUses: 1, // Optional cap on total redemptions (e.g., single-use promo)
 });
 
 console.log(`Send this link to your customer: ${shareableUrl}`);
@@ -149,6 +198,23 @@ console.log(`Merchant will be settled ${settlementAmount} NGN`);
 ```
 
 Settlement events (`payment.settled`) are emitted the same way as `payment.confirmed` — see [docs/webhooks.md](webhooks.md) for the full event list.
+
+## 9. Track payment link analytics
+
+Measure how well a payment link converts by comparing views against completed payments. The on-chain `get_link_stats(link_id)` view returns `views`, `completions`, and `total_volume` atomically, and the API exposes the same data with a derived conversion rate:
+
+```typescript
+const stats = await client.getLinkStats(linkId);
+console.log(stats);
+// {
+//   views: 40,
+//   completions: 5,
+//   total_volume: 50000000n, // 5.00 USDC (7 decimals)
+//   conversion_rate: "12.5%",
+// }
+```
+
+The endpoint (`GET /v1/payment-links/{id}/stats`) requires merchant authentication — include your SEP-10 JWT as `Authorization: Bearer <token>`. `conversion_rate` is returned as a string percentage (e.g. `"12.5%"`), computed as `completions / views`.
 
 ## Common errors and fixes
 

@@ -1,0 +1,601 @@
+//! Unit tests for four feature additions:
+//!
+//! * #638 — idempotency-key support in `create_refund` / `create_refund_idempotent`
+//! * #637 — `PaymentLinkManager::batch_create_links`
+//! * #635 — `SUBSCRIPTION/PLAN_CREATED` / `SUBSCRIPTION/PLAN_DEACTIVATED` events
+//! * #632 — `PaymentProcessor::create_payment_link_invoice`
+
+use crate::{
+    CreateLinkArgs, Error, Invoice, LineItem, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
+    PaymentLinkManagerClient, PaymentProcessor, PaymentProcessorClient, RefundManager,
+    RefundManagerClient,
+};
+use soroban_sdk::{
+    testutils::{Address as _, Events, Ledger as _},
+    vec, Address, Env, IntoVal, String, Symbol, TryIntoVal, Vec,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
+    let contract_id = env.register(RefundManager, ());
+    let client = RefundManagerClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let usdc_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    client.initialize_refund_manager(&admin, &usdc_token);
+    (admin, client)
+}
+
+/// Register a `Confirmed` payment on the RefundManager and advance the ledger
+/// past the refund cooldown window so `create_refund*` can succeed.
+fn refundable_payment(env: &Env, client: &RefundManagerClient, payment_id: &String, amount: i128) {
+    let merchant = Address::generate(env);
+    client.register_payment(payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
+    // cooldown default is 300s; jump well past it.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 30 * 24 * 60 * 60);
+}
+
+fn events_contain(env: &Env, topic0: &str, topic1: &str) -> bool {
+    env.events().all().events().iter().any(|e| {
+        let topics: Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b)) if a == Symbol::new(env, topic0) && b == Symbol::new(env, topic1)
+        )
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #638 — refund idempotency key
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn refund_no_idempotency_key_still_works() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_refund_manager(&env);
+    let pid = String::from_str(&env, "pay_no_key");
+    refundable_payment(&env, &client, &pid, 1_000);
+    let requester = Address::generate(&env);
+
+    let rid = client.create_refund(&pid, &400i128, &String::from_str(&env, "r"), &requester);
+    assert_eq!(client.get_refund(&rid).amount, 400);
+}
+
+#[test]
+fn refund_duplicate_key_same_params_returns_existing_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_refund_manager(&env);
+    let pid = String::from_str(&env, "pay_dup_ok");
+    refundable_payment(&env, &client, &pid, 1_000);
+    let requester = Address::generate(&env);
+    let key = Some(String::from_str(&env, "idem-1"));
+    let reason = String::from_str(&env, "duplicate submit");
+
+    let first = client.create_refund_idempotent(&pid, &400i128, &reason, &requester, &key);
+    let second = client.create_refund_idempotent(&pid, &400i128, &reason, &requester, &key);
+
+    assert_eq!(first, second);
+    // exactly one refund exists for the payment
+    assert_eq!(client.get_payment_refunds(&pid).len(), 1);
+}
+
+#[test]
+fn refund_duplicate_key_different_params_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_refund_manager(&env);
+    let pid = String::from_str(&env, "pay_dup_bad");
+    refundable_payment(&env, &client, &pid, 1_000);
+    let requester = Address::generate(&env);
+    let key = Some(String::from_str(&env, "idem-2"));
+
+    let _ = client.create_refund_idempotent(
+        &pid,
+        &400i128,
+        &String::from_str(&env, "first"),
+        &requester,
+        &key,
+    );
+    // Same key, different amount → DuplicateIdempotencyKey
+    let res = client.try_create_refund_idempotent(
+        &pid,
+        &500i128,
+        &String::from_str(&env, "first"),
+        &requester,
+        &key,
+    );
+    assert_eq!(res, Err(Ok(Error::DuplicateIdempotencyKey)));
+}
+
+#[test]
+fn refund_unique_keys_create_distinct_refunds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_refund_manager(&env);
+    let pid = String::from_str(&env, "pay_unique");
+    refundable_payment(&env, &client, &pid, 10_000);
+    let requester = Address::generate(&env);
+    let reason = String::from_str(&env, "r");
+
+    let a = client.create_refund_idempotent(
+        &pid,
+        &400i128,
+        &reason,
+        &requester,
+        &Some(String::from_str(&env, "k-a")),
+    );
+    let b = client.create_refund_idempotent(
+        &pid,
+        &400i128,
+        &reason,
+        &requester,
+        &Some(String::from_str(&env, "k-b")),
+    );
+    assert_ne!(a, b);
+    assert_eq!(client.get_payment_refunds(&pid).len(), 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #637 — batch_create_links
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn link_args(env: &Env, id: &str) -> CreateLinkArgs {
+    CreateLinkArgs {
+        link_id: String::from_str(env, id),
+        amount: Some(1_000i128),
+        currency: Symbol::new(env, "USDC"),
+        description: String::from_str(env, "batch"),
+        expires_at: None,
+        max_uses: None,
+        direct_transfer: false,
+        metadata: None,
+        fiat: MaybeFiatConfig::None,
+        base_url: None,
+        single_use: false,
+    }
+}
+
+#[test]
+fn batch_create_links_creates_all_and_they_are_retrievable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PaymentLinkManager, ());
+    let client = PaymentLinkManagerClient::new(&env, &contract_id);
+    let merchant = Address::generate(&env);
+    client.initialize(&merchant).unwrap();
+    client.grant_merchant_role(&merchant, &merchant);
+
+    let batch = vec![
+        &env,
+        link_args(&env, "batch_1"),
+        link_args(&env, "batch_2"),
+        link_args(&env, "batch_3"),
+    ];
+    let ids = client.batch_create_links(&merchant, &batch);
+
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.get(0).unwrap(), String::from_str(&env, "batch_1"));
+    assert_eq!(ids.get(2).unwrap(), String::from_str(&env, "batch_3"));
+    for id in ids.iter() {
+        let link = client.get_link(&id);
+        assert!(link.active);
+        assert_eq!(link.merchant_id, merchant);
+    }
+}
+
+#[test]
+fn batch_create_links_rejects_more_than_50() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PaymentLinkManager, ());
+    let client = PaymentLinkManagerClient::new(&env, &contract_id);
+    let merchant = Address::generate(&env);
+    client.initialize(&merchant).unwrap();
+    client.grant_merchant_role(&merchant, &merchant);
+
+    let mut batch: Vec<CreateLinkArgs> = vec![&env];
+    for i in 0..51u32 {
+        batch.push_back(link_args(&env, "x"));
+        // give each a unique id so only the cap check can trip
+        let last = batch.len() - 1;
+        let mut a = batch.get(last).unwrap();
+        a.link_id = crate::format_id(&env, "cap_", i as u64);
+        batch.set(last, a);
+    }
+    let res = client.try_batch_create_links(&merchant, &batch);
+    assert_eq!(res, Err(Ok(Error::BatchTooLarge)));
+}
+
+#[test]
+fn batch_create_links_rejects_duplicate_id_atomically() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PaymentLinkManager, ());
+    let client = PaymentLinkManagerClient::new(&env, &contract_id);
+    let merchant = Address::generate(&env);
+    client.initialize(&merchant).unwrap();
+    client.grant_merchant_role(&merchant, &merchant);
+
+    let batch = vec![
+        &env,
+        link_args(&env, "dup_a"),
+        link_args(&env, "dup_a"), // duplicate within the batch
+    ];
+    let res = client.try_batch_create_links(&merchant, &batch);
+    assert_eq!(res, Err(Ok(Error::PaymentAlreadyExists)));
+    // atomicity: nothing was persisted
+    assert!(client
+        .try_get_link(&String::from_str(&env, "dup_a"))
+        .is_err());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #635 — subscription plan events
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn create_and_deactivate_subscription_plan_emit_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_refund_manager(&env);
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+
+    let plan_id = String::from_str(&env, "plan_events");
+    client.create_subscription_plan(
+        &merchant,
+        &plan_id,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, "desc"),
+        &1_000_000i128,
+        &Symbol::new(&env, "USDC"),
+        &crate::BillingInterval::Weekly,
+        &None,
+    );
+    assert!(
+        events_contain(&env, "SUBSCRIPTION", "PLAN_CREATED"),
+        "PLAN_CREATED not emitted"
+    );
+
+    client.deactivate_subscription_plan(&merchant, &plan_id);
+    assert!(
+        events_contain(&env, "SUBSCRIPTION", "PLAN_DEACTIVATED"),
+        "PLAN_DEACTIVATED not emitted"
+    );
+    assert!(!client.get_subscription_plan(&plan_id).active);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #632 — create_payment_link_invoice
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn create_payment_link_invoice_links_both_records() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let pp_id = env.register(PaymentProcessor, ());
+    let pp = PaymentProcessorClient::new(&env, &pp_id);
+    let admin = Address::generate(&env);
+    pp.initialize_payment_processor(&admin);
+
+    let plm_id = env.register(PaymentLinkManager, ());
+    let plm = PaymentLinkManagerClient::new(&env, &plm_id);
+
+    let merchant = Address::generate(&env);
+    plm.initialize(&admin).unwrap();
+    plm.grant_merchant_role(&admin, &merchant);
+    pp.grant_merchant_role(&admin, &merchant);
+    let line_items = vec![
+        &env,
+        LineItem {
+            description: String::from_str(&env, "Widget"),
+            amount: 2_500i128,
+            quantity: 2,
+        },
+    ];
+
+    let (invoice, link): (Invoice, PaymentLink) = pp.create_payment_link_invoice(
+        &merchant,
+        &plm_id,
+        &String::from_str(&env, "buyer@example.com"),
+        &line_items,
+        &5_000i128,
+        &Symbol::new(&env, "USDC"),
+        &(env.ledger().timestamp() + 86_400),
+        &CreateLinkArgs {
+            link_id: String::from_str(&env, "inv_link_1"),
+            amount: Some(5_000i128),
+            currency: Symbol::new(&env, "USDC"),
+            description: String::from_str(&env, "Invoice INV"),
+            expires_at: None,
+            max_uses: Some(1),
+            direct_transfer: false,
+            metadata: None,
+            fiat: MaybeFiatConfig::None,
+            base_url: None,
+            single_use: false,
+        },
+    );
+
+    assert_eq!(link.link_id, String::from_str(&env, "inv_link_1"));
+    assert_eq!(
+        invoice.payment_link_id,
+        Some(String::from_str(&env, "inv_link_1"))
+    );
+
+    // both records are independently retrievable afterwards
+    let fetched_invoice = pp.get_invoice(&invoice.invoice_id);
+    assert_eq!(
+        fetched_invoice.payment_link_id,
+        Some(String::from_str(&env, "inv_link_1"))
+    );
+    let fetched_link = plm.get_link(&String::from_str(&env, "inv_link_1"));
+    assert!(fetched_link.active);
+    assert_eq!(fetched_link.merchant_id, merchant);
+}
+
+#[test]
+fn create_payment_link_invoice_rejects_bad_link_atomically() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let pp_id = env.register(PaymentProcessor, ());
+    let pp = PaymentProcessorClient::new(&env, &pp_id);
+    let admin = Address::generate(&env);
+    pp.initialize_payment_processor(&admin);
+    let plm_id = env.register(PaymentLinkManager, ());
+    let plm = PaymentLinkManagerClient::new(&env, &plm_id);
+
+    let merchant = Address::generate(&env);
+    plm.initialize(&admin).unwrap();
+    plm.grant_merchant_role(&admin, &merchant);
+    pp.grant_merchant_role(&admin, &merchant);
+    let res = pp.try_create_payment_link_invoice(
+        &merchant,
+        &plm_id,
+        &String::from_str(&env, "buyer@example.com"),
+        &vec![&env],
+        &5_000i128,
+        &Symbol::new(&env, "USDC"),
+        &(env.ledger().timestamp() + 86_400),
+        &CreateLinkArgs {
+            // invalid link id (spaces) → link creation fails
+            link_id: String::from_str(&env, "bad id"),
+            amount: None,
+            currency: Symbol::new(&env, "USDC"),
+            description: String::from_str(&env, "x"),
+            expires_at: None,
+            max_uses: None,
+            direct_transfer: false,
+            metadata: None,
+            fiat: MaybeFiatConfig::None,
+            base_url: None,
+            single_use: false,
+        },
+    );
+    assert!(res.is_err());
+    // no invoice was persisted
+    assert_eq!(pp.get_merchant_invoices(&merchant).len(), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #607 — Configurable Invoice Grace Period
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_invoice_overdue_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let pp_id = env.register(PaymentProcessor, ());
+    let pp = PaymentProcessorClient::new(&env, &pp_id);
+    let admin = Address::generate(&env);
+    pp.initialize_payment_processor(&admin);
+
+    // Verify default grace period is 0
+    assert_eq!(pp.get_invoice_grace_period(), 0);
+
+    let merchant = Address::generate(&env);
+    let now = 1_000_000u64;
+    env.ledger().set_timestamp(now);
+    let due_date = now + 1_000;
+
+    let line_items = vec![
+        &env,
+        LineItem {
+            description: String::from_str(&env, "Item 1"),
+            amount: 100i128,
+            quantity: 1,
+        },
+    ];
+
+    let invoice_id = pp.create_invoice(
+        &merchant,
+        &String::from_str(&env, "customer@example.com"),
+        &line_items,
+        &100i128,
+        &Symbol::new(&env, "USDC"),
+        &due_date,
+        &None,
+    );
+
+    // Before due date -> Created status
+    env.ledger().set_timestamp(due_date - 1);
+    let inv = pp.get_invoice(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Created);
+
+    // At due date with default grace period (0) -> Overdue status
+    env.ledger().set_timestamp(due_date);
+    let inv_due = pp.get_invoice(&invoice_id);
+    assert_eq!(inv_due.status, InvoiceStatus::Overdue);
+
+    // Set grace period of 500 seconds by admin
+    pp.set_invoice_grace_period(&admin, &500u64);
+    assert_eq!(pp.get_invoice_grace_period(), 500);
+
+    // At due_date + 499 with grace period 500 -> Created status
+    env.ledger().set_timestamp(due_date + 499);
+    let inv_grace = pp.get_invoice(&invoice_id);
+    assert_eq!(inv_grace.status, InvoiceStatus::Created);
+
+    // At exactly due_date + 500 -> Overdue status
+    env.ledger().set_timestamp(due_date + 500);
+    let inv_overdue = pp.get_invoice(&invoice_id);
+    assert_eq!(inv_overdue.status, InvoiceStatus::Overdue);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #610 — Invoice Lifecycle Events (INVOICE/CREATED, INVOICE/PAID)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_invoice_lifecycle_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let pp_id = env.register(PaymentProcessor, ());
+    let pp = PaymentProcessorClient::new(&env, &pp_id);
+    let admin = Address::generate(&env);
+    pp.initialize_payment_processor(&admin);
+
+    let merchant = Address::generate(&env);
+    let due_date = env.ledger().timestamp() + 86_400;
+
+    let line_items = vec![
+        &env,
+        LineItem {
+            description: String::from_str(&env, "Product"),
+            amount: 500i128,
+            quantity: 1,
+        },
+    ];
+
+    let invoice_id = pp.create_invoice(
+        &merchant,
+        &String::from_str(&env, "test@example.com"),
+        &line_items,
+        &500i128,
+        &Symbol::new(&env, "USDC"),
+        &due_date,
+        &None,
+    );
+
+    // Verify INVOICE/CREATED event emission
+    let events_after_create = env.events().all();
+    assert!(!events_after_create.events().is_empty());
+
+    // Mark invoice paid
+    pp.mark_invoice_paid(&invoice_id);
+
+    // Verify INVOICE/PAID event emission
+    let events_after_paid = env.events().all();
+    assert!(!events_after_paid.events().is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #764 — Two-step time-locked admin ownership transfer
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_propose_and_accept_admin_after_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+
+    // Propose admin
+    client.propose_admin(&admin, &new_admin);
+
+    // Advance ledger past MIN_TIMELOCK_LEDGERS (17,280 ledgers)
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + crate::access_control::MIN_TIMELOCK_LEDGERS);
+
+    // Accept admin transfer
+    client.accept_admin(&new_admin);
+
+    // Verify admin was updated
+    assert_eq!(client.get_admin(), Some(new_admin));
+}
+
+#[test]
+#[should_panic(expected = "Admin transfer timelock has not expired")]
+fn test_accept_admin_before_timelock_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    // Only advance 100 ledgers (less than 17,280)
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + 100);
+
+    // Must panic because timelock has not elapsed
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Caller is not the pending admin")]
+fn test_accept_admin_by_non_pending_address_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + crate::access_control::MIN_TIMELOCK_LEDGERS);
+
+    // Attacker calls accept_admin -> must panic
+    client.accept_admin(&attacker);
+}
+
+#[test]
+#[should_panic(expected = "No pending admin transfer")]
+fn test_cancel_admin_transfer_clears_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    // Admin cancels the transfer
+    client.cancel_admin_transfer(&admin);
+
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + crate::access_control::MIN_TIMELOCK_LEDGERS);
+
+    // Attempting to accept after cancellation must panic
+    client.accept_admin(&new_admin);
+}
+
+// keep the unused-import checker quiet if a feature test is removed
+#[allow(unused_imports)]
+use crate as _fluxapay;
+#[allow(dead_code)]
+fn _use_into_val(env: &Env, a: Address) -> soroban_sdk::Val {
+    a.into_val(env)
+}
+

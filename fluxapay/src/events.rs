@@ -16,7 +16,111 @@
 //! env.events().publish_event(&EventStruct { ... });
 //! ```
 
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
+use crate::merchant_registry::KycTier;
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
+
+// ============================================================================
+// Merkle Distributor Events
+// ============================================================================
+
+/// Emitted when a new Merkle batch distribution is created and funded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDistributionCreated {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_amount: i128,
+    pub leaf_count: u32,
+    pub expires_at: u64,
+}
+
+/// Emitted when a recipient claims their allocation from a distribution.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleClaimed {
+    pub distribution_id: u64,
+    pub index: u32,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an expired distribution is defunded and unclaimed tokens are
+/// returned to the creator.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerkleDefunded {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub refunded_amount: i128,
+}
+
+/// Emit a `MERKLE/DISTRIBUTION_CREATED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_distribution_created(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    token: &Address,
+    merkle_root: &BytesN<32>,
+    total_amount: i128,
+    leaf_count: u32,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DISTRIBUTION_CREATED"),
+            distribution_id,
+        ),
+        (
+            creator.clone(),
+            token.clone(),
+            merkle_root.clone(),
+            total_amount,
+            leaf_count,
+            expires_at,
+        ),
+    );
+}
+
+/// Emit a `MERKLE/CLAIMED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_claimed(
+    env: &Env,
+    distribution_id: u64,
+    index: u32,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "CLAIMED"),
+            distribution_id,
+        ),
+        (index, recipient.clone(), amount),
+    );
+}
+
+/// Emit a `MERKLE/DEFUNDED` event.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_merkle_defunded(
+    env: &Env,
+    distribution_id: u64,
+    creator: &Address,
+    refunded_amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERKLE"),
+            Symbol::new(env, "DEFUNDED"),
+            distribution_id,
+        ),
+        (creator.clone(), refunded_amount),
+    );
+}
 
 // ============================================================================
 // Payment Events
@@ -49,6 +153,74 @@ pub struct PaymentPartiallyPaid {
     pub merchant_id: Address,
     pub amount: i128,
     pub amount_received: i128,
+}
+
+/// Issue #767: Emitted when a partial payment contribution is received.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentPartialReceived {
+    pub payment_id: String,
+    pub merchant_id: Address,
+    pub cumulative_amount: i128,
+    pub remaining_amount: i128,
+}
+
+/// Issue #767: Emit PAYMENT/PARTIAL_RECEIVED event with cumulative and remaining amounts.
+#[allow(deprecated)]
+pub fn emit_payment_partial_received(
+    env: &Env,
+    payment_id: &String,
+    merchant_id: &Address,
+    cumulative_amount: i128,
+    remaining_amount: i128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "PAYMENT"),
+            Symbol::new(env, "PARTIAL_RECEIVED"),
+            merchant_id.clone(),
+        ),
+        (payment_id.clone(), cumulative_amount, remaining_amount),
+    );
+}
+
+/// Issue #1018: Emitted when accumulated partial-payment funds are
+/// automatically refunded to the payer after the payment expires without
+/// being fully funded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentPartialRefunded {
+    pub payment_id: String,
+    pub merchant_id: Address,
+    pub payer: Address,
+    pub amount: i128,
+    pub refund_id: String,
+}
+
+/// Issue #1018: Emit PAYMENT/PARTIAL_REFUNDED when an expired, partially
+/// funded payment's accumulated balance is auto-refunded to the payer.
+#[allow(deprecated)]
+pub fn emit_payment_partial_refunded(
+    env: &Env,
+    payment_id: &String,
+    merchant_id: &Address,
+    payer: &Address,
+    amount: i128,
+    refund_id: &String,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "PAYMENT"),
+            Symbol::new(env, "PARTIAL_REFUNDED"),
+            merchant_id.clone(),
+        ),
+        (
+            payment_id.clone(),
+            payer.clone(),
+            amount,
+            refund_id.clone(),
+        ),
+    );
 }
 
 /// Emitted when a payment is overpaid (amount above tolerance).
@@ -122,6 +294,24 @@ pub struct KycTierUpgraded {
     pub merchant_id: Address,
     pub old_tier: String,
     pub new_tier: String,
+}
+
+/// Issue #608: Emit a `PAYMENT/CANCELLED` event when a payment is cancelled.
+#[allow(deprecated)]
+pub fn emit_payment_cancelled(
+    env: &Env,
+    payment_id: &String,
+    merchant_id: &Address,
+    authority: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "PAYMENT"),
+            Symbol::new(env, "CANCELLED"),
+            merchant_id.clone(),
+        ),
+        (payment_id.clone(), authority.clone()),
+    );
 }
 
 // ============================================================================
@@ -274,9 +464,13 @@ pub struct DisputeBondForfeited {
 
 /// Issue #677: Emit a `DISPUTE/BOND_RETURNED` event when a dispute bond is
 /// released back to `recipient` after a dispute is resolved in their favor.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn emit_dispute_bond_returned(env: &Env, dispute_id: String, recipient: Address, amount: i128) {
     env.events().publish(
-        (Symbol::new(env, "DISPUTE"), Symbol::new(env, "BOND_RETURNED")),
+        (
+            Symbol::new(env, "DISPUTE"),
+            Symbol::new(env, "BOND_RETURNED"),
+        ),
         (dispute_id, recipient, amount),
     );
 }
@@ -284,6 +478,7 @@ pub fn emit_dispute_bond_returned(env: &Env, dispute_id: String, recipient: Addr
 /// Issue #677: Emit a `DISPUTE/BOND_FORFEITED` event when a dispute bond is
 /// forfeited to `recipient` (the treasury/collector) after a dispute is
 /// rejected.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 pub fn emit_dispute_bond_forfeited(
     env: &Env,
     dispute_id: String,
@@ -291,7 +486,10 @@ pub fn emit_dispute_bond_forfeited(
     amount: i128,
 ) {
     env.events().publish(
-        (Symbol::new(env, "DISPUTE"), Symbol::new(env, "BOND_FORFEITED")),
+        (
+            Symbol::new(env, "DISPUTE"),
+            Symbol::new(env, "BOND_FORFEITED"),
+        ),
         (dispute_id, recipient, amount),
     );
 }
@@ -334,9 +532,248 @@ pub struct SubscriptionPaymentCreated {
     pub amount: i128,
 }
 
+/// Emitted when a recurring subscription charge succeeds.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionCharged {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub amount: i128,
+    pub cycle: u32,
+}
+
+/// Emitted when a recurring subscription charge fails.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionChargeFailed {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub amount: i128,
+    pub dunning_attempts: u32,
+}
+
+/// Emitted when a subscription enters the dunning retry state machine.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionDunningTriggered {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub dunning_attempts: u32,
+    pub next_retry_at: u64,
+}
+
+/// Emitted when a subscriber pauses a subscription.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionPaused {
+    pub subscription_id: String,
+    pub payer: Address,
+}
+
+/// Emitted when a subscriber resumes a paused subscription.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionResumed {
+    pub subscription_id: String,
+    pub payer: Address,
+}
+
+/// Emitted when a subscription completes its maximum billing cycles.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionCompleted {
+    pub subscription_id: String,
+    pub payer: Address,
+    pub total_cycles: u32,
+}
+
+/// Emit a `SUBSCRIPTION/CHARGED` event when a recurring charge succeeds.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_charged(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    amount: i128,
+    cycle: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "CHARGED"),
+        ),
+        (subscription_id.clone(), payer.clone(), amount, cycle),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/CHARGE_FAILED` event when a recurring charge fails.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_charge_failed(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    amount: i128,
+    dunning_attempts: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "CHARGE_FAILED"),
+        ),
+        (
+            subscription_id.clone(),
+            payer.clone(),
+            amount,
+            dunning_attempts,
+        ),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/DUNNING_TRIGGERED` event when a subscription enters
+/// the dunning retry state machine.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_dunning_triggered(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    dunning_attempts: u32,
+    next_retry_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "DUNNING_TRIGGERED"),
+        ),
+        (
+            subscription_id.clone(),
+            payer.clone(),
+            dunning_attempts,
+            next_retry_at,
+        ),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/PAUSED` event when a subscriber pauses a subscription.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_paused(env: &Env, subscription_id: &String, payer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "PAUSED"),
+        ),
+        (subscription_id.clone(), payer.clone()),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/RESUMED` event when a subscriber resumes a subscription.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_resumed(env: &Env, subscription_id: &String, payer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "RESUMED"),
+        ),
+        (subscription_id.clone(), payer.clone()),
+    );
+}
+
+/// Emit a `SUBSCRIPTION/COMPLETED` event when a subscription reaches its
+/// maximum billing cycles.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_completed(
+    env: &Env,
+    subscription_id: &String,
+    payer: &Address,
+    total_cycles: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "COMPLETED"),
+        ),
+        (subscription_id.clone(), payer.clone(), total_cycles),
+    );
+}
+
+/// Issue #635: Emit a `SUBSCRIPTION/PLAN_CREATED` event when a merchant creates
+/// a new subscription/billing plan. Topics: `(SUBSCRIPTION, PLAN_CREATED)`,
+/// data: `(plan_id, merchant_id, amount, interval_secs)`.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_plan_created(
+    env: &Env,
+    plan_id: &String,
+    merchant_id: &Address,
+    amount: i128,
+    interval_secs: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "PLAN_CREATED"),
+        ),
+        (plan_id.clone(), merchant_id.clone(), amount, interval_secs),
+    );
+}
+
+/// Issue #635: Emit a `SUBSCRIPTION/PLAN_DEACTIVATED` event when a merchant
+/// deactivates a subscription/billing plan. Topics:
+/// `(SUBSCRIPTION, PLAN_DEACTIVATED)`, data: `(plan_id, merchant_id)`.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn emit_subscription_plan_deactivated(env: &Env, plan_id: &String, merchant_id: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "SUBSCRIPTION"),
+            Symbol::new(env, "PLAN_DEACTIVATED"),
+        ),
+        (plan_id.clone(), merchant_id.clone()),
+    );
+}
+
 // ============================================================================
 // Stream Events
 // ============================================================================
+
+/// Emitted when a vesting stream is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingCreated {
+    pub stream_id: String,
+    pub sender: Address,
+    pub receiver: Address,
+    pub total_amount: i128,
+    pub cliff_time: u64,
+    pub cliff_amount: i128,
+    pub end_time: u64,
+    pub revocable: bool,
+}
+
+/// Emitted when a vesting stream's cliff is reached.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingCliffReached {
+    pub stream_id: String,
+    pub cliff_time: u64,
+    pub cliff_amount: i128,
+}
+
+/// Emitted when tokens are withdrawn from a vesting stream.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingWithdrawn {
+    pub stream_id: String,
+    pub receiver: Address,
+    pub amount: i128,
+    pub total_withdrawn: i128,
+}
+
+/// Emitted when a vesting stream is revoked by the sender.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingRevoked {
+    pub stream_id: String,
+    pub sender: Address,
+    pub refunded_amount: i128,
+    pub vested_amount: i128,
+}
 
 /// Emitted when a stream is created.
 #[contractevent]
@@ -512,6 +949,63 @@ pub struct MerchantPartialPaymentUpdated {
     pub allowed: bool,
 }
 
+/// Issue #609: Emit a `MERCHANT/SUSPENDED` event when a merchant is suspended.
+#[allow(deprecated)]
+pub fn emit_merchant_suspended(env: &Env, merchant_id: &Address, reason: &String) {
+    env.events().publish(
+        (Symbol::new(env, "MERCHANT"), Symbol::new(env, "SUSPENDED")),
+        (merchant_id.clone(), reason.clone()),
+    );
+}
+
+/// Issue #609: Emit a `MERCHANT/REINSTATED` event when a merchant is reinstated.
+#[allow(deprecated)]
+pub fn emit_merchant_reinstated(env: &Env, merchant_id: &Address, reinstated_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "MERCHANT"), Symbol::new(env, "REINSTATED")),
+        (merchant_id.clone(), reinstated_by.clone()),
+    );
+}
+
+/// Emit `MERCHANT/KYC_TIER_UPGRADED` after a merchant's tier is promoted.
+#[allow(deprecated)]
+pub fn emit_kyc_tier_upgraded(
+    env: &Env,
+    merchant_id: &Address,
+    old_tier: &KycTier,
+    new_tier: &KycTier,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "MERCHANT"),
+            Symbol::new(env, "KYC_TIER_UPGRADED"),
+        ),
+        (merchant_id.clone(), old_tier.clone(), new_tier.clone()),
+    );
+}
+
+/// Emit `REFUND/REQUESTED` when an auto-refund is queued for a payer.
+#[allow(deprecated)]
+pub fn emit_refund_requested(
+    env: &Env,
+    refund_id: &String,
+    payment_id: &String,
+    merchant_id: &Address,
+    payer: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "REFUND"), Symbol::new(env, "REQUESTED")),
+        (
+            refund_id.clone(),
+            payment_id.clone(),
+            merchant_id.clone(),
+            payer.clone(),
+            amount,
+        ),
+    );
+}
+
 // ============================================================================
 // Access Control Events
 // ============================================================================
@@ -596,6 +1090,56 @@ pub struct ContractUpgraded {
 pub struct TreasuryWithdrawn {
     pub amount: i128,
     pub recipient: Address,
+}
+
+/// Emitted when a treasury withdrawal proposal is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalProposed {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub proposer: Address,
+    pub earliest_execution_time: u64,
+}
+
+/// Emitted when a treasury withdrawal proposal receives an approval.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalApproved {
+    pub proposal_id: String,
+    pub approver: Address,
+    pub approvals_count: u32,
+    pub required_approvals: u32,
+}
+
+/// Emitted when a treasury withdrawal proposal is executed.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalExecuted {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub executor: Address,
+}
+
+/// Emitted when a treasury withdrawal proposal is cancelled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryWithdrawalCancelled {
+    pub proposal_id: String,
+    pub canceller: Address,
+}
+
+/// Emitted when treasury multisig configuration is updated.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryMultisigConfigured {
+    pub required_approvals: u32,
+    pub min_delay_secs: u64,
+    pub max_delay_secs: u64,
 }
 
 // ============================================================================
@@ -796,4 +1340,150 @@ pub struct SessionExecutedEvent {
     pub account: Address,
     pub session_key: Address,
     pub payload_hash: BytesN<32>,
+}
+
+// ============================================================================
+// Invoice Events (Issue #610)
+// ============================================================================
+
+/// Emitted when an invoice is created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InvoiceCreated {
+    pub invoice_id: String,
+    pub merchant_id: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an invoice is paid.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InvoicePaid {
+    pub invoice_id: String,
+    pub merchant_id: Address,
+}
+
+/// Emitted when an invoice is overdue.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InvoiceOverdue {
+    pub invoice_id: String,
+    pub merchant_id: Address,
+}
+
+/// Issue #610: Emit an `INVOICE/CREATED` event when an invoice is created.
+#[allow(deprecated)]
+pub fn emit_invoice_created(env: &Env, invoice_id: &String, merchant_id: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "CREATED")),
+        (invoice_id.clone(), merchant_id.clone(), amount),
+    );
+}
+
+/// Issue #610: Emit an `INVOICE/PAID` event when an invoice is paid.
+#[allow(deprecated)]
+pub fn emit_invoice_paid(env: &Env, invoice_id: &String, merchant_id: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "PAID")),
+        (invoice_id.clone(), merchant_id.clone()),
+    );
+}
+
+/// Issue #610: Emit an `INVOICE/OVERDUE` event when an invoice is marked overdue.
+#[allow(deprecated)]
+pub fn emit_invoice_overdue(env: &Env, invoice_id: &String, merchant_id: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "INVOICE"), Symbol::new(env, "OVERDUE")),
+        (invoice_id.clone(), merchant_id.clone()),
+    );
+}
+
+// ============================================================================
+// Rolling Reserve Events
+// ============================================================================
+
+/// Emitted when a portion of merchant proceeds is held in the rolling reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsHeld {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub unlock_ledger: u32,
+    pub reserve_bps: u32,
+}
+
+/// Emitted when matured reserve buckets are released to the merchant.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsReleased {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub bucket_count: u32,
+}
+
+/// Emitted when locked reserve funds are slashed to satisfy a lost dispute.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFundsSlashed {
+    pub merchant_id: Address,
+    pub amount: i128,
+    pub dispute_id: String,
+}
+
+/// Emit a `RESERVE/FUNDS_HELD` event when payment settlement locks a portion
+/// of merchant proceeds into the rolling reserve.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_held(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    unlock_ledger: u32,
+    reserve_bps: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_HELD"),
+            merchant_id.clone(),
+        ),
+        (amount, unlock_ledger, reserve_bps),
+    );
+}
+
+/// Emit a `RESERVE/FUNDS_RELEASED` event when matured reserve buckets are
+/// released back to the merchant.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_released(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    bucket_count: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_RELEASED"),
+            merchant_id.clone(),
+        ),
+        (amount, bucket_count),
+    );
+}
+
+/// Emit a `RESERVE/FUNDS_SLASHED` event when locked reserve funds are slashed
+/// to satisfy a lost dispute payout.
+#[allow(deprecated)]
+pub fn emit_reserve_funds_slashed(
+    env: &Env,
+    merchant_id: &Address,
+    amount: i128,
+    dispute_id: &String,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "RESERVE"),
+            Symbol::new(env, "FUNDS_SLASHED"),
+            merchant_id.clone(),
+        ),
+        (amount, dispute_id.clone()),
+    );
 }

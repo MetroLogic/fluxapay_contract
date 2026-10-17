@@ -1,4 +1,4 @@
-﻿#![cfg(test)]
+#![cfg(test)]
 
 use super::stream::{PaymentStreaming, PaymentStreamingClient, StreamError, StreamStatus};
 use crate::utils::format_id;
@@ -42,7 +42,15 @@ fn test_create_stream_success() {
     let rate = 10i128; // 10 tokens/s
     let deposit = 1_000i128;
 
-    let stream = client.create_stream(&sender, &receiver, &token, &rate, &deposit, &stream_id, &None::<i128>);
+    let stream = client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &rate,
+        &deposit,
+        &stream_id,
+        &None::<i128>,
+    );
 
     assert_eq!(stream.stream_id, stream_id);
     assert_eq!(stream.sender, sender);
@@ -60,7 +68,15 @@ fn test_create_stream_invalid_rate() {
     let (client, sender, receiver, token) = setup(&env);
     let stream_id = String::from_str(&env, "stream_rate_err");
 
-    let err = client.try_create_stream(&sender, &receiver, &token, &0i128, &500i128, &stream_id, &None::<i128>);
+    let err = client.try_create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &0i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
     assert_eq!(err, Err(Ok(StreamError::InvalidRate)));
 }
 
@@ -71,7 +87,15 @@ fn test_create_stream_invalid_deposit() {
     let (client, sender, receiver, token) = setup(&env);
     let stream_id = String::from_str(&env, "stream_dep_err");
 
-    let err = client.try_create_stream(&sender, &receiver, &token, &5i128, &0i128, &stream_id, &None::<i128>);
+    let err = client.try_create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &5i128,
+        &0i128,
+        &stream_id,
+        &None::<i128>,
+    );
     assert_eq!(err, Err(Ok(StreamError::InvalidDeposit)));
 }
 
@@ -82,9 +106,25 @@ fn test_create_stream_duplicate_id() {
     let (client, sender, receiver, token) = setup(&env);
     let stream_id = String::from_str(&env, "stream_dup");
 
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
-    let err = client.try_create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    let err = client.try_create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
     assert_eq!(err, Err(Ok(StreamError::StreamAlreadyExists)));
 }
 
@@ -103,7 +143,15 @@ fn test_decrease_rate_checkpoints_and_refunds_surplus() {
     let deposit = 1_000i128;
     let old_rate = 10i128;
 
-    client.create_stream(&sender, &receiver, &token, &old_rate, &deposit, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &old_rate,
+        &deposit,
+        &stream_id,
+        &None::<i128>,
+    );
 
     // Advance time by 50 seconds.
     env.ledger().set_timestamp(env.ledger().timestamp() + 50);
@@ -128,7 +176,15 @@ fn test_get_accrued_amount_reflects_elapsed_time() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_accrued");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     // 30 seconds in → 300 accrued (lazily).
     env.ledger().set_timestamp(env.ledger().timestamp() + 30);
@@ -143,7 +199,15 @@ fn test_decrease_rate_rejects_equal_rate() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_eq");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     let err = client.try_decrease_rate_per_second(&sender, &stream_id, &10i128);
     assert_eq!(err, Err(Ok(StreamError::RateNotDecreased)));
@@ -157,7 +221,15 @@ fn test_decrease_rate_rejects_higher_rate() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_hi");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     let err = client.try_decrease_rate_per_second(&sender, &stream_id, &20i128);
     assert_eq!(err, Err(Ok(StreamError::RateNotDecreased)));
@@ -171,7 +243,15 @@ fn test_decrease_rate_unauthorized_caller() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_auth");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     let impostor = Address::generate(&env);
     let err = client.try_decrease_rate_per_second(&impostor, &stream_id, &5i128);
@@ -242,7 +322,15 @@ fn test_set_stream_destination_and_trigger_withdrawal() {
     let stream_id = String::from_str(&env, "stream_dest");
     let destination = Address::generate(&env);
 
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
     client.set_stream_destination(&receiver, &stream_id, &destination);
     client.approve_stream_milestone(&sender, &stream_id);
 
@@ -268,15 +356,36 @@ fn test_withdraw_all_for_recipient_limits_execution() {
     let stream_id2 = String::from_str(&env, "stream_all_2");
     let stream_id3 = String::from_str(&env, "stream_all_3");
 
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id1);
-    client.create_stream(&sender, &receiver, &token, &20i128, &500i128, &stream_id2);
-    client.create_stream(&sender, &receiver, &token, &30i128, &500i128, &stream_id3);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id1,
+        &None::<i128>,
+    );
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &20i128,
+        &500i128,
+        &stream_id2,
+        &None::<i128>,
+    );
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &30i128,
+        &500i128,
+        &stream_id3,
+        &None::<i128>,
+    );
     client.approve_stream_milestone(&sender, &stream_id1);
     client.approve_stream_milestone(&sender, &stream_id2);
     client.approve_stream_milestone(&sender, &stream_id3);
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id1, &None::<i128>);
-    client.create_stream(&sender, &receiver, &token, &20i128, &500i128, &stream_id2, &None::<i128>);
-    client.create_stream(&sender, &receiver, &token, &30i128, &500i128, &stream_id3, &None::<i128>);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
 
@@ -297,7 +406,15 @@ fn test_get_sender_streams_pagination() {
 
     for i in 0..5 {
         let stream_id = format_id(&env, "sender_page_", i as u64);
-        client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+        client.create_stream(
+            &sender,
+            &receiver,
+            &token,
+            &10i128,
+            &500i128,
+            &stream_id,
+            &None::<i128>,
+        );
     }
 
     let page1 = client.get_sender_streams(&sender, &0u32, &2u32);
@@ -318,7 +435,15 @@ fn test_withdraw_blocked_before_milestone_approval() {
 
     let stream_id = String::from_str(&env, "stream_milestone_locked");
     let destination = Address::generate(&env);
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
     client.set_stream_destination(&receiver, &stream_id, &destination);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
@@ -328,6 +453,80 @@ fn test_withdraw_blocked_before_milestone_approval() {
 
 #[test]
 fn test_approve_stream_milestone_unblocks_withdrawal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+    let token_client = token::StellarAssetClient::new(&env, &token);
+
+    let stream_id = String::from_str(&env, "stream_milestone_approved");
+    let destination = Address::generate(&env);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
+    client.set_stream_destination(&receiver, &stream_id, &destination);
+    client.approve_stream_milestone(&sender, &stream_id);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    let processed = client.trigger_withdrawal(&stream_id);
+
+    assert_eq!(processed, stream_id);
+    assert_eq!(token_client.balance(&destination), 100i128);
+}
+
+#[test]
+fn test_revoke_stream_milestone_relocks_withdrawal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    let stream_id = String::from_str(&env, "stream_milestone_revoked");
+    let destination = Address::generate(&env);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
+    client.set_stream_destination(&receiver, &stream_id, &destination);
+    client.approve_stream_milestone(&sender, &stream_id);
+    client.revoke_stream_milestone(&sender, &stream_id);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    let err = client.try_trigger_withdrawal(&stream_id);
+    assert_eq!(err, Err(Ok(StreamError::MilestoneNotApproved)));
+}
+
+#[test]
+fn test_approve_stream_milestone_unauthorized_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    let stream_id = String::from_str(&env, "stream_milestone_auth");
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
+
+    let impostor = Address::generate(&env);
+    let err = client.try_approve_stream_milestone(&impostor, &stream_id);
+    assert_eq!(err, Err(Ok(StreamError::Unauthorized)));
+}
+
 #[test]
 fn test_withdrawn_event_includes_remaining_deposit() {
     let env = Env::default();
@@ -339,8 +538,17 @@ fn test_withdrawn_event_includes_remaining_deposit() {
     let destination = Address::generate(&env);
 
     // rate=10, deposit=500 → after 10s: withdrawable=100, remaining=400
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
     client.set_stream_destination(&receiver, &stream_id, &destination);
+    client.approve_stream_milestone(&sender, &stream_id);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
     client.trigger_withdrawal(&stream_id);
@@ -357,23 +565,16 @@ fn test_top_up_stream_success() {
     let (client, sender, receiver, token) = setup(&env);
     let token_client = token::StellarAssetClient::new(&env, &token);
 
-    let stream_id = String::from_str(&env, "stream_milestone_approved");
-    let destination = Address::generate(&env);
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id);
-    client.set_stream_destination(&receiver, &stream_id, &destination);
-    client.approve_stream_milestone(&sender, &stream_id);
-
-    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    let processed = client.trigger_withdrawal(&stream_id);
-
-    assert_eq!(processed, stream_id);
-    assert_eq!(token_client.balance(&destination), 100i128);
-}
-
-#[test]
-fn test_revoke_stream_milestone_relocks_withdrawal() {
     let stream_id = String::from_str(&env, "stream_top_up");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     client.top_up_stream(&sender, &stream_id, &250i128);
 
@@ -388,26 +589,32 @@ fn test_top_up_multiple_streams_success() {
     env.mock_all_auths();
     let (client, sender, receiver, token) = setup(&env);
 
-    let stream_id = String::from_str(&env, "stream_milestone_revoked");
-    let destination = Address::generate(&env);
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id);
-    client.set_stream_destination(&receiver, &stream_id, &destination);
-    client.approve_stream_milestone(&sender, &stream_id);
-    client.revoke_stream_milestone(&sender, &stream_id);
-
-    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    let err = client.try_trigger_withdrawal(&stream_id);
-    assert_eq!(err, Err(Ok(StreamError::MilestoneNotApproved)));
-}
-
-#[test]
-fn test_approve_stream_milestone_unauthorized_caller() {
     let stream_id1 = String::from_str(&env, "stream_top_up_multi_1");
     let stream_id2 = String::from_str(&env, "stream_top_up_multi_2");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id1, &None::<i128>);
-    client.create_stream(&sender, &receiver, &token, &20i128, &500i128, &stream_id2, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id1,
+        &None::<i128>,
+    );
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &20i128,
+        &500i128,
+        &stream_id2,
+        &None::<i128>,
+    );
 
-    let top_ups = vec![&env, (stream_id1.clone(), 100i128), (stream_id2.clone(), 200i128)];
+    let top_ups = vec![
+        &env,
+        (stream_id1.clone(), 100i128),
+        (stream_id2.clone(), 200i128),
+    ];
     client.top_up_multiple_streams(&sender, &top_ups);
 
     let stream1 = client.get_stream(&stream_id1);
@@ -422,20 +629,16 @@ fn test_top_up_multiple_streams_unauthorized() {
     env.mock_all_auths();
     let (client, sender, receiver, token) = setup(&env);
 
-    let stream_id = String::from_str(&env, "stream_milestone_auth");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id);
-
-    let impostor = Address::generate(&env);
-    let err = client.try_approve_stream_milestone(&impostor, &stream_id);
-    assert_eq!(err, Err(Ok(StreamError::Unauthorized)));
-}
-
-// ─── Minimum rate enforcement ───────────────────────────────────────────────────
-
-#[test]
-fn test_decrease_rate_rejects_below_configured_min() {
     let stream_id1 = String::from_str(&env, "stream_top_up_multi_auth_1");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id1, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id1,
+        &None::<i128>,
+    );
 
     let impostor = Address::generate(&env);
     let top_ups = vec![&env, (stream_id1.clone(), 100i128)];
@@ -450,7 +653,15 @@ fn test_top_up_stream_unauthorized_caller() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_top_up_auth");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     let impostor = Address::generate(&env);
     let result = client.try_top_up_stream(&impostor, &stream_id, &50i128);
@@ -464,11 +675,43 @@ fn test_top_up_stream_rejects_inactive_stream() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_top_up_inactive");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
     client.cancel_stream(&sender, &stream_id);
 
     let result = client.try_top_up_stream(&sender, &stream_id, &50i128);
     assert_eq!(result, Err(Ok(StreamError::StreamNotActive)));
+}
+
+// ─── Minimum rate enforcement ───────────────────────────────────────────────────
+
+#[test]
+fn test_decrease_rate_rejects_below_configured_min() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    let stream_id = String::from_str(&env, "stream_min_rate");
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
+    client.set_stream_min_rate(&sender, &stream_id, &5i128);
+
+    let err = client.try_decrease_rate_per_second(&sender, &stream_id, &4i128);
+    assert_eq!(err, Err(Ok(StreamError::InvalidRate)));
 }
 
 #[test]
@@ -477,19 +720,16 @@ fn test_decrease_rate_to_exactly_min_rate_succeeds() {
     env.mock_all_auths();
     let (client, sender, receiver, token) = setup(&env);
 
-    let stream_id = String::from_str(&env, "stream_min_rate");
-    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id);
-    client.set_stream_min_rate(&sender, &stream_id, &5i128);
-
-    let err = client.try_decrease_rate_per_second(&sender, &stream_id, &4i128);
-    assert_eq!(err, Err(Ok(StreamError::InvalidRate)));
-
-    // Exactly at the floor is allowed.
-    client.decrease_rate_per_second(&sender, &stream_id, &5i128);
-    let stream = client.get_stream(&stream_id);
-    assert_eq!(stream.rate_per_second, 5);
     let stream_id = String::from_str(&env, "stream_min_exact");
-    client.create_stream(&sender, &receiver, &token, &100i128, &5000i128, &stream_id, &Some(50i128));
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &100i128,
+        &5000i128,
+        &stream_id,
+        &Some(50i128),
+    );
 
     let stream = client.get_stream(&stream_id);
     assert_eq!(stream.rate_per_second, 100);
@@ -508,7 +748,15 @@ fn test_decrease_rate_below_min_rate_fails() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_min_below");
-    client.create_stream(&sender, &receiver, &token, &100i128, &5000i128, &stream_id, &Some(50i128));
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &100i128,
+        &5000i128,
+        &stream_id,
+        &Some(50i128),
+    );
 
     let result = client.try_decrease_rate_per_second(&sender, &stream_id, &49i128);
     assert_eq!(result, Err(Ok(StreamError::RateBelowMinimum)));
@@ -521,7 +769,15 @@ fn test_decrease_rate_with_zero_min_rate() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_zero_min");
-    client.create_stream(&sender, &receiver, &token, &100i128, &5000i128, &stream_id, &Some(0i128));
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &100i128,
+        &5000i128,
+        &stream_id,
+        &Some(0i128),
+    );
 
     let stream = client.get_stream(&stream_id);
     assert_eq!(stream.min_rate_per_second, 0);
@@ -539,7 +795,15 @@ fn test_cancel_multiple_streams_with_partial_invalid_id_errors() {
     let (client, sender, recipient, token) = setup(&env);
 
     let stream_id1 = String::from_str(&env, "stream_cancel_partial_1");
-    client.create_stream(&sender, &recipient, &token, &100i128, &500i128, &stream_id1, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &100i128,
+        &500i128,
+        &stream_id1,
+        &None::<i128>,
+    );
 
     let missing_stream_id = String::from_str(&env, "stream_cancel_missing");
     let stream_ids = vec![&env, stream_id1.clone(), missing_stream_id];
@@ -564,8 +828,24 @@ fn test_batch_withdraw_to_multiple_destinations() {
     let destination2 = Address::generate(&env);
 
     token_client.mint(&sender, &10_000i128);
-    client.create_stream(&sender, &recipient, &token, &100i128, &1_000i128, &stream_id1, &None::<i128>);
-    client.create_stream(&sender, &recipient, &token, &200i128, &2_000i128, &stream_id2, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &100i128,
+        &1_000i128,
+        &stream_id1,
+        &None::<i128>,
+    );
+    client.create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &200i128,
+        &2_000i128,
+        &stream_id2,
+        &None::<i128>,
+    );
 
     client.approve_stream_milestone(&sender, &stream_id1);
     client.approve_stream_milestone(&sender, &stream_id2);
@@ -600,7 +880,15 @@ fn test_batch_withdraw_to_skips_zero_accrued_streams() {
     let destination = Address::generate(&env);
 
     token_client.mint(&sender, &10_000i128);
-    client.create_stream(&sender, &recipient, &token, &100i128, &1_000i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &100i128,
+        &1_000i128,
+        &stream_id,
+        &None::<i128>,
+    );
     client.approve_stream_milestone(&sender, &stream_id);
 
     let withdrawal = crate::WithdrawalRecipient {
@@ -622,11 +910,317 @@ fn test_default_min_rate_of_one() {
     let (client, sender, receiver, token) = setup(&env);
 
     let stream_id = String::from_str(&env, "stream_default_min");
-    client.create_stream(&sender, &receiver, &token, &100i128, &5000i128, &stream_id, &None::<i128>);
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &100i128,
+        &5000i128,
+        &stream_id,
+        &None::<i128>,
+    );
 
     let stream = client.get_stream(&stream_id);
     assert_eq!(stream.min_rate_per_second, 1);
 
     let result = client.try_decrease_rate_per_second(&sender, &stream_id, &0i128);
     assert_eq!(result, Err(Ok(StreamError::RateBelowMinimum)));
+}
+
+// ─── Issue #627: bulk_bump_stream_ttls ────────────────────────────────────────
+
+#[test]
+fn test_bulk_bump_stream_ttls_counts_only_existing_streams() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    // 3 valid streams + 1 ID that was never created.
+    let s1 = String::from_str(&env, "ttl_stream_1");
+    let s2 = String::from_str(&env, "ttl_stream_2");
+    let s3 = String::from_str(&env, "ttl_stream_3");
+    let missing = String::from_str(&env, "ttl_stream_missing");
+
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &1_000i128,
+        &s1,
+        &None::<i128>,
+    );
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &1_000i128,
+        &s2,
+        &None::<i128>,
+    );
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &1_000i128,
+        &s3,
+        &None::<i128>,
+    );
+
+    let bumped = client.bulk_bump_stream_ttls(&vec![&env, s1, s2, s3, missing]);
+    assert_eq!(bumped, 3);
+}
+
+#[test]
+fn test_bulk_bump_stream_ttls_empty_batch_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _sender, _receiver, _token) = setup(&env);
+
+    let bumped = client.bulk_bump_stream_ttls(&vec![&env]);
+    assert_eq!(bumped, 0);
+}
+
+#[test]
+fn test_bulk_bump_stream_ttls_rejects_oversized_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _sender, _receiver, _token) = setup(&env);
+
+    let mut ids = vec![&env];
+    for _ in 0..51u32 {
+        ids.push_back(String::from_str(&env, "s"));
+    }
+
+    let result = client.try_bulk_bump_stream_ttls(&ids);
+    assert_eq!(result, Err(Ok(StreamError::BatchTooLarge)));
+}
+
+// ─── Multi-payee streams (issue #831) ─────────────────────────────────────────
+
+use super::stream::{PayeeAllocation, MAX_MULTI_PAYEES, MULTI_STREAM_SHARE_TOTAL};
+
+#[test]
+fn test_create_multi_stream_two_payees() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, _receiver, token) = setup(&env);
+
+    let payee_a = Address::generate(&env);
+    let payee_b = Address::generate(&env);
+    let payees = vec![
+        &env,
+        PayeeAllocation {
+            address: payee_a.clone(),
+            share_bps: 6_000,
+        },
+        PayeeAllocation {
+            address: payee_b.clone(),
+            share_bps: 4_000,
+        },
+    ];
+
+    let stream_id = client.create_multi_stream(&sender, &token, &1_000i128, &10i128, &payees);
+    let stream = client.get_multi_stream(&stream_id);
+    assert_eq!(stream.payees.len(), 2);
+    assert_eq!(stream.remaining_deposit, 1_000);
+    assert_eq!(stream.rate_per_second, 10);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // Advance 50s → 500 accrued; 60/40 split → 300 / 200
+    env.ledger().with_mut(|li| li.timestamp = 50);
+    client.withdraw_multi_stream(&stream_id);
+
+    let token_client = token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&payee_a), 300);
+    assert_eq!(token_client.balance(&payee_b), 200);
+
+    let after = client.get_multi_stream(&stream_id);
+    assert_eq!(after.remaining_deposit, 500);
+}
+
+#[test]
+fn test_create_multi_stream_ten_payees() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, _receiver, token) = setup(&env);
+
+    let mut payees = vec![&env];
+    let mut payee_addrs: [Option<Address>; 10] =
+        [None, None, None, None, None, None, None, None, None, None];
+    for i in 0..(MAX_MULTI_PAYEES as usize) {
+        let addr = Address::generate(&env);
+        payee_addrs[i] = Some(addr.clone());
+        payees.push_back(PayeeAllocation {
+            address: addr,
+            share_bps: MULTI_STREAM_SHARE_TOTAL / MAX_MULTI_PAYEES,
+        });
+    }
+
+    let stream_id = client.create_multi_stream(&sender, &token, &10_000i128, &100i128, &payees);
+    let stream = client.get_multi_stream(&stream_id);
+    assert_eq!(stream.payees.len(), MAX_MULTI_PAYEES);
+
+    // Advance 10s → 1000 accrued; each of 10 payees gets 100
+    env.ledger().with_mut(|li| li.timestamp = 10);
+    client.withdraw_multi_stream(&stream_id);
+
+    let token_client = token::Client::new(&env, &token);
+    for slot in payee_addrs.iter() {
+        assert_eq!(token_client.balance(slot.as_ref().unwrap()), 100);
+    }
+}
+
+#[test]
+fn test_create_multi_stream_rejects_invalid_shares() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, _receiver, token) = setup(&env);
+
+    let payees = vec![
+        &env,
+        PayeeAllocation {
+            address: Address::generate(&env),
+            share_bps: 5_000,
+        },
+        PayeeAllocation {
+            address: Address::generate(&env),
+            share_bps: 3_000,
+        },
+    ];
+
+    let err = client.try_create_multi_stream(&sender, &token, &1_000i128, &10i128, &payees);
+    assert_eq!(err, Err(Ok(StreamError::InvalidPayeeShares)));
+}
+
+#[test]
+fn test_create_multi_stream_rejects_too_many_payees() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, _receiver, token) = setup(&env);
+
+    let mut payees = vec![&env];
+    for _ in 0..(MAX_MULTI_PAYEES + 1) {
+        payees.push_back(PayeeAllocation {
+            address: Address::generate(&env),
+            share_bps: 1,
+        });
+    }
+
+    let err = client.try_create_multi_stream(&sender, &token, &1_000i128, &10i128, &payees);
+    assert_eq!(err, Err(Ok(StreamError::TooManyPayees)));
+}
+
+#[test]
+fn test_single_payee_create_stream_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+    let stream_id = String::from_str(&env, "single_unchanged");
+    let stream = client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &10i128,
+        &500i128,
+        &stream_id,
+        &None::<i128>,
+    );
+    assert_eq!(stream.receiver, receiver);
+    assert_eq!(stream.stream_id, stream_id);
+}
+
+#[test]
+fn test_pause_stream_snapshots_accrued_at_pause() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    let stream_id = String::from_str(&env, "pause_snapshot_01");
+    let rate = 10i128;
+    let deposit = 10_000i128;
+
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &rate,
+        &deposit,
+        &stream_id,
+        &None::<i128>,
+    );
+
+    // Advance 30 seconds
+    env.ledger().with_mut(|li| li.timestamp += 30);
+
+    // Pause stream
+    client.pause_stream(&sender, &stream_id);
+
+    let stream = client.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Paused);
+    assert_eq!(stream.accrued_at_checkpoint, 300i128);
+    assert_eq!(stream.accrued_at_pause, 300i128);
+
+    // Wait 100 seconds while paused
+    env.ledger().with_mut(|li| li.timestamp += 100);
+
+    // Accrued amount must still be 300
+    let accrued_during_pause = client.get_accrued_amount(&stream_id);
+    assert_eq!(accrued_during_pause, 300i128);
+
+    // Resume stream
+    client.resume_stream(&sender, &stream_id);
+    let resumed_stream = client.get_stream(&stream_id);
+    assert_eq!(resumed_stream.status, StreamStatus::Active);
+    assert_eq!(resumed_stream.accrued_at_checkpoint, 300i128);
+    assert_eq!(resumed_stream.accrued_at_pause, 300i128);
+
+    // Advance 20 more seconds active
+    env.ledger().with_mut(|li| li.timestamp += 20);
+    let accrued_after_resume = client.get_accrued_amount(&stream_id);
+    // 300 baseline + 200 newly accrued = 500
+    assert_eq!(accrued_after_resume, 500i128);
+}
+
+#[test]
+fn test_stream_pause_resume_multiple_cycles_no_drift() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+
+    let stream_id = String::from_str(&env, "multi_cycle_stream");
+    let rate = 5i128;
+    let deposit = 100_000i128;
+
+    client.create_stream(
+        &sender,
+        &receiver,
+        &token,
+        &rate,
+        &deposit,
+        &stream_id,
+        &None::<i128>,
+    );
+
+    let mut total_active_seconds = 0u64;
+
+    // Run 50 pause/resume cycles
+    for _ in 0..50 {
+        // Active for 3 seconds
+        env.ledger().with_mut(|li| li.timestamp += 3);
+        total_active_seconds += 3;
+
+        client.pause_stream(&sender, &stream_id);
+
+        // Paused for 7 seconds (no accrual)
+        env.ledger().with_mut(|li| li.timestamp += 7);
+
+        client.resume_stream(&sender, &stream_id);
+    }
+
+    let accrued = client.get_accrued_amount(&stream_id);
+    let expected = (total_active_seconds as i128) * rate;
+    assert_eq!(accrued, expected);
 }

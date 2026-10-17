@@ -1,4 +1,5 @@
 use super::merchant_registry::*;
+use crate::merchant_registry::MaybeFeeConfig;
 use crate::{PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient};
 use soroban_sdk::{
     testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, String, Symbol,
@@ -25,7 +26,7 @@ fn test_merchant_registration() {
         &settlement_currency,
         &Some(payout_addr.clone()),
         &Some(String::from_str(&env, "BANK-001")),
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let merchant = client.get_merchant(&merchant_id);
@@ -42,6 +43,33 @@ fn test_merchant_registration() {
     assert_eq!(merchant.kyc_tier, KycTier::Unverified);
     assert!(merchant.active);
     assert!(merchant.created_at > 0);
+}
+
+#[test]
+fn test_merchant_registry_set_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    assert_eq!(client.version(), String::from_str(&env, "1.0.0"));
+    let new_version = String::from_str(&env, "3.2.1");
+    client.set_version(&admin, &new_version);
+    assert_eq!(client.version(), new_version);
+    assert_eq!(
+        client.try_set_version(&admin, &String::from_str(&env, "v3.2.1")),
+        Err(Ok(MerchantError::InvalidVersion))
+    );
+    assert_eq!(client.version(), new_version);
+
+    let non_admin = Address::generate(&env);
+    assert_eq!(
+        client.try_set_version(&non_admin, &String::from_str(&env, "4.0.0")),
+        Err(Ok(MerchantError::Unauthorized))
+    );
 }
 
 #[test]
@@ -62,7 +90,7 @@ fn test_merchant_update() {
         &settlement_currency,
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let new_name = String::from_str(&env, "New name");
@@ -76,7 +104,7 @@ fn test_merchant_update() {
         &Some(false),
         &Some(new_payout.clone()),
         &Some(String::from_str(&env, "BANK-002")),
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let updated_merchant = client.get_merchant(&merchant_id);
@@ -110,7 +138,7 @@ fn test_merchant_verification() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // verify_merchant sets KycTier::Basic for backward compatibility
@@ -141,7 +169,7 @@ fn test_unauthorized_verification() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Attacker tries to verify the merchant
@@ -166,7 +194,7 @@ fn test_set_kyc_tier() {
         &String::from_str(&env, "USDC"),
         &None::<Address>,
         &None::<String>,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Promote through tiers
@@ -200,7 +228,7 @@ fn test_set_kyc_tier_unauthorized() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Non-admin tries to set KYC tier
@@ -229,7 +257,7 @@ fn test_merchant_enumeration() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
     client.register_merchant(
         &merchant2,
@@ -237,7 +265,7 @@ fn test_merchant_enumeration() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
     client.register_merchant(
         &merchant3,
@@ -245,7 +273,7 @@ fn test_merchant_enumeration() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Get all merchants - should return all 3
@@ -282,7 +310,7 @@ fn test_verified_merchants_filter() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
     client.register_merchant(
         &merchant2,
@@ -290,7 +318,7 @@ fn test_verified_merchants_filter() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
     client.register_merchant(
         &merchant3,
@@ -298,7 +326,7 @@ fn test_verified_merchants_filter() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Verify only merchant2
@@ -344,7 +372,7 @@ fn test_unverified_merchant_cannot_create_payment() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Try to create payment - should fail because merchant is not verified
@@ -364,8 +392,10 @@ fn test_unverified_merchant_cannot_create_payment() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     };
 
     // This should panic with Unauthorized error
@@ -404,7 +434,7 @@ fn test_verified_merchant_can_create_payment() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Manually grant MERCHANT role (simulating what would happen with set_refund_manager_address)
@@ -427,8 +457,10 @@ fn test_verified_merchant_can_create_payment() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     };
 
     let payment = payment_client.create_payment(&args);
@@ -457,7 +489,7 @@ fn test_suspend_merchant() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let reason = String::from_str(&env, "Fraudulent activity");
@@ -467,6 +499,7 @@ fn test_suspend_merchant() {
     assert!(!merchant.active);
     assert_eq!(merchant.suspension_reason, Some(reason));
     assert!(merchant.suspended_at.is_some());
+    assert!(!env.events().all().events().is_empty());
 }
 
 #[test]
@@ -488,7 +521,7 @@ fn test_reinstate_merchant() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let reason = String::from_str(&env, "Fraudulent activity");
@@ -504,6 +537,7 @@ fn test_reinstate_merchant() {
     assert!(reinstated.active);
     assert_eq!(reinstated.suspension_reason, None);
     assert_eq!(reinstated.suspended_at, None);
+    assert!(!env.events().all().events().is_empty());
 }
 
 #[test]
@@ -525,7 +559,7 @@ fn test_automatic_suspension_recovery() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let reason = String::from_str(&env, "Fraudulent activity");
@@ -563,7 +597,7 @@ fn test_payout_address_rotation_delay() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Set initial payout address
@@ -575,7 +609,7 @@ fn test_payout_address_rotation_delay() {
         &None,
         &Some(payout_addr1.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Try to update payout address again within 48 hours - should fail
@@ -587,7 +621,7 @@ fn test_payout_address_rotation_delay() {
         &None,
         &Some(payout_addr2.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 }
 
@@ -610,7 +644,7 @@ fn test_payout_address_rotation_delay_success_after_48_hours() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Set initial payout address
@@ -622,7 +656,7 @@ fn test_payout_address_rotation_delay_success_after_48_hours() {
         &None,
         &Some(payout_addr1.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Advance ledger time by 48 hours + 1 second
@@ -637,7 +671,7 @@ fn test_payout_address_rotation_delay_success_after_48_hours() {
         &None,
         &Some(payout_addr2.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let merchant = client.get_merchant(&merchant_id);
@@ -665,7 +699,7 @@ fn test_suspend_merchant_unauthorized() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     client.suspend_merchant(
@@ -692,7 +726,7 @@ fn test_set_and_get_metadata_hash() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Set IPFS hash
@@ -719,7 +753,7 @@ fn test_metadata_hash_initially_none() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let hash = client.get_metadata_hash(&merchant_id);
@@ -742,7 +776,7 @@ fn test_add_and_get_currency_payout() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Add payout addresses for different currencies
@@ -784,7 +818,7 @@ fn test_get_all_currency_payouts() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let usdc_payout = Address::generate(&env);
@@ -821,7 +855,7 @@ fn test_add_to_whitelist() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let addr1 = Address::generate(&env);
@@ -849,7 +883,7 @@ fn test_remove_from_whitelist() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let addr1 = Address::generate(&env);
@@ -880,7 +914,7 @@ fn test_is_address_whitelisted() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let addr1 = Address::generate(&env);
@@ -914,7 +948,7 @@ fn test_update_merchant_with_non_whitelisted_payout() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let whitelisted_addr = Address::generate(&env);
@@ -931,7 +965,7 @@ fn test_update_merchant_with_non_whitelisted_payout() {
         &None,
         &Some(non_whitelisted_addr),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 }
 
@@ -950,7 +984,7 @@ fn test_update_merchant_with_whitelisted_payout() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let whitelisted_addr = Address::generate(&env);
@@ -966,7 +1000,7 @@ fn test_update_merchant_with_whitelisted_payout() {
         &None,
         &Some(whitelisted_addr.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let merchant = client.get_merchant(&merchant_id);
@@ -989,7 +1023,7 @@ fn test_add_currency_payout_with_non_whitelisted_address() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let whitelisted_addr = Address::generate(&env);
@@ -1021,7 +1055,7 @@ fn test_add_currency_payout_with_whitelisted_address() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let whitelisted_addr = Address::generate(&env);
@@ -1071,7 +1105,7 @@ fn test_pagination_with_large_merchant_list() {
             &String::from_str(&env, "USDC"),
             &None,
             &None,
-            &None,
+            &MaybeFeeConfig::None,
         );
     }
 
@@ -1117,7 +1151,7 @@ fn test_get_all_merchants_pagination_offset_one() {
             &String::from_str(&env, "USDC"),
             &None,
             &None,
-            &None,
+            &MaybeFeeConfig::None,
         );
     }
 
@@ -1146,7 +1180,7 @@ fn test_get_all_merchants_zero_limit_returns_empty() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Zero limit should return empty vector
@@ -1175,7 +1209,7 @@ fn test_full_merchant_lifecycle_with_all_features() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Set IPFS metadata hash
@@ -1231,7 +1265,7 @@ fn test_verify_merchant_with_oracle_signature() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let signature = String::from_str(&env, "0x1234567890abcdef");
@@ -1262,7 +1296,7 @@ fn test_set_kyc_tier_with_oracle_signature() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let signature = String::from_str(&env, "0xabcdef1234567890");
@@ -1315,7 +1349,7 @@ fn setup_volume_cap_env(
         &String::from_str(env, "USDC"),
         &None::<Address>,
         &None::<String>,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     (admin, payment_client, registry_client, merchant, oracle)
@@ -1354,8 +1388,10 @@ fn test_basic_tier_cap_enforced() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1380,8 +1416,10 @@ fn test_basic_tier_cap_enforced() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
 
     let result = payment_client.try_verify_payment(
@@ -1427,8 +1465,10 @@ fn test_business_tier_no_cap() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1472,8 +1512,10 @@ fn test_volume_resets_next_month() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1501,8 +1543,10 @@ fn test_volume_resets_next_month() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1531,7 +1575,7 @@ fn setup_registry_with_merchant(env: &Env) -> (MerchantRegistryClient<'_>, Addre
         &String::from_str(env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     (client, admin, merchant_id)
@@ -1553,7 +1597,7 @@ fn test_first_payout_address_set_produces_no_history() {
         &None,
         &Some(new_addr.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Merchant has the new payout address
@@ -1584,7 +1628,7 @@ fn test_payout_address_update_appends_old_to_history_and_emits_event() {
         &None,
         &Some(first_addr.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Advance time past the 48-hour rotation delay
@@ -1598,7 +1642,7 @@ fn test_payout_address_update_appends_old_to_history_and_emits_event() {
         &None,
         &Some(second_addr.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let merchant = client.get_merchant(&merchant_id);
@@ -1644,7 +1688,7 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
         &None,
         &Some(addr.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Advance past delay
@@ -1658,11 +1702,15 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
         &None,
         &Some(addr.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let history = client.get_payout_history(&merchant_id);
-    assert_eq!(history.len(), 0, "Expected no history when address is unchanged");
+    assert_eq!(
+        history.len(),
+        0,
+        "Expected no history when address is unchanged"
+    );
 
     // Count PAYOUT_UPDATED events — should be zero
     let events = env.events().all();
@@ -1704,7 +1752,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
         &Some(addr1.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Advance and change to addr2 (history: [addr1])
@@ -1716,7 +1764,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
         &Some(addr2.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Advance and change to addr3 (history: [addr1, addr2])
@@ -1728,7 +1776,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
         &Some(addr3.clone()),
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     let history = client.get_payout_history(&merchant_id);
@@ -1744,7 +1792,6 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         "Second history entry should be addr2"
     );
 }
-
 
 // ── Issue #398: transfer_admin tests ────────────────────────────────────────
 
@@ -1777,13 +1824,10 @@ fn test_transfer_admin_success() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
     client.verify_merchant(&new_admin, &merchant);
-    assert_eq!(
-        client.get_merchant(&merchant).kyc_tier,
-        KycTier::Basic,
-    );
+    assert_eq!(client.get_merchant(&merchant).kyc_tier, KycTier::Basic,);
 }
 
 #[test]
@@ -1819,7 +1863,7 @@ fn test_old_admin_cannot_act_after_transfer() {
         &String::from_str(&env, "USDC"),
         &None,
         &None,
-        &None,
+        &MaybeFeeConfig::None,
     );
 
     // Old admin tries to verify — must fail with Unauthorized.
@@ -1850,7 +1894,10 @@ fn test_transfer_admin_emits_event() {
             false
         }
     });
-    assert!(found, "MERCHANT_REGISTRY/ADMIN_TRANSFERRED event not emitted");
+    assert!(
+        found,
+        "MERCHANT_REGISTRY/ADMIN_TRANSFERRED event not emitted"
+    );
 }
 
 // ─── Customer Whitelist Mode Tests (Issue #516) ──────────────────────────────
@@ -1860,8 +1907,7 @@ fn test_whitelist_mode_requires_business_tier() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (_admin, _payment_client, registry_client, merchant, _oracle) =
-        setup_volume_cap_env(&env);
+    let (_admin, _payment_client, registry_client, merchant, _oracle) = setup_volume_cap_env(&env);
 
     // Merchant is still Unverified — enabling whitelist mode must fail.
     let result = registry_client.try_set_merchant_whitelist_mode(&merchant, &true);
@@ -1873,10 +1919,14 @@ fn test_whitelist_mode_toggle() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (admin, _payment_client, registry_client, merchant, _oracle) =
-        setup_volume_cap_env(&env);
+    let (admin, _payment_client, registry_client, merchant, _oracle) = setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &None);
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Business,
+        &MaybeFeeConfig::None,
+    );
 
     registry_client.set_merchant_whitelist_mode(&merchant, &true);
     assert!(registry_client.get_merchant(&merchant).whitelist_mode);
@@ -1891,10 +1941,14 @@ fn test_non_whitelisted_payer_rejected() {
     env.mock_all_auths();
     env.ledger().with_mut(|li| li.timestamp = 1_000_000);
 
-    let (admin, payment_client, registry_client, merchant, _oracle) =
-        setup_volume_cap_env(&env);
+    let (admin, payment_client, registry_client, merchant, _oracle) = setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &None);
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Business,
+        &MaybeFeeConfig::None,
+    );
     registry_client.set_merchant_whitelist_mode(&merchant, &true);
 
     let payer = Address::generate(&env);
@@ -1913,8 +1967,10 @@ fn test_non_whitelisted_payer_rejected() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
 
     assert!(result.is_err(), "Expected PayerNotWhitelisted error");
@@ -1926,10 +1982,14 @@ fn test_whitelisted_payer_accepted() {
     env.mock_all_auths();
     env.ledger().with_mut(|li| li.timestamp = 1_000_000);
 
-    let (admin, payment_client, registry_client, merchant, _oracle) =
-        setup_volume_cap_env(&env);
+    let (admin, payment_client, registry_client, merchant, _oracle) = setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &None);
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Business,
+        &MaybeFeeConfig::None,
+    );
     registry_client.set_merchant_whitelist_mode(&merchant, &true);
 
     let payer = Address::generate(&env);
@@ -1950,8 +2010,10 @@ fn test_whitelisted_payer_accepted() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
+            tip_enabled: false,
     });
 
     assert_eq!(payment.merchant_id, merchant);
@@ -1959,4 +2021,231 @@ fn test_whitelisted_payer_accepted() {
     // Removing the payer from the whitelist should block subsequent payments.
     registry_client.remove_from_customer_whitelist(&merchant, &payer);
     assert!(!registry_client.is_customer_whitelisted(&merchant, &payer));
+}
+
+#[test]
+fn test_auto_upgrade_kyc_tier_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+    let processor_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_payment_processor_address(&admin, &processor_id);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    // Auto upgrade from Unverified to Basic
+    client.auto_upgrade_kyc_tier(&processor_id, &merchant_id, &KycTier::Basic);
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert_eq!(merchant.kyc_tier, KycTier::Basic);
+}
+
+#[test]
+fn test_system_callbacks_require_configured_contracts() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let refund_manager = Address::generate(&env);
+    let payment_processor = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_refund_manager_address(&admin, &refund_manager);
+    client.set_payment_processor_address(&admin, &payment_processor);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    assert!(matches!(
+        client.try_suspend_merchant_by_system(
+            &attacker,
+            &merchant_id,
+            &String::from_str(&env, "griefing"),
+            &u64::MAX,
+        ),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+    assert!(matches!(
+        client.try_set_last_settlement_at(&attacker, &merchant_id, &123u64),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+    assert!(matches!(
+        client.try_increment_merchant_dispute_count(&attacker, &merchant_id),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+    assert!(matches!(
+        client.try_increment_resolved_against_count(&attacker, &merchant_id),
+        Err(Ok(MerchantError::Unauthorized))
+    ));
+
+    assert_eq!(
+        client.increment_merchant_dispute_count(&payment_processor, &merchant_id),
+        1
+    );
+    client.set_last_settlement_at(&payment_processor, &merchant_id, &123u64);
+    assert_eq!(
+        client.increment_resolved_against_count(&refund_manager, &merchant_id),
+        1
+    );
+    client.suspend_merchant_by_system(
+        &refund_manager,
+        &merchant_id,
+        &String::from_str(&env, "trusted callback"),
+        &u64::MAX,
+    );
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert!(!merchant.active);
+    assert_eq!(merchant.last_settlement_at, Some(123));
+    assert_eq!(merchant.dispute_count, 1);
+    assert_eq!(merchant.resolved_against_count, 1);
+}
+
+#[test]
+fn test_kyc_tier_limits_all_tiers_and_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1700000000); // stable timestamp
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    // Tier 0 (Unverified): Max single 100 USDC (100_000_000), monthly 500 USDC (500_000_000)
+    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_ok());
+    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_001).is_err());
+
+    // Upgrade to Tier 1 (Basic): Max single 10,000 USDC (10_000_000_000), monthly 50,000 USDC (50_000_000_000)
+    client.set_kyc_tier_with_signature(&admin, &merchant_id, &KycTier::Basic, &MaybeFeeConfig::None);
+    assert!(client.try_check_kyc_limit(&merchant_id, &10_000_000_000).is_ok());
+    assert!(client.try_check_kyc_limit(&merchant_id, &10_000_000_001).is_err());
+
+    // Upgrade to Tier 2 (Full): Unlimited
+    client.set_kyc_tier_with_signature(&admin, &merchant_id, &KycTier::Full, &MaybeFeeConfig::None);
+    assert!(client.try_check_kyc_limit(&merchant_id, &1_000_000_000_000).is_ok());
+}
+
+#[test]
+fn test_kyc_tier_monthly_volume_reset() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // 2026-01-15 00:00:00 UTC = 1768435200
+    env.ledger().with_mut(|li| li.timestamp = 1768435200);
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    // Accumulate volume up to tier 0 monthly cap (500 USDC)
+    for _ in 0..5 {
+        assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_ok());
+    }
+    // 6th payment in same month breaches 500 USDC cap
+    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_err());
+
+    // Advance to 2026-02-01 00:00:00 UTC = 1769904000 (1st of next month)
+    env.ledger().with_mut(|li| li.timestamp = 1769904000);
+
+    // Monthly volume resets, payment succeeds again
+    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_ok());
+}
+
+fn test_list_merchants_page_size_too_large() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let res = client.try_list_merchants(&None, &51);
+    assert_eq!(res, Err(Ok(MerchantError::PageSizeTooLarge)));
+}
+
+#[test]
+fn test_list_merchants_pagination_cursor_and_integrity() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    // Register 5 merchants
+    for i in 0..5 {
+        let m_id = Address::generate(&env);
+        let name = String::from_str(&env, "Merchant");
+        let curr = String::from_str(&env, "USDC");
+        client.register_merchant(&m_id, &name, &curr, &None, &None, &MaybeFeeConfig::None);
+    }
+
+    // Page 1: limit 2
+    let page1 = client.list_merchants(&None, &2);
+    assert_eq!(page1.merchants.len(), 2);
+    assert!(page1.next_cursor.is_some());
+
+    // Page 2: limit 2 using next_cursor
+    let page2 = client.list_merchants(&page1.next_cursor, &2);
+    assert_eq!(page2.merchants.len(), 2);
+    assert!(page2.next_cursor.is_some());
+
+    // Page 3: limit 2 using next_cursor
+    let page3 = client.list_merchants(&page2.next_cursor, &2);
+    assert_eq!(page3.merchants.len(), 1);
+    assert!(page3.next_cursor.is_none());
+
+    // Ensure all 5 are distinct
+    let m1_0 = page1.merchants.get(0).unwrap().merchant_id;
+    let m1_1 = page1.merchants.get(1).unwrap().merchant_id;
+    let m2_0 = page2.merchants.get(0).unwrap().merchant_id;
+    let m2_1 = page2.merchants.get(1).unwrap().merchant_id;
+    let m3_0 = page3.merchants.get(0).unwrap().merchant_id;
+
+    assert_ne!(m1_0, m1_1);
+    assert_ne!(m1_1, m2_0);
+    assert_ne!(m2_0, m2_1);
+    assert_ne!(m2_1, m3_0);
 }

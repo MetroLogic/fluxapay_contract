@@ -16,11 +16,14 @@ fluxapay/test_snapshots
 # Environment variables (do not commit secrets)
 .env
 .env.local
+# Written by scripts/deploy-testnet.sh and scripts/onboard.sh, and holds a
+# deployer/merchant secret key (Issue #818).
+.env.testnet
+.env.mainnet
 
 # Node.js
 node_modules
 dist
-package-lock.json
 
 # actionlint binary (installed at CI runtime via rhysd/actionlint action)
 /actionlint

@@ -31,7 +31,7 @@ For security vulnerabilities, see [SECURITY.md](SECURITY.md) instead of opening 
 | wasm32 target | — | Automatically installed via `rust-toolchain.toml` |
 | Stellar CLI | 21.x | [stellar.org/docs](https://developers.stellar.org/docs/tools/developer-tools/stellar-cli) |
 | cargo-audit | latest | `cargo install cargo-audit` |
-| cargo-deny | latest | `cargo install cargo-deny` |
+| cargo-deny | 0.20.2 | `cargo install --locked cargo-deny --version 0.20.2` |
 
 ### Environment Variables
 
@@ -42,7 +42,22 @@ cp .env.example .env
 # Edit .env — do NOT commit this file
 ```
 
+To verify that your `.env` defines every key listed in `.env.example`, run:
+
+```bash
+# from the repository root
+bsh scripts/check-env.sh
+```
+
+The script is non-fatal: for each key missing from `.env` it prints a
+warning to stderr and exits 0. Run it after pulling changes that touch
+`.env.example` to catch newly required variables.
+
+See [scripts/README.md](scripts/README.md) for details on all operational scripts and their required environment variables.
+
 See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to invoke contract functions on Stellar testnet.
+
+To deploy the contracts to testnet, run `bash scripts/deploy-testnet.sh` from the repository root after setting `STELLAR_SECRET_KEY` and `STELLAR_NETWORK`.
 
 ---
 
@@ -94,7 +109,7 @@ Run all of these before opening a PR:
 cd fluxapay && cargo fmt --check
 
 # Lint (warnings are errors)
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features - -D warnings
 
 # Security audit
 cargo audit --deny warnings
@@ -109,7 +124,18 @@ Or via Makefile:
 cd fluxapay && make fmt && cargo clippy --all-targets --all-features
 ```
 
-CI runs `cargo deny check bans licenses advisories` automatically in the `Security Scan` job (see `.github/workflows/ci.yml`), gated by `deny.toml`, and it must pass before the build job runs.
+CI runs `cargo deny check bans licenses advisories --warn unsound --warn unmaintained` automatically in the `Security Scan` job (see `.github/workflows/ci.yml`), gated by `deny.toml`; the final CI success check requires it to pass. Unsound and unmaintained advisories remain visible as warnings, matching the repository's existing non-blocking policy; vulnerabilities remain errors.
+
+The duplicate-version check excludes dev-dependency edges
+(`multiple-versions-include-dev = false` in `deny.toml`), so test-only crates do
+not add noise to production dependency version checks. Explicit crate bans still
+apply to the dependency graph cargo-deny evaluates. If a production dependency
+must be exempted from a future ban or duplicate-version rule, add a narrowly
+scoped entry to `[bans].skip` with the exact crate name and version plus a
+`reason` describing why it is necessary and how it is limited. Do not exempt a
+crate merely because it appears in tests if it is also reachable through a
+production dependency. Review the dependency tree (`cargo tree -e normal`) and
+remove obsolete exceptions when upgrading dependencies.
 
 ### Linting GitHub Actions Workflows (actionlint)
 
@@ -129,7 +155,74 @@ go install github.com/rhysd/actionlint/cmd/actionlint@latest
 actionlint
 ```
 
+### WASM Size Regression Baseline (Issue #813)
 
+CI compares the built/optimized contract WASM against `.wasm-size-baseline`
+and **fails if the binary grows by more than 5%**.
+
+The baseline file contains a single integer: the size in **bytes** of the
+primary `fluxapay` WASM after `stellar contract optimize`.
+
+When a change legitimately increases WASM size (new feature, unavoidable
+growth), update the baseline in a **dedicated commit** with an explanation:
+
+```bash
+# After building + optimizing:
+SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/fluxapay*.wasm | head -1)
+# or on macOS:
+# SIZE=$(stat -f%z target/wasm32-unknown-unknown/release/fluxapay.wasm)
+
+echo "$SIZE" > .wasm-size-baseline
+git add .wasm-size-baseline
+git commit -m "chore(ci): bump WASM size baseline to ${SIZE} after <reason>"
+```
+
+Do not silently raise the baseline in an unrelated feature commit.
+
+## 4a. Pre-commit Hooks
+
+We use [lefthook](https://github.com/evilmartians/lefthook) to run `cargo fmt`, `cargo clippy`, TypeScript type checks, `eslint`, and secret scanning before each commit.
+
+### Installation
+
+```bash
+# Install lefthook (macOS / Linux) via Homebrew
+brew install lefthook
+
+# ...or via npm
+npm install -g lefthook
+
+# ...or via Go
+go install github.com/evilmartians/lefthook@latest
+
+# Install hooks for this repo
+lefthook install
+```
+
+Secret scanning requires [`gitleaks`](https://github.com/gitleaks/gitleaks) on your `PATH`:
+
+```bash
+brew install gitleaks
+# or
+go install github.com/gitleaks/gitleaks/v8@latest
+```
+
+If `gitleaks` isn't installed, the hook prints a warning and skips the scan rather than blocking the commit -- CI still runs the full scan.
+
+### What the hooks do
+
+- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on staged `.rs` files
+- **pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+- **pre-commit** (TypeScript/TSX files in `sdk/`, `indexer/`, `backend/`, `dashboard/`): runs `npx eslint` on only the staged files
+- **pre-commit** (all staged files): runs `gitleaks protect --staged` to block commits that introduce secrets (API keys, private keys, tokens)
+
+### Skipping hooks
+
+For emergency commits, you can bypass all hooks:
+
+```bash
+SKIP_HOOKS=1 git commit -m "emergency fix"
+```
 
 ## 5. Branch Naming Conventions
 
@@ -143,8 +236,7 @@ actionlint
 
 **Examples:**
 
-```
-feat/stream-rate-decrease
+```feat/stream-rate-decrease
 fix/payment-id-validation
 docs/contributing-guide
 security/audit-remediation
@@ -156,8 +248,7 @@ security/audit-remediation
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
-<type>(<scope>): <short summary>
+````<type>(<scope>): <short summary>
 
 [optional body]
 
@@ -184,13 +275,26 @@ feat(access-control): expose get_role_members and has_role on public contract AB
 Before marking a PR ready for review:
 
 - [ ] All tests pass (`make test`)
-- [ ] No new Clippy warnings (`cargo clippy --all-targets --all-features -- -D warnings`)
+- [ ] No new Clippy warnings (`cargo clippy --all-targets --all-features - -D warnings`)
+- [ ] Automated CI security checks (`cargo-deny` and `cargo-audit`) pass (enforced via branch protection rules targeting `main`)
 - [ ] `CHANGELOG.md` updated under `## Unreleased` (or PR has the `skip-changelog` label for non-user-facing changes)
 - [ ] New features and bug fixes include tests
 - [ ] PR title follows Conventional Commits format
 - [ ] PR description explains *what* changed, *why*, and how it was tested
+- [ ] If your change affects the compiled contract (new dependency, new public function, large refactor), run `./scripts/update-wasm-baseline.sh` and commit the updated `.wasm-size-baseline` so the CI size gate compares against the right number
 
 ### Changelog Format
+
+Every user-facing PR **must** update [`CHANGELOG.md`](CHANGELOG.md) under the
+`## Unreleased` section, **or** carry the `skip-changelog` label (CI/CD, docs-only,
+or internal refactors with no user-facing impact).
+
+The [changelog-check](.github/workflows/changelog-check.yml) workflow:
+
+1. Fails the PR if `CHANGELOG.md` was not touched and the PR lacks `skip-changelog`.
+2. Allows a full bypass when the PR is labelled `skip-changelog`.
+3. When `CHANGELOG.md` is updated, requires the Unreleased section to contain at
+   least one bullet entry that references this PR number (e.g. `PR #123`).
 
 Follow [Keep a Changelog](https://keepachangelog.com/) categories:
 
@@ -198,21 +302,24 @@ Follow [Keep a Changelog](https://keepachangelog.com/) categories:
 ## Unreleased
 
 ### Added
-- `get_role_members` and `has_role` exposed on `PaymentProcessor` and `RefundManager` ABI
+- **Issue #831 / PR #123**: Multi-payee payment streams with proportional withdraw.
 
 ### Fixed
-- `payment_id` format validation now enforces 3–64 alphanumeric/-/_ characters
+- **PR #123**: `payment_id` format validation now enforces 3–64 alphanumeric/-/_ characters.
 ```
 
 Use the `skip-changelog` label only for CI/CD, docs, or internal refactors with no user-facing impact.
+
+After opening your PR, add the PR number to the Unreleased bullet (CI will fail
+until the entry references `#<pr-number>`).
 
 ---
 
 ## 7.1. Dependabot PRs
 
-This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
+Whis repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
 
-- **Cargo dependencies** (Rust crates)
+- **Cargo dependencies** (Rust crates)
 - **GitHub Actions** (CI workflow actions)
 - **npm dependencies** (SDK packages)
 
@@ -266,6 +373,14 @@ FluxaPay contract events are defined with `#[contractevent]`. Follow these steps
 - Subscribed to in `indexer/sync.yml` under the `merchant_registry` contract mapping
 - Typed in the SDK alongside the other merchant registry events
 
+### Adding SDK Error Locales (Issue #852)
+
+Contributors can add support for new languages to the SDK error system:
+1. Create a new JSON file in `sdk/src/locales/<locale>.json` (e.g., `de.json`, `sw.json`).
+2. Map each contract error code number to its translated, user-friendly message (refer to `sdk/src/locales/en.json` for the complete list of error codes).
+3. Register the new locale in `sdk/src/locales/index.ts` under `SUPPORTED_LOCALES` and the `MESSAGES` map.
+4. Run `npm test` in `sdk/` to ensure all tests pass.
+
 ---
 
 ## 8. Issue Workflow
@@ -295,10 +410,4 @@ Open an issue using the **Feature Request** template. Describe the use case befo
 
 ### Security Vulnerabilities
 
-Do **not** open a public issue. Follow the responsible disclosure process in [SECURITY.md](SECURITY.md).
-
----
-
-## Questions?
-
-Join the community on [Telegram](https://t.me/+m23gN14007w0ZmQ0) or open a GitHub Discussion.
+Do 

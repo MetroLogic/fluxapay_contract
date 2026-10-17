@@ -1,5 +1,5 @@
 // Updated DexRouter with pre-execution checks, path validation, price impact guard, and fallback logic.
-use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Vec, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol, Vec};
 
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,7 +92,8 @@ impl DexRouter {
             return Err(DexRouterError::InsufficientLiquidity);
         }
 
-        let primary_result = Self::execute_swap(&env, amount_in, amount_out_min, &path, to.clone(), deadline);
+        let primary_result =
+            Self::execute_swap_internal(&env, amount_in, amount_out_min, &path, to.clone(), deadline);
         if primary_result.is_ok() {
             return primary_result;
         }
@@ -105,7 +106,72 @@ impl DexRouter {
         Err(DexRouterError::SwapFailed)
     }
 
-    fn execute_swap(
+    /// Execute a direct token swap with slippage tolerance and max_slippage_bps guard.
+    ///
+    /// # Parameters
+    /// * `caller` - The account requesting the swap (authorized)
+    /// * `token_in` - The input token contract address
+    /// * `token_out` - The output token contract address
+    /// * `amount_in` - The exact amount of token_in to swap
+    /// * `min_amount_out` - Minimum output amount acceptable to caller (reverts with SlippageExceeded if below)
+    /// * `max_slippage_bps` - Maximum allowable slippage in basis points against quoted price (≤ 5000 = 50% max)
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+    pub fn execute_swap(
+        env: Env,
+        caller: Address,
+        token_in: Address,
+        token_out: Address,
+        amount_in: i128,
+        min_amount_out: i128,
+        max_slippage_bps: u32,
+    ) -> Result<i128, DexRouterError> {
+        caller.require_auth();
+
+        if max_slippage_bps > 5000 {
+            return Err(DexRouterError::SlippageExceeded);
+        }
+
+        let mut path = Vec::new(&env);
+        path.push_back(token_in.clone());
+        path.push_back(token_out.clone());
+
+        Self::validate_path(&path)?;
+        if !Self::check_liquidity(&env, &path) {
+            return Err(DexRouterError::InsufficientLiquidity);
+        }
+
+        let amounts = Self::get_amounts_out(env.clone(), amount_in, path.clone());
+        if amounts.len() < 2 {
+            return Err(DexRouterError::NoOutputAmount);
+        }
+
+        let quoted_out = amounts.get(1).unwrap_or(0i128);
+        if quoted_out <= 0 {
+            return Err(DexRouterError::NoOutputAmount);
+        }
+
+        // Secondary check against quoted price
+        let min_from_bps = quoted_out
+            .saturating_mul(10_000 - max_slippage_bps as i128)
+            .saturating_div(10_000);
+
+        let actual_out = quoted_out;
+        if actual_out < min_amount_out || actual_out < min_from_bps {
+            return Err(DexRouterError::SlippageExceeded);
+        }
+
+        Self::price_impact_guard(amount_in, actual_out)?;
+
+        env.events().publish(
+            (Symbol::new(&env, "SWAP"), Symbol::new(&env, "EXECUTED")),
+            (amount_in, actual_out, caller, env.ledger().timestamp()),
+        );
+
+        Ok(actual_out)
+    }
+
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+    fn execute_swap_internal(
         env: &Env,
         amount_in: i128,
         amount_out_min: i128,
@@ -127,15 +193,16 @@ impl DexRouter {
         }
         Self::price_impact_guard(amount_in, final_output)?;
         env.events().publish(
-            (Symbol::new(&env, "SWAP"), Symbol::new(&env, "EXECUTED")),
+            (Symbol::new(env, "SWAP"), Symbol::new(env, "EXECUTED")),
             (amount_in, final_output, to, deadline),
         );
         Ok(amounts)
     }
 
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
     fn refund_caller(env: &Env, recipient: Address, amount: i128) -> Result<(), DexRouterError> {
         env.events().publish(
-            (Symbol::new(&env, "REFUND"), Symbol::new(&env, "CALLER")),
+            (Symbol::new(env, "REFUND"), Symbol::new(env, "CALLER")),
             (recipient, amount),
         );
         Ok(())

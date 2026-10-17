@@ -120,7 +120,31 @@ refund_client.reject_dispute(
 );
 ```
 
-### 5. get_dispute
+### 5. batch_resolve_disputes
+Resolves up to 20 disputes in one invocation. This adjudicates each dispute
+and settles its dispute bonds; unlike `resolve_dispute_with_refund`, it does
+not create a refund for the disputed payment amount.
+
+```rust
+pub struct DisputeResolution {
+    pub dispute_id: String,
+    pub in_favor_of: Address,
+    pub notes: String,
+}
+```
+
+Each item is processed independently and returns `Ok(())` or its own `Error`.
+The favored address must be the disputing customer or the merchant. Their bond
+is returned, while the other party's bond is forfeited to the admin/treasury.
+The batch operator must authenticate and hold either the `ADMIN` or
+`SETTLEMENT_OPERATOR` role. A batch larger than `MAX_DISPUTE_BATCH` returns
+`Error::BatchTooLarge` without processing any items.
+
+```rust
+let results = refund_client.batch_resolve_disputes(&operator, &resolutions);
+```
+
+### 6. get_dispute
 Retrieves dispute details by ID.
 
 **Parameters:**
@@ -133,7 +157,7 @@ Retrieves dispute details by ID.
 let dispute = refund_client.get_dispute(&dispute_id);
 ```
 
-### 6. get_payment_disputes
+### 7. get_payment_disputes
 Retrieves all disputes associated with a payment.
 
 **Parameters:**
