@@ -29,15 +29,20 @@ interface InvoiceRow {
 // ------------------------------------------------------------------ status badge
 
 const STATUS_STYLES: Record<string, string> = {
-  Pending: "bg-yellow-100 text-yellow-800 border border-yellow-300",
-  Paid: "bg-green-100 text-greengreen-800 border border-green-300",
-  Overdue: "bg-red-100 text-red-800 border border-red-300",
-  Voided: "bg-gray-100 text-gray-500 border border-gray-300 line-through",
+  Pending:
+    "bg-yellow-100 text-yellow-800 border border-yellow-300 dark:bg-yellow-900/40 dark:text-yellow-200 dark:border-yellow-700",
+  Paid:
+    "bg-green-100 text-green-800 border border-green-300 dark:bg-green-900/40 dark:text-green-200 dark:border-green-700",
+  Overdue:
+    "bg-red-100 text-red-800 border border-red-300 dark:bg-red-900/40 dark:text-red-200 dark:border-red-700",
+  Voided:
+    "bg-gray-100 text-gray-500 border border-gray-300 line-through dark:bg-gray-800 dark:text-gray-400 dark:border-gray-600",
 };
 
 function StatusBadge({ status }: { status: string }) {
   const classes =
-    STATUS_STYLES[status] ?? "bg-gray-100 text-gray-600 border border-gray-300";
+    STATUS_STYLES[status] ??
+    "bg-gray-100 text-gray-600 border border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600";
   return (
     <span
       className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${classes}`}
@@ -153,22 +158,22 @@ export default function InvoicesPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 p-6">
+    <main className="min-h-screen bg-gray-50 p-6 dark:bg-gray-900">
       <div className="mx-auto max-w-5xl">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-900">Invoices</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Invoices</h1>
           <div className="flex items-center gap-3">
-            <a href="/payment-links" className="text-sm font-medium text-indigo-700 hover:text-indigo-900">
+            <a href="/payment-links" className="text-sm font-medium text-indigo-700 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300">
               Payment links
             </a>
-            <a href="/subscriptions" className="text-sm font-medium text-indigo-700 hover:text-indigo-900">
+            <a href="/subscriptions" className="text-sm font-medium text-indigo-700 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300">
               Subscriptions
             </a>
             <button
               onClick={() => void fetchInvoices()}
               disabled={loading}
-              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
             >
               {loading ? "Loading…" : "Refresh"}
             </button>
@@ -185,8 +190,8 @@ export default function InvoicesPage() {
               onClick={() => setStatusFilter(opt.value)}
               className={`rounded-full px-3 py-1 text-sm font-medium transition-colors ${
                 statusFilter === opt.value
-                  ? "bg-indigo-600 text-white"
-                  : "bg-white text-gray-600 border border-gray-300 hover:bg-gray-100"
+                  ? "bg-indigo-600 text-white dark:bg-indigo-500"
+                  : "bg-white text-gray-600 border border-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600 dark:hover:bg-gray-700"
               }`}
             >
               {opt.label}
@@ -198,23 +203,23 @@ export default function InvoicesPage() {
         {error && (
           <div
             role="alert"
-            className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700"
+            className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/40 dark:text-red-200"
           >
             {error}
           </div>
         )}
 
         {/* Table */}
-        <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead className="bg-gray-50">
+        <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
+          <table className="min-w-full divide-y divide-gray-200 text-sm dark:divide-gray-700">
+            <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
                 {["Invoice ID", "Amount (USDC)", "Status", "Due Date", "Created", "Actions"].map(
                   (col) => (
                     <th
                       key={col}
                       scope="col"
-                      className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500"
+                      className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400"
                     >
                       {col}
                     </th>
@@ -222,49 +227,48 @@ export default function InvoicesPage() {
                 )}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
               {loading && invoices.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-400">
+                  <td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">
                     Loading…
                   </td>
                 </tr>
               ) : invoices.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-400">
+                  <td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">
                     No invoices found.
                   </td>
                 </tr>
               ) : (
                 invoices.map((inv) => (
-                  <tr key={inv.invoiceId} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                  <tr key={inv.invoiceId} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <td className="px-4 py-3 font-mono text-xs text-gray-700 dark:text-gray-300">
                       {inv.invoiceId}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">
+                    <td className="px-4 py-3 text-gray-900 dark:text-gray-100">
                       {formatAmount(inv.totalAmount)}
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={inv.status} />
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {formatDate(inv.dueDate)}
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {formatDate(inv.createdAt)}
                     </td>
                     <td className="px-4 py-3">
-                      {inv.status !== "Paid" && inv.status !== "Voided" ? (
+                      {inv.status !== "Voided" && inv.status !== "Paid" ? (
                         <button
                           onClick={() => void handleVoid(inv.invoiceId)}
                           disabled={voidingId === inv.invoiceId}
-                          className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"
-                          aria-label={`Void invoice ${inv.invoiceId}`}
+                          className="text-sm font-medium text-red-600 hover:text-red-800 disabled:opacity-50 dark:text-red-400 dark:hover:text-red-300"
                         >
                           {voidingId === inv.invoiceId ? "Voiding…" : "Void"}
                         </button>
                       ) : (
-                        <span className="text-xs text-gray-300">—</span>
+                        <span className="text-gray-400 dark:text-gray-500">—</span>
                       )}
                     </td>
                   </tr>

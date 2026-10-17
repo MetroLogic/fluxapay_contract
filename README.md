@@ -331,3 +331,6 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 - #805: bug: merchant_registry_test.rs tests share a single Soroban test environment, causing test order dependency
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
+
+<!-- handsoff-issue-969 -->
+- #969: feat: add date range and currency filters to dashboard transactions table
