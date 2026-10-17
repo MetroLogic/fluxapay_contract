@@ -625,6 +625,13 @@ impl PaymentProcessor {
         Self::get_token_treasury_balance(env, usdc_token)
     }
 
+    /// Return the treasury balance accrued for a specific settlement token.
+    /// Fees are tracked per-token so that non-USDC settlement fees remain
+    /// redeemable in the token they were actually collected in.
+    pub fn get_treasury_balance_for_token(env: Env, token_address: Address) -> i128 {
+        Self::get_token_treasury_balance(env, token_address)
+    }
+
     /// Get treasury balance for a specific token.
     fn get_token_treasury_balance(env: Env, token_address: Address) -> i128 {
         env.storage()
@@ -760,21 +767,45 @@ impl PaymentProcessor {
             return Err(Error::InvalidAmount);
         }
 
-        let treasury_balance = Self::get_treasury_balance(env.clone());
-        if amount > treasury_balance {
-            return Err(Error::InsufficientTreasuryBalance);
-        }
-
         let usdc_token_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::UsdcToken)
             .ok_or(Error::Unauthorized)?;
+        Self::withdraw_treasury_for_token(env, admin, usdc_token_address, amount, destination)
+    }
+
+    /// Admin withdrawal of accumulated treasury fees for a specific settlement
+    /// token. Fees are tracked per-token, so only the balance accrued in
+    /// `token_address` can be withdrawn in that token. Emits
+    /// `TREASURY/WITHDRAWN` with `(amount, destination)` and appends to the
+    /// paginated history log.
+    pub fn withdraw_treasury_for_token(
+        env: Env,
+        admin: Address,
+        token_address: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let treasury_balance = Self::get_token_treasury_balance(env.clone(), token_address.clone());
+        if amount > treasury_balance {
+            return Err(Error::InsufficientTreasuryBalance);
+        }
+
         let token_client = token::TokenClient::new(&env, &usdc_token_address);
         let contract_address = env.current_contract_address();
 
         env.storage().persistent().set(
-            &DataKey::TreasuryBalance,
+            &DataKey::TokenTreasuryBalance(token_address),
             &treasury_balance.saturating_sub(amount),
         );
 
