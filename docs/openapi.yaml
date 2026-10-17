@@ -1,0 +1,814 @@
+openapi: 3.1.0
+info:
+  title: FluxaPay API
+  version: 1.0.0
+  description: |
+    Machine-readable specification for the FluxaPay REST API.
+    Covers all `/v1/*` endpoints plus the health probe.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.fluxapay.io
+    description: Production
+security:
+  - bearerAuth: []
+tags:
+  - name: Payments
+  - name: Payment Links
+  - name: Invoices
+  - name: Refunds
+  - name: Disputes
+  - name: FX
+  - name: Webhooks
+  - name: Merchants
+  - name: Subscriptions
+  - name: Health
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Service health probe
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/payments:
+    get:
+      tags: [Payments]
+      summary: List payments
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of payments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Payment'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    post:
+      tags: [Payments]
+      summary: Create a payment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentCreate'
+      responses:
+        '201':
+          description: Payment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /v1/payments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Payments]
+      summary: Retrieve a payment
+      responses:
+        '200':
+          description: The payment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/payment-links:
+    get:
+      tags: [Payment Links]
+      summary: List payment links
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of payment links
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PaymentLink'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Payment Links]
+      summary: Create a payment link
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentLinkCreate'
+      responses:
+        '201':
+          description: Payment link created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentLink'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/invoices:
+    get:
+      tags: [Invoices]
+      summary: List invoices
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of invoices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invoice'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Invoices]
+      summary: Create an invoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvoiceCreate'
+      responses:
+        '201':
+          description: Invoice created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/refunds:
+    get:
+      tags: [Refunds]
+      summary: List refunds
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of refunds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Refund'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Refunds]
+      summary: Create a refund
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundCreate'
+      responses:
+        '201':
+          description: Refund created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/disputes:
+    get:
+      tags: [Disputes]
+      summary: List disputes
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of disputes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Dispute'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/disputes/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Disputes]
+      summary: Retrieve a dispute
+      responses:
+        '200':
+          description: The dispute
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/fx/convert:
+    post:
+      tags: [FX]
+      summary: Convert between currencies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FxConvertRequest'
+      responses:
+        '200':
+          description: Conversion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FxConvertResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /v1/fx/rates:
+    get:
+      tags: [FX]
+      summary: List exchange rates
+      parameters:
+        - name: base
+          in: query
+          required: false
+          schema:
+            type: string
+            example: USD
+        - name: quote
+          in: query
+          required: false
+          schema:
+            type: string
+            example: EUR
+      responses:
+        '200':
+          description: Exchange rates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FxRate'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/webhooks:
+    get:
+      tags: [Webhooks]
+      summary: List webhook endpoints
+      responses:
+        '200':
+          description: A list of webhook endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Webhook'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Webhooks]
+      summary: Register a webhook endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreate'
+      responses:
+        '201':
+          description: Webhook registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchants:
+    get:
+      tags: [Merchants]
+      summary: List merchants
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of merchants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Merchant'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Merchants]
+      summary: Create a merchant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MerchantCreate'
+      responses:
+        '201':
+          description: Merchant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Merchant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/subscriptions:
+    get:
+      tags: [Subscriptions]
+      summary: List subscriptions
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A paginated list of subscriptions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subscription'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Subscriptions]
+      summary: Create a subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionCreate'
+      responses:
+        '201':
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnprocessableEntity:
+      description: Request understood but semantically invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: Service temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: invalid_request
+        message:
+          type: string
+          example: The request was invalid.
+        details:
+          type: object
+          additionalProperties: true
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          description: Decimal amount as a string to preserve precision
+          example: '100.00'
+        currency:
+          type: string
+          example: USD
+    Payment:
+      type: object
+      required: [id, status, amount, currency, created_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [pending, succeeded, failed, refunded]
+        amount:
+          type: string
+        currency:
+          type: string
+        description:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+    PaymentCreate:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          example: '100.00'
+        currency:
+          type: string
+          example: USD
+        description:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    PaymentLink:
+      type: object
+      required: [id, url, status, created_at]
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [active, expired, disabled]
+        created_at:
+          type: string
+          format: date-time
+    PaymentLinkCreate:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        description:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+    Invoice:
+      type: object
+      required: [id, status, amount, currency, created_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [draft, open, paid, void, uncollectible]
+        amount:
+          type: string
+        currency:
+          type: string
+        due_date:
+          type: [string, 'null']
+          format: date
+        created_at:
+          type: string
+          format: date-time
+    InvoiceCreate:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        customer_id:
+          type: string
+        due_date:
+          type: string
+          format: date
+    Refund:
+      type: object
+      required: [id, payment_id, status, amount, currency, created_at]
+      properties:
+        id:
+          type: string
+        payment_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        amount:
+          type: string
+        currency:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    RefundCreate:
+      type: object
+      required: [payment_id, amount]
+      properties:
+        payment_id:
+          type: string
+        amount:
+          type: string
+        reason:
+          type: string
+    Dispute:
+      type: object
+      required: [id, payment_id, status, amount, currency, created_at]
+      properties:
+        id:
+          type: string
+        payment_id:
+          type: string
+        status:
+          type: string
+          enum: [open, under_review, won, lost]
+        amount:
+          type: string
+        currency:
+          type: string
+        reason:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+    FxConvertRequest:
+      type: object
+      required: [from, to, amount]
+      properties:
+        from:
+          type: string
+          example: USD
+        to:
+          type: string
+          example: EUR
+        amount:
+          type: string
+          example: '100.00'
+    FxConvertResponse:
+      type: object
+      required: [from, to, amount, converted_amount, rate]
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+        amount:
+          type: string
+        converted_amount:
+          type: string
+        rate:
+          type: string
+    FxRate:
+      type: object
+      required: [base, quote, rate]
+      properties:
+        base:
+          type: string
+        quote:
+          type: string
+        rate:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    Webhook:
+      type: object
+      required: [id, url, events, status]
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [active, disabled]
+    WebhookCreate:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        secret:
+          type: string
+    Merchant:
+      type: object
+      required: [id, name, status, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended]
+        created_at:
+          type: string
+          format: date-time
+    MerchantCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+    Subscription:
+      type: object
+      required: [id, merchant_id, status, amount, currency, interval, created_at]
+      properties:
+        id:
+          type: string
+        merchant_id:
+          type: string
+        status:
+          type: string
+          enum: [active, past_due, canceled]
+        amount:
+          type: string
+        currency:
+          type: string
+        interval:
+          type: string
+          enum: [day, week, month, year]
+        created_at:
+          type: string
+          format: date-time
+    SubscriptionCreate:
+      type: object
+      required: [merchant_id, amount, currency, interval]
+      properties:
+        merchant_id:
+          type: string
+        amount:
+          type: string
+        currency:
+          type: string
+        interval:
+          type: string
+          enum: [day, week, month, year]
