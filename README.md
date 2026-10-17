@@ -332,6 +332,8 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
 
+<!-- handsoff-issue-996 -->
+- #996: feat: add dashboard 'Copy Payment Link' button directly to payments table row
 <!-- handsoff-issue-973 -->
 - #973: feat: implement Soroban smart contract event listener for on-chain escrow releases in streams
 <!-- handsoff-issue-980 -->
