@@ -332,6 +332,8 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
 
+<!-- handsoff-issue-989 -->
+- #989: test: add Playwright end-to-end tests for payment link checkout flow
 <!-- handsoff-issue-996 -->
 - #996: feat: add dashboard 'Copy Payment Link' button directly to payments table row
 <!-- handsoff-issue-973 -->
