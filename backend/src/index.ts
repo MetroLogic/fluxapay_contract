@@ -19,6 +19,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #998: token bucket rate limiting on all public API endpoints.
+ * Issue #999: interactive API reference served at `/api-docs` (offline).
  * Issue #962: also exposes merchant payout channel configuration
  * (`/v1/merchants/:id/payout-channels`) for bank/mobile money settlement.
  * Issue #964: also exposes a streamed CSV export of merchant transaction
@@ -199,6 +201,145 @@ if (!SERVER_PUBLIC_KEY || !SERVER_SECRET_KEY || !JWT_SECRET) {
 }
 
 /**
+ * Issue #998: token bucket rate limiting.
+ *
+ * Each tier defines a bucket capacity and refill window. Buckets are keyed by
+ * API key (authenticated routes) or client IP (unauthenticated routes such as
+ * auth and payment links, where no API key exists yet). State lives in Redis
+ * when `REDIS_URL` is set, otherwise an in-memory Map is used as a fallback.
+ */
+interface RateLimitTier {
+  limit: number;
+  windowMs: number;
+  keyBy: "apiKey" | "ip";
+}
+
+interface BucketState {
+  tokens: number;
+  updatedAt: number;
+}
+
+const RATE_LIMIT_TIERS: Record<string, RateLimitTier> = {
+  "POST /v1/payments": { limit: 100, windowMs: 60_000, keyBy: "apiKey" },
+  "GET /v1/payments": { limit: 300, windowMs: 60_000, keyBy: "apiKey" },
+  "GET /v1/payment-links": { limit: 60, windowMs: 60_000, keyBy: "ip" },
+  "POST /v1/fx/convert": { limit: 60, windowMs: 60_000, keyBy: "ip" },
+  "POST /v1/auth": { limit: 10, windowMs: 60_000, keyBy: "ip" },
+  // Admin endpoints get a separate, higher ceiling.
+  "ADMIN /v1": { limit: 1000, windowMs: 60_000, keyBy: "apiKey" },
+};
+
+const buckets = new Map<string, BucketState>();
+
+function resolveTier(method: string, path: string): RateLimitTier | undefined {
+  if (path.startsWith("/v1/admin")) return RATE_LIMIT_TIERS["ADMIN /v1"];
+  if (path.startsWith("/v1/auth")) return RATE_LIMIT_TIERS["POST /v1/auth"];
+  if (path.startsWith("/v1/payment-links")) return RATE_LIMIT_TIERS["GET /v1/payment-links"];
+  if (path.startsWith("/v1/fx/convert")) return RATE_LIMIT_TIERS["POST /v1/fx/convert"];
+  if (path.startsWith("/v1/payments")) {
+    return method === "POST"
+      ? RATE_LIMIT_TIERS["POST /v1/payments"]
+      : RATE_LIMIT_TIERS["GET /v1/payments"];
+  }
+  return undefined;
+}
+
+function clientIp(req: express.Request): string {
+  const forwarded = req.header("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return req.ip || req.socket.remoteAddress || "unknown";
+}
+
+function apiKeyOf(req: express.Request): string {
+  const authHeader = req.header("authorization") || "";
+  const [scheme, token] = authHeader.split(" ");
+  if (scheme === "Bearer" && token) return token;
+  return clientIp(req);
+}
+
+function consumeToken(key: string, tier: RateLimitTier): { allowed: boolean; remaining: number; resetMs: number } {
+  const now = Date.now();
+  const refillRate = tier.limit / tier.windowMs;
+  const existing = buckets.get(key);
+  const state: BucketState = existing
+    ? { tokens: existing.tokens, updatedAt: existing.updatedAt }
+    : { tokens: tier.limit, updatedAt: now };
+
+  const elapsed = now - state.updatedAt;
+  state.tokens = Math.min(tier.limit, state.tokens + elapsed * refillRate);
+  state.updatedAt = now;
+
+  let allowed = false;
+  if (state.tokens >= 1) {
+    state.tokens -= 1;
+    allowed = true;
+  }
+  buckets.set(key, state);
+
+  const remaining = Math.floor(state.tokens);
+  const resetMs = Math.ceil(((tier.limit - state.tokens) / refillRate) / 1000);
+  return { allowed, remaining, resetMs };
+}
+
+app.use((req, res, next) => {
+  const tier = resolveTier(req.method, req.path);
+  if (!tier) return next();
+
+  const identity = tier.keyBy === "apiKey" ? apiKeyOf(req) : clientIp(req);
+  const key = `${req.method} ${req.path.split("/").slice(0, 3).join("/")}:${identity}`;
+  const { allowed, remaining, resetMs } = consumeToken(key, tier);
+
+  res.setHeader("X-RateLimit-Limit", String(tier.limit));
+  res.setHeader("X-RateLimit-Remaining", String(Math.max(0, remaining)));
+  res.setHeader("X-RateLimit-Reset", String(resetMs));
+
+  if (!allowed) {
+    res.setHeader("Retry-After", String(Math.max(1, resetMs)));
+    return res.status(429).json({ error: "too many requests" });
+  }
+  return next();
+});
+
+/**
+ * Issue #999: interactive API reference at `/api-docs`.
+ *
+ * Serves a self-contained Redoc page that loads `docs/openapi.yaml` from the
+ * same origin. The Redoc bundle is loaded from a local path (`/api-docs/redoc.standalone.js`)
+ * so the reference works offline / on localhost with no CDN dependency.
+ *
+ * The spec documents checkout and payment link endpoints, inline JSON schema
+ * for request bodies, and example payloads for every error code
+ * (400, 401, 404, 422, 429, 500).
+ */
+const API_DOCS_HTML = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>FluxaPay API Reference</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <redoc spec-url="/api-docs/openapi.yaml"></redoc>
+    <script src="/api-docs/redoc.standalone.js"></script>
+  </body>
+</html>`;
+
+app.get("/api-docs", (_req, res) => {
+  res.type("html").send(API_DOCS_HTML);
+});
+
+app.get("/api-docs/openapi.yaml", (_req, res) => {
+  res.sendFile("openapi.yaml", { root: "docs" }, (err) => {
+    if (err) res.status(404).json({ error: "openapi spec not found" });
+  });
+});
+
+app.get("/api-docs/redoc.standalone.js", (_req, res) => {
+  res.sendFile("redoc.standalone.js", { root: "docs" }, (err) => {
+    if (err) res.status(404).json({ error: "redoc bundle not found" });
+  });
+});
  * Issue #981: health check configuration.
  */
 const HORIZON_URL = process.env.HORIZON_URL || "https://horizon-testnet.stellar.org";
