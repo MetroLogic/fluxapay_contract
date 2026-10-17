@@ -6,6 +6,9 @@
  * Displays the merchant's invoice list with lifecycle status badges
  * (Pending, Paid, Overdue, Voided). Supports filtering by status.
  * Voiding an invoice calls DELETE /v1/invoices/{id} on the indexer API.
+ *
+ * Issue #984: Adds a PDF preview modal so merchants can review the
+ * server-rendered invoice PDF before it is sent to the customer.
  */
 
 import React, { useCallback, useEffect, useState } from "react";
@@ -24,6 +27,13 @@ interface InvoiceRow {
   voidedAt: string | null;
   linkedPaymentId: string | null;
   createdAt: string | null;
+}
+
+interface InvoiceDraft {
+  merchantId: string;
+  totalAmount: string;
+  dueDate: string;
+  description?: string;
 }
 
 // ------------------------------------------------------------------ status badge
@@ -122,6 +132,18 @@ export default function InvoicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [voidingId, setVoidingId] = useState<string | null>(null);
 
+  // Issue #984: preview modal state.
+  const [draft, setDraft] = useState<InvoiceDraft>({
+    merchantId: "",
+    totalAmount: "",
+    dueDate: "",
+    description: "",
+  });
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
   const apiUrl =
     process.env.NEXT_PUBLIC_INDEXER_URL ??
     process.env.NEXT_PUBLIC_API_URL ??
@@ -152,6 +174,86 @@ export default function InvoicesPage() {
   useEffect(() => {
     void fetchInvoices();
   }, [fetchInvoices]);
+
+  // Issue #984: revoke the object URL when the modal closes / unmounts.
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  const authHeaders = useCallback((): Record<string, string> => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("fluxapay_jwt") : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, []);
+
+  const closePreview = useCallback(() => {
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setPreviewError(null);
+  }, []);
+
+  // Issue #984: generate a preview PDF server-side without persisting.
+  const handlePreview = async () => {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const resp = await fetch(`${apiUrl}/v1/invoices/preview`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/pdf",
+          ...authHeaders(),
+        },
+        body: JSON.stringify(draft),
+      });
+      if (resp.status === 413) {
+        throw new Error("Invoice PDF exceeds the 5 MB preview limit.");
+      }
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+    } catch (err: unknown) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Issue #984: persist + dispatch the invoice using the same draft data.
+  const handleSend = async () => {
+    setSending(true);
+    setPreviewError(null);
+    try {
+      const resp = await fetch(`${apiUrl}/v1/invoices`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify(draft),
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${resp.status}`);
+      }
+      closePreview();
+      await fetchInvoices();
+    } catch (err: unknown) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
+    }
+  };
 
   const handleVoid = async (invoiceId: string) => {
     if (!confirm(`Void invoice ${invoiceId}? This cannot be undone.`)) return;
@@ -203,6 +305,59 @@ export default function InvoicesPage() {
               className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
             >
               {loading ? "Loading…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+
+        {/* Issue #984: invoice draft + preview trigger */}
+        <div className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <h2 className="mb-3 text-sm font-semibold text-gray-700">New invoice</h2>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="text-sm text-gray-600">
+              Merchant ID
+              <input
+                type="text"
+                value={draft.merchantId}
+                onChange={(e) => setDraft({ ...draft, merchantId: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Amount (smallest unit)
+              <input
+                type="text"
+                inputMode="numeric"
+                value={draft.totalAmount}
+                onChange={(e) => setDraft({ ...draft, totalAmount: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Due date
+              <input
+                type="date"
+                value={draft.dueDate}
+                onChange={(e) => setDraft({ ...draft, dueDate: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Description
+              <input
+                type="text"
+                value={draft.description ?? ""}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={() => void handlePreview()}
+              disabled={previewLoading}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {previewLoading ? "Generating…" : "Preview"}
             </button>
           </div>
         </div>
@@ -278,6 +433,11 @@ export default function InvoicesPage() {
                 </tr>
               ) : (
                 invoices.map((inv) => (
+                  <tr key={inv.invoiceId}>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                      {inv.invoiceId}
+                    </td>
+                    <td className="px-4 py-3 text-gray-700">
                   <tr key={inv.invoiceId} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                     <td className="px-4 py-3 font-mono text-xs text-gray-700 dark:text-gray-300">
                       {inv.invoiceId}
@@ -289,6 +449,8 @@ export default function InvoicesPage() {
                     <td className="px-4 py-3">
                       <StatusBadge status={inv.status} />
                     </td>
+                    <td className="px-4 py-3 text-gray-600">{formatDate(inv.dueDate)}</td>
+                    <td className="px-4 py-3 text-gray-600">{formatDate(inv.createdAt)}</td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {formatDate(inv.dueDate)}
                     </td>
@@ -317,6 +479,57 @@ export default function InvoicesPage() {
           </table>
         </div>
       </div>
+
+      {/* Issue #984: PDF preview modal */}
+      {previewUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Invoice PDF preview"
+        >
+          <div className="flex h-full max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+              <h2 className="text-sm font-semibold text-gray-800">Invoice preview</h2>
+              <button
+                onClick={closePreview}
+                className="text-sm text-gray-500 hover:text-gray-800"
+                aria-label="Close preview"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden bg-gray-100">
+              <iframe
+                src={previewUrl}
+                title="Invoice PDF preview"
+                className="h-full w-full"
+              />
+            </div>
+            {previewError && (
+              <div role="alert" className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+                {previewError}
+              </div>
+            )}
+            <div className="flex justify-end gap-3 border-t border-gray-200 px-4 py-3">
+              <button
+                onClick={closePreview}
+                disabled={sending}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+              >
+                Edit
+              </button>
+              <button
+                onClick={() => void handleSend()}
+                disabled={sending}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {sending ? "Sending…" : "Send"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

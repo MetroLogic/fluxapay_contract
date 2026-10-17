@@ -15,6 +15,34 @@ interface PaymentLinkAnalytics {
   daily_conversions: number[];
 }
 
+interface FxConversion {
+  currency: string;
+  amount: string;
+  rate: string;
+  updated_at: string;
+}
+
+const FX_STALENESS_SECS = 300;
+const FX_REFRESH_MS = 60_000;
+const MAX_DISPLAY_CURRENCIES = 3;
+const DEFAULT_DISPLAY_CURRENCIES = ["NGN", "GHS", "KES"];
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  NGN: "₦",
+  GHS: "GH₵",
+  KES: "KSh",
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+};
+
+function formatConverted(currency: string, amount: string): string {
+  const numeric = Number(amount);
+  const symbol = CURRENCY_SYMBOLS[currency] ?? "";
+  if (!Number.isFinite(numeric)) return `${symbol}${amount} ${currency}`;
+  const formatted = numeric.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return `${symbol}${formatted} ${currency}`;
+}
+
 function Sparkline({ values }: { values: number[] }) {
   const max = Math.max(1, ...values);
   const points = values
@@ -191,6 +219,11 @@ export default function PaymentLinksPage() {
   const [links, setLinks] = useState<PaymentLinkAnalytics[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [displayCurrencies, setDisplayCurrencies] = useState<string[]>(DEFAULT_DISPLAY_CURRENCIES);
+  const [conversions, setConversions] = useState<FxConversion[]>([]);
+  const [fxUpdatedAt, setFxUpdatedAt] = useState<number | null>(null);
+  const [fxError, setFxError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [activeLink, setActiveLink] = useState<PaymentLinkAnalytics | null>(null);
   const apiUrl =
     process.env.NEXT_PUBLIC_INDEXER_URL ??
@@ -220,9 +253,66 @@ export default function PaymentLinksPage() {
     }
   }, [apiUrl]);
 
+  const loadConversions = useCallback(async () => {
+    const currencies = displayCurrencies.slice(0, MAX_DISPLAY_CURRENCIES);
+    if (currencies.length === 0) {
+      setConversions([]);
+      return;
+    }
+    setFxError(null);
+    try {
+      const results = await Promise.all(
+        currencies.map(async (currency) => {
+          const params = new URLSearchParams({
+            from: "USDC",
+            to: currency,
+            amount: "50000000",
+          });
+          const response = await fetch(`${apiUrl}/v1/fx/convert?${params.toString()}`, {
+            headers: { Accept: "application/json" },
+          });
+          if (!response.ok) {
+            throw new Error(`FX convert failed for ${currency}: ${response.status}`);
+          }
+          const body = (await response.json()) as Partial<FxConversion>;
+          return {
+            currency,
+            amount: body.amount ?? "0",
+            rate: body.rate ?? "0",
+            updated_at: body.updated_at ?? new Date().toISOString(),
+          } as FxConversion;
+        }),
+      );
+      setConversions(results);
+      setFxUpdatedAt(Date.now());
+    } catch (cause) {
+      setFxError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [apiUrl, displayCurrencies]);
+
   useEffect(() => {
     void loadLinks();
   }, [loadLinks]);
+
+  useEffect(() => {
+    void loadConversions();
+    const refresh = setInterval(() => void loadConversions(), FX_REFRESH_MS);
+    return () => clearInterval(refresh);
+  }, [loadConversions]);
+
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const fxAgeSecs = fxUpdatedAt === null ? null : Math.max(0, Math.floor((now - fxUpdatedAt) / 1000));
+  const fxStale = fxAgeSecs !== null && fxAgeSecs > FX_STALENESS_SECS;
+  const fxAgeLabel =
+    fxAgeSecs === null
+      ? null
+      : fxAgeSecs < 60
+        ? "Updated just now"
+        : `Updated ${Math.floor(fxAgeSecs / 60)} min ago`;
 
   return (
     <main className="min-h-screen bg-gray-50 p-6">
@@ -255,6 +345,64 @@ export default function PaymentLinksPage() {
             {error}
           </p>
         )}
+
+        <section className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium text-gray-900">Pay: 50 USDC</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Conversion preview is informational only and does not affect the payment amount.
+              </p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-gray-600">
+              <span>Display currencies</span>
+              <select
+                multiple
+                value={displayCurrencies}
+                onChange={(event) => {
+                  const selected = Array.from(event.target.selectedOptions, (option) => option.value);
+                  setDisplayCurrencies(selected.slice(0, MAX_DISPLAY_CURRENCIES));
+                }}
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+              >
+                {Object.keys(CURRENCY_SYMBOLS).map((currency) => (
+                  <option key={currency} value={currency}>
+                    {currency}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {fxError ? (
+            <p role="alert" className="mt-3 text-xs text-red-600">
+              {fxError}
+            </p>
+          ) : conversions.length === 0 ? (
+            <p className="mt-3 text-xs text-gray-400">Loading conversion preview…</p>
+          ) : (
+            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-700">
+              {conversions.map((conversion, index) => (
+                <span
+                  key={conversion.currency}
+                  className={index === 0 ? "" : "hidden sm:inline"}
+                >
+                  ≈ {formatConverted(conversion.currency, conversion.amount)}
+                  {index < conversions.length - 1 && (
+                    <span className="ml-3 text-gray-300">|</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {fxAgeLabel && (
+            <p className={`mt-2 text-xs ${fxStale ? "text-amber-600" : "text-gray-500"}`}>
+              {fxAgeLabel}
+              {fxStale && <span className="ml-2 font-medium">Rate may be outdated</span>}
+            </p>
+          )}
+        </section>
 
         <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white shadow-sm">
           <table className="min-w-full divide-y divide-gray-200 text-sm">

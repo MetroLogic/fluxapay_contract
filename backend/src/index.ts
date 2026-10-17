@@ -18,6 +18,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #984: adds `POST /v1/invoices/preview` to render an invoice PDF
+ * without persisting a draft invoice record.
  * Issue #974: starts the Stellar Fee-Bump daemon that re-wraps stuck
  * pending payments with a higher fee (CAP-0015).
  * Issue #976: validates the deposit address (account existence, USDC
@@ -321,6 +323,34 @@ app.use(
 );
 
 /**
+ * Issue #984: Invoice PDF preview.
+ *
+ * Renders the invoice PDF server-side using the same code path as the actual
+ * invoice PDF, but without persisting a draft invoice record. Requires
+ * merchant authentication. PDFs larger than 5 MB are rejected with HTTP 413.
+ */
+const MAX_PREVIEW_PDF_BYTES = 5 * 1024 * 1024;
+
+app.post("/v1/invoices/preview", async (req, res) => {
+  const authHeader = req.header("authorization") || "";
+  const [scheme, token] = authHeader.split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return res.status(401).json({ error: "merchant authentication required" });
+  }
+
+  try {
+    const pdf = await renderInvoicePdf(req.body);
+    if (pdf.length > MAX_PREVIEW_PDF_BYTES) {
+      return res.status(413).json({ error: "invoice PDF exceeds 5 MB limit" });
+    }
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", String(pdf.length));
+    return res.status(200).send(pdf);
+  } catch (err) {
+    return res.status(400).json({
+      error: err instanceof Error ? err.message : "failed to render invoice preview",
+    });
+  }
  * Issue #976: deposit address validation.
  *
  * Stellar accounts require a minimum XLM reserve (1 XLM base + 0.5 XLM per
