@@ -6,6 +6,16 @@ FluxaPay bridges the gap between crypto payments and real-world commerce—makin
 
 New to FluxaPay? Follow the **[Merchant Quickstart Guide](docs/quickstart.md)** to go from SDK install to your first confirmed USDC payment in minutes.
 
+## Interactive API Reference
+
+Browse the full, interactive API reference (with runnable request/response examples for checkout and payment links) at **`/api-docs`** once the backend is running locally:
+
+```
+http://localhost:3000/api-docs
+```
+
+The reference is served offline from the bundled OpenAPI spec (`docs/openapi.yaml`) — no CDN or network access required.
+
 ## TypeScript SDK
 
 [![npm version](https://img.shields.io/npm/v/@fluxapay/sdk.svg)](https://www.npmjs.com/package/@fluxapay/sdk)
@@ -195,21 +205,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: local setup, build an
 1. **Environment Variables**: Copy `.env.example` to `.env` and populate with your testnet credentials (do not commit `.env`):
    ```bash
    cp .env.example .env
-   # Edit .env with your Stellar testnet keys and contract IDs
+   # Edit .env with your credentials
    ```
 
-2. **Local Contract Invocation**: See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to test `create_payment`, `register_merchant`, and other contract functions on testnet.
-
-3. **Running Tests**:
+2. **Install dependencies**:
    ```bash
-   cd fluxapay && make test
+   npm install
    ```
 
-4. **Code Quality**: Format, lint, and audit before submitting:
+3. **Run the backend**:
    ```bash
-   cd fluxapay && make fmt && cargo clippy --all-targets --all-features && cargo audit
+   npm run dev
    ```
 
+4. **Explore the API**: Open `http://localhost:3000/api-docs` for the interactive API reference.
 ## Security
 
 Please refer to our [Security Policy](SECURITY.md) for information on reporting vulnerabilities and our current audit status.
@@ -331,3 +340,14 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 - #805: bug: merchant_registry_test.rs tests share a single Soroban test environment, causing test order dependency
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
+
+<!-- handsoff-issue-989 -->
+- #989: test: add Playwright end-to-end tests for payment link checkout flow
+<!-- handsoff-issue-996 -->
+- #996: feat: add dashboard 'Copy Payment Link' button directly to payments table row
+<!-- handsoff-issue-973 -->
+- #973: feat: implement Soroban smart contract event listener for on-chain escrow releases in streams
+<!-- handsoff-issue-980 -->
+- #980: feat: add input validation for payment amount field on checkout page
+<!-- handsoff-issue-969 -->
+- #969: feat: add date range and currency filters to dashboard transactions table

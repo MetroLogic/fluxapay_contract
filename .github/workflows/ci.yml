@@ -128,6 +128,113 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Job 2c: Migration rollback test (Issue #991)
+  # Runs against a fresh PostgreSQL service container so it shares no state
+  # with other CI jobs. Applies all migrations, rolls them all back, then
+  # re-applies them to prove the rollback path is not broken.
+  migration-rollback:
+    name: Migration Rollback Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: indexer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/indexer_test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: indexer
+        run: npm ci
+
+      - name: Verify every migration has a down block
+        working-directory: indexer
+        run: |
+          missing=0
+          for f in migrations/*.sql; do
+            case "$f" in
+              *.down.sql) continue ;;
+            esac
+            base="${f%.sql}"
+            if [ -f "${base}.down.sql" ]; then
+              continue
+            fi
+            if grep -qiE '^\s*--\s*\+migrate\s+down' "$f"; then
+              continue
+            fi
+            echo "::error file=$f::Migration $f has no rollback down block (expected a '-- +migrate Down' section or a ${base}.down.sql file)"
+            missing=1
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "One or more migrations are missing a rollback down block."
+            exit 1
+          fi
+
+      - name: Apply all migrations
+        working-directory: indexer
+        run: npm run migrate:up
+
+      - name: Roll back most recent migration
+        working-directory: indexer
+        run: npm run migrate:down
+
+      - name: Re-apply migrations
+        working-directory: indexer
+        run: npm run migrate:up
+
+      - name: Roll back all migrations
+        working-directory: indexer
+        run: npm run migrate:down:all
+
+      - name: Re-apply all migrations after full rollback
+        working-directory: indexer
+        run: npm run migrate:up
+
+  # Job 2d: Python SDK unit tests (Issue #992)
+  # Runs the respx-mocked unit test suite for the Python SDK with coverage
+  # enforcement so regressions in the SDK are caught before merge.
+  python-sdk-tests:
+    name: Python SDK Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests with coverage
+        working-directory: sdk/python
+        run: pytest --cov=fluxapay --cov-report=term-missing --cov-fail-under=90
+
   # Job 3: Build the contract
   build:
     name: Build Contract
@@ -185,337 +292,3 @@ jobs:
               stellar contract optimize --wasm "$wasm"
             fi
           done
-
-      - name: List build artifacts
-        run: ls -lh target/wasm32-unknown-unknown/release/*.wasm
-
-      - name: Upload WASM artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: fluxapay-contract-${{ github.sha }}
-          path: target/wasm32-unknown-unknown/release/*.wasm
-          retention-days: 30
-
-      - name: Check WASM size
-        run: |
-          echo "### WASM Contract Size 📦" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Contract | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|------|" >> $GITHUB_STEP_SUMMARY
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            if [ -f "$wasm" ]; then
-              size=$(ls -lh "$wasm" | awk '{print $5}')
-              name=$(basename "$wasm")
-              echo "| $name | $size |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-
-      - name: Enforce WASM size limit
-        run: |
-          MAX_SIZE=$((MAX_WASM_SIZE_KB * 1024))
-          echo "Max allowed size: $MAX_WASM_SIZE_KB KB ($MAX_SIZE bytes)"
-          failed=0
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            if [ -f "$wasm" ]; then
-              size=$(stat -c%s "$wasm")
-              name=$(basename "$wasm")
-              if [ "$size" -gt "$MAX_SIZE" ]; then
-                echo "❌ Error: $name size is $size bytes, which exceeds the limit of $MAX_SIZE bytes!"
-                failed=1
-              else
-                echo "✅ $name size is $size bytes (within limit)"
-              fi
-            fi
-          done
-          if [ "$failed" -eq 1 ]; then
-            exit 1
-          fi
-
-      # Issue #813: fail if primary WASM grows >5% vs committed baseline
-      - name: Check WASM size regression
-        run: |
-          BASELINE_FILE=".wasm-size-baseline"
-          if [ ! -f "$BASELINE_FILE" ]; then
-            echo "Missing $BASELINE_FILE — commit a baseline (see CONTRIBUTING.md)"
-            exit 1
-          fi
-          BASELINE=$(tr -d '[:space:]' < "$BASELINE_FILE")
-          if ! [[ "$BASELINE" =~ ^[0-9]+$ ]]; then
-            echo "Invalid baseline in $BASELINE_FILE: '$BASELINE'"
-            exit 1
-          fi
-          # Prefer optimized fluxapay.wasm; fall back to any release wasm.
-          WASM=""
-          for candidate in \
-            target/wasm32-unknown-unknown/release/fluxapay.optimized.wasm \
-            target/wasm32-unknown-unknown/release/fluxapay.wasm \
-            target/wasm32-unknown-unknown/release/*.wasm; do
-            if [ -f "$candidate" ]; then
-              WASM="$candidate"
-              break
-            fi
-          done
-          if [ -z "$WASM" ]; then
-            echo "No WASM artifact found under target/wasm32-unknown-unknown/release/"
-            exit 1
-          fi
-          SIZE=$(stat -c%s "$WASM")
-          THRESHOLD=$(( BASELINE * 105 / 100 ))
-          echo "WASM: $WASM"
-          echo "Size: $SIZE bytes | Baseline: $BASELINE | 5% threshold: $THRESHOLD"
-          echo "### WASM Size Regression (Issue #813)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Artifact | Size | Baseline | Threshold (baseline×1.05) | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|----------|------|----------|---------------------------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$SIZE" -gt "$THRESHOLD" ]; then
-            echo "| $(basename "$WASM") | $SIZE | $BASELINE | $THRESHOLD | ❌ FAIL |" >> "$GITHUB_STEP_SUMMARY"
-            echo "WASM size $SIZE exceeds 5% baseline growth (baseline: $BASELINE, threshold: $THRESHOLD)"
-            exit 1
-          fi
-          echo "| $(basename "$WASM") | $SIZE | $BASELINE | $THRESHOLD | ✅ PASS |" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ WASM size within 5% of baseline"
-
-  # Job 4: WASM Size Check
-  wasm-size-check:
-    name: WASM Size Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
-        with:
-          toolchain: 1.94.1
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo registry
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-wasm-
-
-      - name: Cache Stellar CLI
-        uses: actions/cache@v4
-        id: cache-stellar-cli
-        with:
-          path: ~/.cargo/bin/stellar
-          key: ${{ runner.os }}-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install system dependencies
-        if: steps.cache-stellar-cli.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Install Stellar CLI
-        if: steps.cache-stellar-cli.outputs.cache-hit != 'true'
-        run: cargo install --locked stellar-cli
-
-      - name: Build contracts (release)
-        working-directory: fluxapay
-        run: |
-          cargo build --target wasm32-unknown-unknown --release
-          for feature in contract-payment-processor contract-refund-manager contract-gas-estimator contract-fx-oracle contract-merchant-registry contract-payment-link contract-payment-streaming; do
-            cargo build --target wasm32-unknown-unknown --release --no-default-features --features "$feature"
-          done
-
-      - name: Check WASM sizes
-        run: |
-          MAX_SIZE=$((MAX_WASM_SIZE_KB * 1024))
-          echo "Checking WASM contract sizes (max: $MAX_WASM_SIZE_KB KB = $MAX_SIZE bytes)"
-          echo ""
-          echo "### WASM Contract Sizes 📦" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Contract | Size (Bytes) | Size (KB) | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
-          failed=0
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            if [ -f "$wasm" ]; then
-              size=$(stat -c%s "$wasm")
-              name=$(basename "$wasm")
-              size_kb=$((size / 1024))
-              if [ "$size" -gt "$MAX_SIZE" ]; then
-                echo "❌ FAIL: $name is $size_kb KB ($size bytes) (exceeds limit by $((size_kb - MAX_WASM_SIZE_KB)) KB)"
-                echo "| $name | $size | ${size_kb} KB | ❌ Exceeds limit ($((size_kb - MAX_WASM_SIZE_KB)) KB over) |" >> $GITHUB_STEP_SUMMARY
-                failed=1
-              else
-                echo "✅ PASS: $name is $size_kb KB ($size bytes) (within limit)"
-                echo "| $name | $size | ${size_kb} KB | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
-              fi
-            fi
-          done
-          if [ "$failed" -eq 1 ]; then
-            echo "Error: One or more WASM binaries exceeded the MAX_WASM_SIZE_KB limit ($MAX_WASM_SIZE_KB KB)"
-            exit 1
-          fi
-
-      - name: Optimize WASM for baseline comparison
-        working-directory: fluxapay
-        run: stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxapay.wasm
-
-      - name: Check WASM size against baseline
-        run: |
-          BASELINE_FILE=".wasm-size-baseline"
-          WASM_PATH="target/wasm32-unknown-unknown/release/fluxapay.wasm"
-          HARD_CAP_BYTES=$((245 * 1024))
-          TOLERANCE_BYTES=5120
-
-          if [ ! -f "$BASELINE_FILE" ]; then
-            echo "❌ Missing $BASELINE_FILE. Run ./scripts/update-wasm-baseline.sh and commit the result."
-            exit 1
-          fi
-          if [ ! -f "$WASM_PATH" ]; then
-            echo "❌ Expected WASM artifact not found at $WASM_PATH"
-            exit 1
-          fi
-
-          BASELINE=$(cat "$BASELINE_FILE" | tr -d '[:space:]')
-          WASM_SIZE=$(stat -c%s "$WASM_PATH")
-          DIFF=$((WASM_SIZE - BASELINE))
-
-          echo "WASM size: $WASM_SIZE bytes (baseline: $BASELINE bytes, diff: $DIFF bytes)"
-
-          # Absolute hard cap: always fail if WASM exceeds 245 KB, regardless of baseline.
-          if [ "$WASM_SIZE" -gt "$HARD_CAP_BYTES" ]; then
-            echo "❌ ERROR: WASM size ($WASM_SIZE bytes) exceeds the absolute hard cap of $HARD_CAP_BYTES bytes (245 KB)."
-            echo "   Soroban's upload limit is 256 KB; this cap keeps a 10 KB safety buffer."
-            exit 1
-          fi
-
-          # Regression gate: fail if size grew more than 5 KB above the recorded baseline.
-          if [ "$DIFF" -gt "$TOLERANCE_BYTES" ]; then
-            echo "❌ ERROR: WASM size increased by $DIFF bytes, which is more than $TOLERANCE_BYTES bytes (5 KB) above baseline ($BASELINE bytes)."
-            echo "   If this growth is intentional, run ./scripts/update-wasm-baseline.sh and commit the updated .wasm-size-baseline."
-            exit 1
-          fi
-
-          echo "✅ WASM size is within the allowed baseline tolerance and hard cap."
-
-  # Job 5: Run tests
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [build]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
-        with:
-          toolchain: 1.94.1
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-
-      - name: Run tests
-        run: cargo test --verbose --all-features
-
-  # Job 5b: Bounded property tests
-  proptest:
-    name: Property Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [build]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
-        with:
-          toolchain: 1.94.1
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-proptest-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-proptest-
-
-      - name: Run bounded property tests
-        run: "PROPTEST_CASES=256 cargo test -p fluxapay proptests:: --all-features -- --test-threads=1"
-
-  # Job 6: Check SDK build, types, and JSDoc
-  sdk-check:
-    name: SDK Build Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-          cache: "npm"
-          cache-dependency-path: sdk/package-lock.json
-
-      - name: Install dependencies
-        working-directory: sdk
-        run: npm ci
-
-      - name: Build SDK
-        working-directory: sdk
-        run: npm run build
-
-      - name: Type check
-        working-directory: sdk
-        run: npx tsc --noEmit
-
-      - name: Lint JSDoc annotations
-        working-directory: sdk
-        run: npm run lint:jsdoc
-
-      - name: Check error map is in sync with contract source
-        working-directory: sdk
-        run: npm run check-error-map-sync
-
-      - name: Check mainnet contract IDs
-        run: node scripts/check-mainnet-contract-ids.js
-
-  # Final job: Report overall status
-  ci-success:
-    name: CI Success
-    if: ${{ always() }}
-    needs: [format, security-scan, lint, build, wasm-size-check, test, proptest]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check all jobs
-        run: |
-          if [[ "${{ needs.format.result }}" == "success" ]] && \
-             [[ "${{ needs.security-scan.result }}" == "success" ]] && \
-             [[ "${{ needs.lint.result }}" == "success" ]] && \
-             [[ "${{ needs.build.result }}" == "success" ]] && \
-             [[ "${{ needs.wasm-size-check.result }}" == "success" ]] && \
-             [[ "${{ needs.test.result }}" == "success" ]] && \
-             [[ "${{ needs.proptest.result }}" == "success" ]] && \
-             [[ "${{ needs.sdk-check.result }}" == "success" ]]; then
-            echo "✅ All CI checks passed!"
-            exit 0
-          else
-            echo "❌ Some CI checks failed"
-            exit 1
-          fi

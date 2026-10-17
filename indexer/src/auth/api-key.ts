@@ -9,6 +9,9 @@
  * - `read:analytics`: events and analytics queries
  * - `manage:webhooks`: create, update, delete webhook endpoints
  * - `admin`: full unrestricted access
+ *
+ * Structured audit logging (Issue #970): API key lifecycle events are recorded
+ * to an append-only `audit_log` table via `recordAuditEvent`.
  */
 
 import type { Request, Response, NextFunction } from "express";
@@ -19,15 +22,143 @@ export interface ScopedApiKey {
   scopes: string[];
 }
 
+export type AuditEventType =
+  | "api_key.created"
+  | "api_key.revoked"
+  | "api_key.rotated"
+  | "api_key.auth_failed";
+
+export interface AuditEvent {
+  event_type: AuditEventType;
+  merchant_id: string | null;
+  key_id: string | null;
+  actor_id: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  timestamp: string;
+}
+
 // In-memory registry of scoped API keys
 const apiKeyRegistry: Map<string, ScopedApiKey> = new Map();
+
+// Append-only in-memory audit log (mirrors the `audit_log` table).
+const auditLog: AuditEvent[] = [];
 
 export function getExpectedApiKey(): string | undefined {
   return process.env.API_KEY || process.env.INDEXER_API_KEY;
 }
 
-export function registerApiKey(apiKey: ScopedApiKey): void {
+/**
+ * Append an audit event. Records are immutable once written; there is no
+ * update or delete path exposed for audit entries.
+ */
+export function recordAuditEvent(
+  eventType: AuditEventType,
+  details: {
+    merchantId?: string | null;
+    keyId?: string | null;
+    actorId?: string | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+  } = {},
+): AuditEvent {
+  const event: AuditEvent = {
+    event_type: eventType,
+    merchant_id: details.merchantId ?? null,
+    key_id: details.keyId ?? null,
+    actor_id: details.actorId ?? null,
+    ip_address: details.ipAddress ?? null,
+    user_agent: details.userAgent ?? null,
+    timestamp: new Date().toISOString(),
+  };
+  auditLog.push(event);
+  return event;
+}
+
+/**
+ * Query audit events, optionally filtered by merchant and/or event type.
+ * Returns a paginated slice plus the total matching count.
+ */
+export function queryAuditEvents(options: {
+  merchantId?: string | null;
+  eventType?: AuditEventType | null;
+  limit?: number;
+  offset?: number;
+} = {}): { events: AuditEvent[]; total: number } {
+  const { merchantId, eventType } = options;
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+  const offset = Math.max(0, options.offset ?? 0);
+
+  const filtered = auditLog.filter((event) => {
+    if (merchantId && event.merchant_id !== merchantId) return false;
+    if (eventType && event.event_type !== eventType) return false;
+    return true;
+  });
+
+  return { events: filtered.slice(offset, offset + limit), total: filtered.length };
+}
+
+export function clearAuditLog(): void {
+  auditLog.length = 0;
+}
+
+function requestContext(req: Request): {
+  ipAddress: string | null;
+  userAgent: string | null;
+  actorId: string | null;
+} {
+  const forwarded = req.headers["x-forwarded-for"];
+  const ipAddress =
+    (typeof forwarded === "string" && forwarded.split(",")[0].trim()) ||
+    req.ip ||
+    null;
+  const userAgent = typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : null;
+  const actorId =
+    (typeof req.headers["x-actor-id"] === "string" && req.headers["x-actor-id"]) || null;
+  return { ipAddress, userAgent, actorId };
+}
+
+export function registerApiKey(apiKey: ScopedApiKey, req?: Request): void {
   apiKeyRegistry.set(apiKey.key, apiKey);
+  const ctx = req ? requestContext(req) : { ipAddress: null, userAgent: null, actorId: null };
+  recordAuditEvent("api_key.created", {
+    merchantId: apiKey.merchantId ?? null,
+    keyId: apiKey.key,
+    actorId: ctx.actorId,
+    ipAddress: ctx.ipAddress,
+    userAgent: ctx.userAgent,
+  });
+}
+
+export function revokeApiKey(key: string, req?: Request): boolean {
+  const existing = apiKeyRegistry.get(key);
+  if (!existing) return false;
+  apiKeyRegistry.delete(key);
+  const ctx = req ? requestContext(req) : { ipAddress: null, userAgent: null, actorId: null };
+  recordAuditEvent("api_key.revoked", {
+    merchantId: existing.merchantId ?? null,
+    keyId: key,
+    actorId: ctx.actorId,
+    ipAddress: ctx.ipAddress,
+    userAgent: ctx.userAgent,
+  });
+  return true;
+}
+
+export function rotateApiKey(oldKey: string, newKey: ScopedApiKey, req?: Request): boolean {
+  const existing = apiKeyRegistry.get(oldKey);
+  if (!existing) return false;
+  apiKeyRegistry.delete(oldKey);
+  apiKeyRegistry.set(newKey.key, newKey);
+  const ctx = req ? requestContext(req) : { ipAddress: null, userAgent: null, actorId: null };
+  recordAuditEvent("api_key.rotated", {
+    merchantId: newKey.merchantId ?? existing.merchantId ?? null,
+    keyId: newKey.key,
+    actorId: ctx.actorId,
+    ipAddress: ctx.ipAddress,
+    userAgent: ctx.userAgent,
+  });
+  return true;
 }
 
 export function clearRegisteredApiKeys(): void {
@@ -123,6 +254,14 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction): 
 
   const scopes = getKeyScopes(providedKey);
   if (!scopes) {
+    const ctx = requestContext(req);
+    recordAuditEvent("api_key.auth_failed", {
+      merchantId: getKeyMerchantId(providedKey),
+      keyId: providedKey,
+      actorId: ctx.actorId,
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent,
+    });
     res.status(401).json({ error: "Invalid API key" });
     return;
   }
@@ -184,6 +323,14 @@ export function requireScope(requiredScope: string) {
 
     const scopes = getKeyScopes(providedKey);
     if (!scopes) {
+      const ctx = requestContext(req);
+      recordAuditEvent("api_key.auth_failed", {
+        merchantId: getKeyMerchantId(providedKey),
+        keyId: providedKey,
+        actorId: ctx.actorId,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
       res.status(401).json({ error: "Invalid API key" });
       return;
     }

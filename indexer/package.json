@@ -10,6 +10,9 @@
     "dev:api": "ts-node src/server.ts",
     "build": "tsc",
     "migrate": "node dist/migrations/run.js",
+    "migrate:up": "node dist/migrations/run.js up",
+    "migrate:down": "node dist/migrations/run.js down",
+    "migrate:down:all": "node dist/migrations/run.js down:all",
     "drizzle:generate": "drizzle-kit generate",
     "drizzle:studio": "drizzle-kit studio",
     "watch": "tsc --watch",
@@ -25,7 +28,8 @@
     "dotenv": "16.3.1",
     "express": "4.19.2",
     "zod": "3.23.8",
-    "drizzle-orm": "0.39.3"
+    "drizzle-orm": "0.39.3",
+    "redis": "4.6.13"
   },
   "devDependencies": {
     "@types/pg": "8.10.9",

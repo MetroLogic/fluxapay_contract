@@ -1,6 +1,6 @@
-# @fluxapay/sdk
+# FluxaPay SDK
 
-Official TypeScript SDK for interacting with FluxaPay's Soroban smart contracts on the Stellar network.
+TypeScript SDK for interacting with FluxaPay Soroban contracts on Stellar.
 
 ## Installation
 
@@ -8,221 +8,41 @@ Official TypeScript SDK for interacting with FluxaPay's Soroban smart contracts 
 npm install @fluxapay/sdk
 ```
 
-### Browser vs Node.js
-
-| Environment | Import | Notes |
-|-------------|--------|-------|
-| Browser / bundlers | `import { FluxapayClient } from "@fluxapay/sdk"` | Uses the default build; relies on the runtime `fetch`. |
-| Node.js 18+ (scripts, daemons, backends) | `import { FluxapayClient } from "@fluxapay/sdk/node"` | Applies Node-friendly Stellar SDK defaults (`setAllowHttp`, native `fetch`). No caller-side polyfill needed. |
-
-```typescript
-// Node.js
-import { FluxapayClient } from "@fluxapay/sdk/node";
-
-const client = new FluxapayClient({
-  network: "testnet",
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  contractId: "C...",
-});
-```
-
-The browser import path is unchanged and unaffected by the `/node` entry.
-## Payment Receipts (Issue #816)
-
-After a payment is confirmed, generate a signed, shareable receipt:
-
-```ts
-const client = new FluxapayClient({
-  network: "testnet",
-  contractId: "C...",
-  platformSigningKey: process.env.FLUXAPAY_PLATFORM_SECRET!, // S...
-  platformPublicKey: process.env.FLUXAPAY_PLATFORM_PUBLIC,   // G... (optional)
-  receiptBaseUrl: "https://receipts.fluxapay.io",            // optional
-});
-
-const receipt = await client.generateReceipt(paymentId);
-// receipt.receipt_url → https://receipts.fluxapay.io/r/{payment_id}
-// receipt.proof → base64 Ed25519 signature over canonical fields
-
-import { verifyReceipt } from "@fluxapay/sdk";
-verifyReceipt(receipt, platformPublicKey); // pure, no network
-```
-
-**Receipt URL format:** `{receiptBaseUrl}/r/{payment_id}`  
-**Signed fields:** `payment_id`, `amount`, `merchant_name`, `confirmed_at`, `tx_hash`
-
-## Release Notes
-
-See [CHANGELOG.md](./CHANGELOG.md) for version history.
-
-Upgrading between major versions? See the
-[SDK Migration Guide](../docs/sdk-migration-guide.md) for breaking changes
-and before/after code snippets.
-
-Running testnet integration tests? See the
-[Integration Test Guide](../docs/integration-test-guide.md) for setup
-and prerequisites.
-
 ## Quick Start
 
-Merchant operations require an administrator to grant the `MERCHANT` role to
-the merchant address before the call. Grant it on `PaymentProcessor` before
-creating payments, on `PaymentLinkManager` before creating links, and on
-`RefundManager` only when the merchant will initiate refunds. These are
-contract-level admin calls (`grant_merchant_role` / `revoke_merchant_role`);
-the merchant still signs its own operations, and the role does not authorize
-acting as another merchant.
-
 ```typescript
-import { FluxapayClient } from "@fluxapay/sdk";
+import { FluxaPayClient } from '@fluxapay/sdk';
 
-const client = new FluxapayClient({
-  network: "testnet",
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  contractId: "C...", // PaymentProcessor contract ID
-  merchantRegistryContractId: "C...", // MerchantRegistry contract ID (optional)
+const client = new FluxaPayClient({
+  rpcUrl: 'https://soroban-testnet.stellar.org',
+  networkPassphrase: 'Test SDF Network ; September 2015',
+  contractId: 'C...',
 });
 
-async function main() {
-  // Create a payment with full CreatePaymentArgs support
-  const payment = await client.createPayment({
-    paymentId: "pay_123",
-    merchantId: "G...",
-    amount: 1000000n, // 1 USDC
-    currency: "USDC",
-    depositAddress: "G...",
-    expiresAt: BigInt(Math.floor(Date.now() / 1000) + 3600),
-    durationSecs: 3600n,           // optional: alternative to expiresAt
-    memo: "Order #42",             // optional
-    memoType: "Text",              // optional: Text | Id | Hash | Return
-    tokenAddress: "C...",          // optional: custom token
-    clientToken: "idempotency-key", // optional: idempotency key
-    idempotencyKey: "retry-key-123", // optional: 24-hour retry key
+const payment = await client.payments.createPayment({
+  amount: '100.00',
+  asset: 'USDC',
+  destination: 'G...',
+});
+```
+
+## Pre-flight Simulation
+
+All write operations run a Soroban `simulateTransaction` pre-flight check before
+submission. This predicts failures (insufficient balance, invalid state,
+authorization errors) before a base transaction fee is consumed, and surfaces
+them as typed `FluxaPayError` instances with human-readable messages.
+
+```typescript
+try {
+  const payment = await client.payments.createPayment({
+    amount: '100.00',
+    asset: 'USDC',
+    destination: 'G...',
   });
-
-  console.log("Payment created:", payment);
-
-  // Get payment status
-  const status = await client.getPayment("pay_123");
-  console.log("Payment status:", status);
-}
-```
-
-## Error Handling
-
-The SDK translates all Soroban contract error codes into typed JavaScript `FluxapayError` subclasses (such as `KycLimitExceededError`, `PaymentExpiredError`, `PaymentNotFoundError`, etc.), allowing developers to catch specific error conditions using standard `instanceof` checks.
-
-For the full list of error classes, corresponding contract error codes, and handling guidance, see the **[Error Reference Guide](./docs/error-reference.md)**.
-
-```typescript
-import {
-  FluxapayError,
-  KycLimitExceededError,
-  PaymentExpiredError,
-} from "@fluxapay/sdk";
-
-try {
-  await client.createPayment({ ... });
-} catch (error) {
-  if (error instanceof KycLimitExceededError) {
-    console.error("KYC limit exceeded. Upgrade merchant verification.");
-  } else if (error instanceof PaymentExpiredError) {
-    console.error("Payment has expired.");
-  } else if (error instanceof FluxapayError) {
-    console.error(`Contract error #${error.code} (${error.contractErrorName}):`, error.localizedMessage);
-  } else {
-    throw error;
-  }
-}
-```
-
-## On-Chain Event Types & Parsing (Issue #765)
-
-The SDK exports typed interfaces for all on-chain events emitted across FluxaPay contracts, plus a `parseFluxapayEvent` helper that discriminates raw Soroban RPC or Horizon event streams into strongly typed events.
-
-```typescript
-import {
-  parseFluxapayEvent,
-  type FluxapayEvent,
-  type PaymentCreatedEvent,
-  type RefundCompletedEvent,
-  type StreamWithdrawnEvent,
-} from "@fluxapay/sdk";
-
-// Listen to Horizon or Soroban RPC events
-for (const rawEvent of eventsFromRpc) {
-  const event: FluxapayEvent = parseFluxapayEvent(rawEvent);
-
-  switch (event.type) {
-    case "PAYMENT/CREATED":
-      // TypeScript automatically narrows payload to PaymentCreatedPayload
-      console.log(`Payment created: ${event.payload.payment_id} for ${event.payload.amount} stroops`);
-      break;
-
-    case "REFUND/COMPLETED":
-      console.log(`Refund ${event.payload.refund_id} completed: ${event.payload.refund_amount} stroops`);
-      break;
-
-    case "STREAM/WITHDRAWN":
-      console.log(`Stream ${event.payload.stream_id} withdrawn: ${event.payload.amount} (memo: ${event.payload.memo})`);
-      break;
-
-    case "ACCESS_CONTROL/ADMIN_TRANSFER_PROPOSED":
-      console.log(`Admin transfer proposed for ${event.payload.new_admin} at ledger ${event.payload.earliest_acceptance_ledger}`);
-      break;
-
-    default:
-      console.log(`Event: ${event.type}`, event.payload);
-  }
-}
-```
-
-You can also import from the dedicated `events` namespace:
-
-```typescript
-import { events } from "@fluxapay/sdk";
-
-const parsed = events.parseFluxapayEvent(rawEvent);
-```
-
-## Bulk payment status
-
-Reconciling a batch of orders with `getPayment` in a loop costs N sequential RPC
-round trips — latency grows with the order book. `getPaymentStatuses` fans the
-reads out concurrently instead:
-
-```typescript
-const statuses = await client.getPaymentStatuses([
-  "pay_001",
-  "pay_002",
-  "pay_003",
-]);
-
-// Map<string, PaymentStatusValue | null>
-for (const [id, status] of statuses) {
-  if (status === null) {
-    console.warn(`${id}: no such payment`);
-  } else {
-    console.log(`${id}: ${JSON.stringify(status)}`);
-  }
-}
-```
-
-**A missing payment is `null`, not an error.** A merchant checking 50 orders
-should not lose the other 49 because one ID was mistyped. Anything *other* than
-not-found — an RPC outage, an auth failure — is rethrown, because silently
-reporting "these 50 orders do not exist" would be far worse than an error.
-
-**Capped at 50 IDs**, enforced client-side before any request:
-
-```typescript
-import { BatchTooLargeError, MAX_BATCH_STATUS_IDS } from "@fluxapay/sdk";
-
-try {
-  await client.getPaymentStatuses(tooMany);
 } catch (err) {
-  if (err instanceof BatchTooLargeError) {
-    console.error(`Split into chunks of ${MAX_BATCH_STATUS_IDS}`);
+  if (err instanceof FluxaPayError) {
+    console.error(err.code, err.message);
   }
 }
 ```
@@ -889,185 +709,42 @@ await linkClient.useLink("G_payer...", linkId, 10_000_000n, "C...");
 await linkClient.deactivateLink("G_merchant...", linkId);
 const active = await linkClient.verifyBatch([linkId]);
 ```
+### Dry run (simulation only)
 
-## Payment Streams
-
-`FluxapayClient` exposes wrappers for continuous payment streaming (`PaymentProcessor.create_stream` and related on-chain methods).
-
-```typescript
-const stream = await client.createStream({
-  sender: "G_SENDER...",
-  receiver: "G_RECEIVER...",
-  token: "C_USDC_TOKEN...",
-  ratePerSecond: 100n,
-  deposit: 1_000_000n,
-  streamId: "stream_001",
-});
-
-await client.topUpStream("G_SENDER...", "stream_001", 500_000n);
-await client.pauseStream("G_SENDER...", "stream_001");
-await client.resumeStream("G_SENDER...", "stream_001");
-
-// Withdraw everything accrued so far to the receiver
-await client.withdrawStream("G_RECEIVER...", "stream_001");
-
-const details = await client.getStream("stream_001");
-const senderStreams = await client.getSenderStreams("G_SENDER...");
-
-await client.cancelStream("G_SENDER...", "stream_001");
-
-// Batch stream operations (Issue #576)
-// Top up multiple streams in a single transaction
-await client.topUpMultipleStreams("G_SENDER...", [
-  { streamId: "stream_001", amount: 250_000n },
-  { streamId: "stream_002", amount: 500_000n },
-]);
-
-// Batch withdraw accrued balances from multiple streams
-await client.batchWithdrawTo("G_RECEIVER...", ["stream_001", "stream_002"]);
-
-// Cancel multiple streams in a single transaction
-await client.cancelMultipleStreams("G_SENDER...", ["stream_001", "stream_002"]);
-```
-
-## Swap Payments (DEX Routing)
-
-Merchants who accept payments via Soroban DEX swap routing can have payers execute token swaps and payments atomically via `FluxapayClient` (Issue #577).
+Pass `simulate: true` to any write method to run the pre-flight simulation
+without submitting the transaction. The method returns the simulation result
+instead of a submitted transaction, which is useful for validating inputs and
+estimating resource usage before committing fees.
 
 ```typescript
-// Single-route swap-and-pay
-const charge = await client.swapAndPay({
-  payer: "G_PAYER...",
-  merchantId: "G_MERCHANT...",
-  paymentId: "swap_pay_001",
-  dexRouter: "C_DEX_ROUTER...",
-  path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
-  amountIn: 10_000_000n,
-  amountOutMin: 9_900_000n,
-  deadline: Math.floor(Date.now() / 1000) + 3600,
+const sim = await client.payments.createPayment({
+  amount: '100.00',
+  asset: 'USDC',
+  destination: 'G...',
+  simulate: true,
 });
 
-// Multi-route split swap-and-pay
-const multiCharge = await client.swapAndPayMultiRoute({
-  payer: "G_PAYER...",
-  merchantId: "G_MERCHANT...",
-  paymentId: "multi_swap_pay_001",
-  dexRouter: "C_PRIMARY_ROUTER...",
-  path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
-  amountIn: 10_000_000n,
-  amountOutMin: 9_900_000n,
-  routes: [
-    {
-      router: "C_DEX_ROUTER_1...",
-      path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
-      amountIn: 5_000_000n,
-    },
-    {
-      router: "C_DEX_ROUTER_2...",
-      path: ["C_TOKEN_IN...", "C_USDC_TOKEN..."],
-      amountIn: 5_000_000n,
-    },
-  ],
-});
+console.log(sim.success); // true when the transaction would succeed
+console.log(sim.gasEstimate); // estimated resource cost
 ```
 
-### Swap Error Handling
+### Skipping simulation
 
-Swap failures map directly to typed `FluxapayError` subclasses:
+Set the `SKIP_SIMULATION=true` environment variable to bypass pre-flight
+simulation entirely. This is intended for testing only.
 
-| Error Class | Code | Reason |
-|-------------|------|--------|
-| `ArbitrageDetectedError` | `#27` | DEX router swap slippage or price sandwich detected. |
-| `SwapPathInvalidError` | `#28` | Route swap path between tokens is invalid or empty. |
-| `OraclePriceDeviationError` | `#29` | DEX swap quote deviates from oracle price beyond tolerance threshold. |
-
-
-## Gas Estimation
-
-`GasEstimatorClient` queries the on-chain `GasEstimator` contract for predicted Soroban resource costs (instructions, ledger reads/writes, events, and resource fee in stroops) before submitting a transaction.
-
-```typescript
-import { GasEstimatorClient } from "@fluxapay/sdk";
-
-const gasEstimator = new GasEstimatorClient({
-  network: "testnet",
-  gasEstimatorContractId: "C...", // GasEstimator contract ID
-});
-
-const estimate = await gasEstimator.estimate("CreatePayment");
-console.log(estimate.resourceFeeStroops);
-
-const allEstimates = await gasEstimator.estimateAll();
+```bash
+SKIP_SIMULATION=true npm test
 ```
 
-## Offline / Hardware Wallet Signing
+When simulation runs, the gas estimate is logged at debug level.
 
-`FluxapayClient.offlineSigner()` returns a `FluxapayOfflineSigner` that builds unsigned transaction payloads (XDR + JSON snapshot + required signers) for offline or hardware-wallet signing workflows, without submitting them.
+## Error Handling
 
-Supported operations: `create_payment`, `verify_payment`, `create_refund`, and (for backend billing services) `charge_subscription` and `pull_payment`.
-
-```typescript
-const signer = client.offlineSigner();
-
-// Pre-build a subscription tick for batch submission or hardware-wallet signing.
-const tickPayload = await signer.buildSubscriptionTick({
-  operator: "G_OPERATOR...",
-  subscriptionId: "sub_123",
-  token: "C_USDC_TOKEN...",
-});
-
-// Pre-build a pre-authorized pull payment.
-const pullPayload = await signer.buildPullAuthorization({
-  merchant: "G_MERCHANT...",
-  customer: "G_CUSTOMER...",
-  amount: 5_000_000n,
-});
-
-// Each payload contains `unsignedXdr`, `hash`, `json`, and `requiredAuthSigners`.
-// Sign `unsignedXdr` offline, then restore + submit:
-const restored = signer.restore(tickPayload);
-```
-
-You can also use the standalone builder functions directly: `buildSubscriptionTickPayload`, `buildPullAuthorizationPayload`, `buildCreatePaymentPayload`, `buildVerifyPaymentPayload`, `buildCreateRefundPayload`.
-
-## Scoped API Keys
-
-Issue scoped API keys to restrict integrations or services to specific capabilities:
-
-```typescript
-// Create a scoped API key
-const keyRecord = await client.createApiKey({
-  merchant: "G_MERCHANT...",
-  keyHash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  scopes: ["read:payments", "write:payments"],
-});
-
-// Retrieve an API key
-const record = await client.getApiKey(keyHash);
-
-// Revoke an API key
-await client.revokeApiKey("G_MERCHANT...", keyHash);
-```
-
-Available scopes:
-- `read:payments`: Query payments, refunds, and disputes.
-- `write:payments`: Create payments and charge authorizations.
-- `read:analytics`: Query payment metrics and events.
-- `manage:webhooks`: Manage webhook registrations.
-- `admin`: Full unrestricted access.
+Simulation failures are parsed into `FluxaPayError` instances. Each error
+exposes a `code` and a human-readable `message` describing the contract
+failure.
 
 ## License
 
-
 MIT
-
-## Publishing
-
-Releases are published to npm when a version tag is pushed:
-
-```bash
-git tag sdk/v0.1.0
-git push origin sdk/v0.1.0
-```
-
-The [SDK Release](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/sdk-release.yml) workflow builds, tests, and publishes `@fluxapay/sdk`. Requires `NPM_TOKEN` in GitHub repository secrets (npm automation token with publish access to the `@fluxapay` scope).
