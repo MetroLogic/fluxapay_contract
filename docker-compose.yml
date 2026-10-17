@@ -28,6 +28,26 @@ services:
     volumes:
       - stellar-sandbox-data:/opt/stellar
 
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: fluxapay-backend
+    depends_on:
+      stellar-quickstart:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://fluxapay:fluxapay@postgres:5432/fluxapay}
+      HORIZON_URL: ${HORIZON_URL:-http://stellar-quickstart:8000}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
   contract-builder:
     profiles: ["build"]
     image: rust:1.82-bookworm

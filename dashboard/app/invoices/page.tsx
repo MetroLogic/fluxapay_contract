@@ -6,6 +6,9 @@
  * Displays the merchant's invoice list with lifecycle status badges
  * (Pending, Paid, Overdue, Voided). Supports filtering by status.
  * Voiding an invoice calls DELETE /v1/invoices/{id} on the indexer API.
+ *
+ * Issue #984: Adds a PDF preview modal so merchants can review the
+ * server-rendered invoice PDF before it is sent to the customer.
  */
 
 import React, { useCallback, useEffect, useState } from "react";
@@ -26,24 +29,63 @@ interface InvoiceRow {
   createdAt: string | null;
 }
 
+interface InvoiceDraft {
+  merchantId: string;
+  totalAmount: string;
+  dueDate: string;
+  description?: string;
+}
+
 // ------------------------------------------------------------------ status badge
 
 const STATUS_STYLES: Record<string, string> = {
-  Pending: "bg-yellow-100 text-yellow-800 border border-yellow-300",
-  Paid: "bg-green-100 text-greengreen-800 border border-green-300",
-  Overdue: "bg-red-100 text-red-800 border border-red-300",
-  Voided: "bg-gray-100 text-gray-500 border border-gray-300 line-through",
+  Pending:
+    "bg-yellow-100 text-yellow-800 border border-yellow-300 dark:bg-yellow-900/40 dark:text-yellow-200 dark:border-yellow-700",
+  Paid:
+    "bg-green-100 text-green-800 border border-green-300 dark:bg-green-900/40 dark:text-green-200 dark:border-green-700",
+  Overdue:
+    "bg-red-100 text-red-800 border border-red-300 dark:bg-red-900/40 dark:text-red-200 dark:border-red-700",
+  Voided:
+    "bg-gray-100 text-gray-500 border border-gray-300 line-through dark:bg-gray-800 dark:text-gray-400 dark:border-gray-600",
 };
 
 function StatusBadge({ status }: { status: string }) {
   const classes =
-    STATUS_STYLES[status] ?? "bg-gray-100 text-gray-600 border border-gray-300";
+    STATUS_STYLES[status] ??
+    "bg-gray-100 text-gray-600 border border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600";
   return (
     <span
       className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${classes}`}
     >
       {status}
     </span>
+  );
+}
+
+// ------------------------------------------------------------------ skeleton
+
+function SkeletonRow() {
+  return (
+    <tr className="animate-pulse">
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-20 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-16 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-16 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+    </tr>
   );
 }
 
@@ -90,6 +132,18 @@ export default function InvoicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [voidingId, setVoidingId] = useState<string | null>(null);
 
+  // Issue #984: preview modal state.
+  const [draft, setDraft] = useState<InvoiceDraft>({
+    merchantId: "",
+    totalAmount: "",
+    dueDate: "",
+    description: "",
+  });
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
   const apiUrl =
     process.env.NEXT_PUBLIC_INDEXER_URL ??
     process.env.NEXT_PUBLIC_API_URL ??
@@ -120,6 +174,86 @@ export default function InvoicesPage() {
   useEffect(() => {
     void fetchInvoices();
   }, [fetchInvoices]);
+
+  // Issue #984: revoke the object URL when the modal closes / unmounts.
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  const authHeaders = useCallback((): Record<string, string> => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("fluxapay_jwt") : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, []);
+
+  const closePreview = useCallback(() => {
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setPreviewError(null);
+  }, []);
+
+  // Issue #984: generate a preview PDF server-side without persisting.
+  const handlePreview = async () => {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const resp = await fetch(`${apiUrl}/v1/invoices/preview`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/pdf",
+          ...authHeaders(),
+        },
+        body: JSON.stringify(draft),
+      });
+      if (resp.status === 413) {
+        throw new Error("Invoice PDF exceeds the 5 MB preview limit.");
+      }
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+    } catch (err: unknown) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Issue #984: persist + dispatch the invoice using the same draft data.
+  const handleSend = async () => {
+    setSending(true);
+    setPreviewError(null);
+    try {
+      const resp = await fetch(`${apiUrl}/v1/invoices`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify(draft),
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${resp.status}`);
+      }
+      closePreview();
+      await fetchInvoices();
+    } catch (err: unknown) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
+    }
+  };
 
   const handleVoid = async (invoiceId: string) => {
     if (!confirm(`Void invoice ${invoiceId}? This cannot be undone.`)) return;
@@ -153,24 +287,77 @@ export default function InvoicesPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 p-6">
+    <main className="min-h-screen bg-gray-50 p-6 dark:bg-gray-900">
       <div className="mx-auto max-w-5xl">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-900">Invoices</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Invoices</h1>
           <div className="flex items-center gap-3">
-            <a href="/payment-links" className="text-sm font-medium text-indigo-700 hover:text-indigo-900">
+            <a href="/payment-links" className="text-sm font-medium text-indigo-700 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300">
               Payment links
             </a>
-            <a href="/subscriptions" className="text-sm font-medium text-indigo-700 hover:text-indigo-900">
+            <a href="/subscriptions" className="text-sm font-medium text-indigo-700 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300">
               Subscriptions
             </a>
             <button
               onClick={() => void fetchInvoices()}
               disabled={loading}
-              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-400"
             >
               {loading ? "Loading…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+
+        {/* Issue #984: invoice draft + preview trigger */}
+        <div className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <h2 className="mb-3 text-sm font-semibold text-gray-700">New invoice</h2>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="text-sm text-gray-600">
+              Merchant ID
+              <input
+                type="text"
+                value={draft.merchantId}
+                onChange={(e) => setDraft({ ...draft, merchantId: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Amount (smallest unit)
+              <input
+                type="text"
+                inputMode="numeric"
+                value={draft.totalAmount}
+                onChange={(e) => setDraft({ ...draft, totalAmount: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Due date
+              <input
+                type="date"
+                value={draft.dueDate}
+                onChange={(e) => setDraft({ ...draft, dueDate: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm text-gray-600">
+              Description
+              <input
+                type="text"
+                value={draft.description ?? ""}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={() => void handlePreview()}
+              disabled={previewLoading}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {previewLoading ? "Generating…" : "Preview"}
             </button>
           </div>
         </div>
@@ -185,8 +372,8 @@ export default function InvoicesPage() {
               onClick={() => setStatusFilter(opt.value)}
               className={`rounded-full px-3 py-1 text-sm font-medium transition-colors ${
                 statusFilter === opt.value
-                  ? "bg-indigo-600 text-white"
-                  : "bg-white text-gray-600 border border-gray-300 hover:bg-gray-100"
+                  ? "bg-indigo-600 text-white dark:bg-indigo-500"
+                  : "bg-white text-gray-600 border border-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600 dark:hover:bg-gray-700"
               }`}
             >
               {opt.label}
@@ -198,7 +385,7 @@ export default function InvoicesPage() {
         {error && (
           <div
             role="alert"
-            className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700"
+            className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/40 dark:text-red-200"
           >
             {error}
           </div>
@@ -206,15 +393,21 @@ export default function InvoicesPage() {
 
         {/* Table */}
         <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <table
+            className="min-w-full divide-y divide-gray-200 text-sm"
+            aria-busy={loading}
+          >
             <thead className="bg-gray-50">
+        <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
+          <table className="min-w-full divide-y divide-gray-200 text-sm dark:divide-gray-700">
+            <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
                 {["Invoice ID", "Amount (USDC)", "Status", "Due Date", "Created", "Actions"].map(
                   (col) => (
                     <th
                       key={col}
                       scope="col"
-                      className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500"
+                      className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400"
                     >
                       {col}
                     </th>
@@ -223,48 +416,60 @@ export default function InvoicesPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
+              {loading ? (
+                Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
               {loading && invoices.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-400">
+                  <td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">
                     Loading…
                   </td>
                 </tr>
               ) : invoices.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-400">
+                  <td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">
                     No invoices found.
                   </td>
                 </tr>
               ) : (
                 invoices.map((inv) => (
-                  <tr key={inv.invoiceId} className="hover:bg-gray-50">
+                  <tr key={inv.invoiceId}>
                     <td className="px-4 py-3 font-mono text-xs text-gray-700">
                       {inv.invoiceId}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">
+                    <td className="px-4 py-3 text-gray-700">
+                  <tr key={inv.invoiceId} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <td className="px-4 py-3 font-mono text-xs text-gray-700 dark:text-gray-300">
+                      {inv.invoiceId}
+                    </td>
+                    <td className="px-4 py-3 text-gray-900">
+                    <td className="px-4 py-3 text-gray-900 dark:text-gray-100">
                       {formatAmount(inv.totalAmount)}
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={inv.status} />
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
+                    <td className="px-4 py-3 text-gray-600">{formatDate(inv.dueDate)}</td>
+                    <td className="px-4 py-3 text-gray-600">{formatDate(inv.createdAt)}</td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {formatDate(inv.dueDate)}
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {formatDate(inv.createdAt)}
                     </td>
                     <td className="px-4 py-3">
-                      {inv.status !== "Paid" && inv.status !== "Voided" ? (
+                      {inv.status !== "Voided" && inv.status !== "Paid" ? (
                         <button
                           onClick={() => void handleVoid(inv.invoiceId)}
                           disabled={voidingId === inv.invoiceId}
-                          className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"
-                          aria-label={`Void invoice ${inv.invoiceId}`}
+                          className="text-xs font-medium text-red-600 hover:text-red-800 disabled:opacity-50"
+                          className="text-sm font-medium text-red-600 hover:text-red-800 disabled:opacity-50 dark:text-red-400 dark:hover:text-red-300"
                         >
                           {voidingId === inv.invoiceId ? "Voiding…" : "Void"}
                         </button>
                       ) : (
-                        <span className="text-xs text-gray-300">—</span>
+                        <span className="text-xs text-gray-400">—</span>
+                        <span className="text-gray-400 dark:text-gray-500">—</span>
                       )}
                     </td>
                   </tr>
@@ -274,6 +479,57 @@ export default function InvoicesPage() {
           </table>
         </div>
       </div>
+
+      {/* Issue #984: PDF preview modal */}
+      {previewUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Invoice PDF preview"
+        >
+          <div className="flex h-full max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+              <h2 className="text-sm font-semibold text-gray-800">Invoice preview</h2>
+              <button
+                onClick={closePreview}
+                className="text-sm text-gray-500 hover:text-gray-800"
+                aria-label="Close preview"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden bg-gray-100">
+              <iframe
+                src={previewUrl}
+                title="Invoice PDF preview"
+                className="h-full w-full"
+              />
+            </div>
+            {previewError && (
+              <div role="alert" className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+                {previewError}
+              </div>
+            )}
+            <div className="flex justify-end gap-3 border-t border-gray-200 px-4 py-3">
+              <button
+                onClick={closePreview}
+                disabled={sending}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+              >
+                Edit
+              </button>
+              <button
+                onClick={() => void handleSend()}
+                disabled={sending}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {sending ? "Sending…" : "Send"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

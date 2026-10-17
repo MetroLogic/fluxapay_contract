@@ -9,6 +9,7 @@ import { Router, Request, Response, NextFunction } from "express";
  * GET    /v1/invoices                  – list with optional ?status= filter
  * GET    /v1/invoices/:id              – fetch single invoice
  * DELETE /v1/invoices/:id             – void (soft-delete) an invoice
+ * POST   /v1/invoices/preview         – render invoice PDF without persisting
  *
  * Issue #964: Transaction CSV export.
  *
@@ -25,6 +26,9 @@ import { Router, Request, Response, NextFunction } from "express";
  * Auth: the DELETE endpoint requires a `Authorization: Bearer <jwt>` header
  * issued by the SEP-10 flow. The JWT subject becomes the merchant_id and is
  * forwarded to the indexer.
+ * Auth: the DELETE and preview endpoints require a `Authorization: Bearer <jwt>`
+ * header issued by the SEP-10 flow. The JWT subject becomes the merchant_id and
+ * is forwarded to the indexer.
  */
 
 export interface InvoicesRouterConfig {
@@ -110,6 +114,8 @@ export function formatInvoiceAmount(
 
   return `${symbol}${formatted}`;
 }
+/** Maximum size (in bytes) of a preview PDF before it is rejected with 413. */
+const MAX_PREVIEW_PDF_BYTES = 5 * 1024 * 1024;
 
 export function createInvoicesRouter(config: InvoicesRouterConfig): Router {
   const router = Router();
@@ -164,6 +170,43 @@ export function createInvoicesRouter(config: InvoicesRouterConfig): Router {
       });
       const body = await upstream.json();
       return res.status(upstream.status).json(body);
+  // ------------------------------------------------------------------ POST /v1/invoices/preview
+
+  router.post("/preview", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const authHeader = req.header("authorization") ?? "";
+      const [scheme, token] = authHeader.split(" ");
+      if (scheme !== "Bearer" || !token) {
+        return res.status(401).json({ error: "merchant authentication required" });
+      }
+
+      // Delegate to the indexer's preview renderer, which shares the same PDF
+      // generation code path as the persisted invoice. The indexer must not
+      // create a draft invoice record for this request.
+      const upstream = await fetch(`${indexerUrl}/v1/invoices/preview`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/pdf",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(req.body ?? {}),
+      });
+
+      if (!upstream.ok) {
+        const body = await upstream.json().catch(() => ({ error: "preview generation failed" }));
+        return res.status(upstream.status).json(body);
+      }
+
+      const pdf = Buffer.from(await upstream.arrayBuffer());
+      if (pdf.byteLength > MAX_PREVIEW_PDF_BYTES) {
+        return res.status(413).json({ error: "preview PDF exceeds 5 MB limit" });
+      }
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Length", String(pdf.byteLength));
+      res.setHeader("Content-Disposition", "inline; filename=\"invoice-preview.pdf\"");
+      return res.status(200).send(pdf);
     } catch (err) {
       return next(err);
     }
