@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { Networks } from "@stellar/stellar-sdk";
+import { Networks, Horizon } from "@stellar/stellar-sdk";
 import { createAuthRouter } from "./routes/auth";
 import { createAnalyticsRouter } from "./routes/analytics";
 import { createSettlementRouter } from "./routes/settlements";
@@ -20,6 +20,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
  * Issue #974: starts the Stellar Fee-Bump daemon that re-wraps stuck
  * pending payments with a higher fee (CAP-0015).
+ * Issue #976: validates the deposit address (account existence, USDC
+ * trustline, XLM reserve) before `create_payment` returns it.
  */
 
 const app = express();
@@ -114,6 +116,115 @@ app.use(
   }),
 );
 
+/**
+ * Issue #976: deposit address validation.
+ *
+ * Stellar accounts require a minimum XLM reserve (1 XLM base + 0.5 XLM per
+ * trustline/subentry). A deposit address must also have a USDC trustline or
+ * the customer's payment fails with a cryptic Stellar error. We validate the
+ * address against Horizon before `create_payment` returns it, caching the
+ * result per address for 60 seconds to avoid repeated Horizon calls.
+ */
+const USDC_ASSET_CODE = process.env.USDC_ASSET_CODE || "USDC";
+const USDC_ASSET_ISSUER = process.env.USDC_ASSET_ISSUER || "";
+const BASE_RESERVE_XLM = 1;
+const SUBENTRY_RESERVE_XLM = 0.5;
+// Buffer for the 1 USDC transaction fee (in XLM, generously rounded).
+const FEE_BUFFER_XLM = 0.01;
+const DEPOSIT_CHECK_TTL_MS = 60_000;
+
+const horizonUrl = process.env.STELLAR_NETWORK === "mainnet"
+  ? "https://horizon.stellar.org"
+  : "https://horizon-testnet.stellar.org";
+const horizonServer = new Horizon.Server(horizonUrl);
+
+type DepositCheckError =
+  | "DEPOSIT_ADDRESS_NOT_FUNDED"
+  | "USDC_TRUSTLINE_MISSING"
+  | "INSUFFICIENT_RESERVE";
+
+interface DepositCheckResult {
+  ok: boolean;
+  code?: DepositCheckError;
+  message?: string;
+}
+
+const depositCheckCache = new Map<string, { result: DepositCheckResult; expiresAt: number }>();
+
+async function validateDepositAddress(address: string): Promise<DepositCheckResult> {
+  const now = Date.now();
+  const cached = depositCheckCache.get(address);
+  if (cached && cached.expiresAt > now) {
+    return cached.result;
+  }
+
+  let result: DepositCheckResult;
+  try {
+    const account = await horizonServer.loadAccount(address);
+
+    const hasUsdcTrustline = account.balances.some(
+      (b) =>
+        "asset_code" in b &&
+        b.asset_code === USDC_ASSET_CODE &&
+        (!USDC_ASSET_ISSUER || ("asset_issuer" in b && b.asset_issuer === USDC_ASSET_ISSUER)),
+    );
+    if (!hasUsdcTrustline) {
+      result = {
+        ok: false,
+        code: "USDC_TRUSTLINE_MISSING",
+        message: `deposit address ${address} has no ${USDC_ASSET_CODE} trustline`,
+      };
+    } else {
+      const native = account.balances.find((b) => b.asset_type === "native");
+      const xlmBalance = native ? Number(native.balance) : 0;
+      const subentries = account.subentry_count || 0;
+      const minReserve = BASE_RESERVE_XLM + SUBENTRY_RESERVE_XLM * subentries + FEE_BUFFER_XLM;
+      if (xlmBalance < minReserve) {
+        result = {
+          ok: false,
+          code: "INSUFFICIENT_RESERVE",
+          message: `deposit address ${address} has ${xlmBalance} XLM, needs at least ${minReserve} XLM`,
+        };
+      } else {
+        result = { ok: true };
+      }
+    }
+  } catch (err: any) {
+    if (err?.response?.status === 404) {
+      result = {
+        ok: false,
+        code: "DEPOSIT_ADDRESS_NOT_FUNDED",
+        message: `deposit address ${address} does not exist on Stellar`,
+      };
+    } else {
+      // Horizon unavailable — do not block payment creation on transient errors.
+      return { ok: true };
+    }
+  }
+
+  depositCheckCache.set(address, { result, expiresAt: now + DEPOSIT_CHECK_TTL_MS });
+  return result;
+}
+
+/**
+ * Issue #976: `create_payment` — validates the deposit address before
+ * returning it to the merchant. Returns HTTP 422 with a machine-readable
+ * error code when the address is not ready to receive USDC.
+ */
+app.post("/v1/payments", async (req, res) => {
+  const depositAddress = req.body?.deposit_address;
+  if (!depositAddress || typeof depositAddress !== "string") {
+    return res.status(400).json({ error: "deposit_address is required" });
+  }
+
+  const check = await validateDepositAddress(depositAddress);
+  if (!check.ok) {
+    return res.status(422).json({ error: check.message, code: check.code });
+  }
+
+  return res.status(201).json({ deposit_address: depositAddress });
+});
+
 app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
 
 /**
@@ -167,4 +278,4 @@ if (require.main === module) {
   startFeeBumpDaemon();
 }
 
-export { app, startFeeBumpDaemon, runFeeBumpSweep };
+export { app, startFeeBumpDaemon, runFeeBumpSweep, validateDepositAddress };
