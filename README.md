@@ -219,3 +219,135 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: local setup, build an
    ```
 
 4. **Explore the API**: Open `http://localhost:3000/api-docs` for the interactive API reference.
+## Security
+
+Please refer to our [Security Policy](SECURITY.md) for information on reporting vulnerabilities and our current audit status.
+
+## Refunds
+
+FluxaPay supports both full and partial refunds on confirmed USDC payments via the `RefundManager` contract.
+
+### How Refunds Work
+
+1. A merchant (or authorized requester) calls `create_refund` with the `payment_id`, the refund amount, and a reason.
+2. The refund is created in `Pending` status and added to the payment's refund list.
+3. A settlement operator calls `process_refund` to execute the on-chain USDC transfer back to the requester (minus a 1% processing fee).
+4. The refund status transitions to `Completed`.
+
+**Constraints:**
+- The sum of all non-rejected refunds for a payment cannot exceed the original payment amount (`RefundExceedsPayment` error #16).
+- Multiple partial refunds are supported — each is tracked independently in the `PaymentRefunds` list.
+- Only `Confirmed` payments can be refunded.
+- Rejected refunds do not count toward the total, allowing replacement refunds.
+
+### Creating a Refund (Soroban CLI)
+
+```bash
+stellar contract invoke \
+  --id <REFUND_MANAGER_CONTRACT_ID> \
+  --source <REQUESTER_SECRET_KEY> \
+  --network testnet \
+  -- create_refund \
+  --payment_id "payment_abc123" \
+  --refund_amount 500000000 \
+  --reason "Customer requested return" \
+  --requester <REQUESTER_ADDRESS>
+```
+
+### Processing a Refund (Soroban CLI — settlement operator)
+
+```bash
+stellar contract invoke \
+  --id <REFUND_MANAGER_CONTRACT_ID> \
+  --source <OPERATOR_SECRET_KEY> \
+  --network testnet \
+  -- process_refund \
+  --operator <OPERATOR_ADDRESS> \
+  --refund_id "refund_1"
+```
+
+### Partial Refund Example (Rust SDK)
+
+```rust
+// Register the payment first (done automatically when a payment is confirmed)
+client.register_payment(&payment_id, &merchant_id, &1_000_000_000i128, &usdc_symbol);
+
+// Issue three partial refunds totalling the full payment amount
+let r1 = client.create_refund(&payment_id, &300_000_000i128, &reason, &requester);
+let r2 = client.create_refund(&payment_id, &400_000_000i128, &reason, &requester);
+let r3 = client.create_refund(&payment_id, &300_000_000i128, &reason, &requester);
+
+// Process each refund (operator role required)
+client.process_refund(&operator, &r1);
+client.process_refund(&operator, &r2);
+client.process_refund(&operator, &r3);
+```
+
+### Querying Refunds
+
+```bash
+# Get a single refund by ID
+stellar contract invoke --id <CONTRACT_ID> --network testnet \
+  -- get_refund --refund_id "refund_1"
+
+# Get all refunds for a payment
+stellar contract invoke --id <CONTRACT_ID> --network testnet \
+  -- get_payment_refunds --payment_id "payment_abc123"
+```
+
+### Refund Webhooks
+
+FluxaPay emits the following on-chain events for refund lifecycle tracking:
+
+| Event | Trigger |
+|---|---|
+| `REFUND/CREATED` | A new refund request is submitted |
+| `REFUND/COMPLETED` | Refund is processed and USDC transferred |
+| `REFUND/REJECTED` | Operator rejects the refund request |
+| `REFUND/CANCELLED` | Requester or admin cancels a pending refund |
+
+## Architecture
+
+For a detailed understanding of the contract structure, cross-contract interactions, role model, and payment lifecycle, see [docs/architecture.md](docs/architecture.md).
+
+## Error Codes
+
+For a unified reference of every contract error code (`PaymentProcessor`, `RefundManager`, `AccessControl`, `Stream`, `FXOracle`, `MerchantRegistry`, `MerchantAuth`, `DexRouter`, `AccountAbstraction`) with common causes and remediation steps, see [docs/error-codes.md](docs/error-codes.md).
+
+## FAQ
+
+Common questions from merchants and developers: [docs/faq.md](docs/faq.md)
+
+## Scripts
+
+Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](scripts/README.md)
+
+## Telegram link
+
+<https://t.me/+m23gN14007w0ZmQ0>
+
+## Handsoff notes
+
+<!-- handsoff-issue-830 -->
+- #830: feat: add payment overpayment policy — configurable accept / reject / partial-accept for overpaid amounts
+<!-- handsoff-issue-824 -->
+- #824: docs: document the full payment lifecycle state diagram with Mermaid chart in architecture.md
+<!-- handsoff-issue-794 -->
+- #794: feat: add get_payment_summary view — single call returning payment + all refunds + stream info
+<!-- handsoff-issue-791 -->
+- #791: feat: on-chain merchant score decay — reduce score over time if no new payments are confirmed
+<!-- handsoff-issue-805 -->
+- #805: bug: merchant_registry_test.rs tests share a single Soroban test environment, causing test order dependency
+<!-- handsoff-issue-826 -->
+- #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
+
+<!-- handsoff-issue-989 -->
+- #989: test: add Playwright end-to-end tests for payment link checkout flow
+<!-- handsoff-issue-996 -->
+- #996: feat: add dashboard 'Copy Payment Link' button directly to payments table row
+<!-- handsoff-issue-973 -->
+- #973: feat: implement Soroban smart contract event listener for on-chain escrow releases in streams
+<!-- handsoff-issue-980 -->
+- #980: feat: add input validation for payment amount field on checkout page
+<!-- handsoff-issue-969 -->
+- #969: feat: add date range and currency filters to dashboard transactions table
