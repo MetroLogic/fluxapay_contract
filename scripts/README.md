@@ -26,6 +26,56 @@ Operational scripts for deployment, SDK generation, local development, and CI ch
 | `sandbox-init.sh` | Bootstrap local Stellar sandbox — builds WASM, generates local identities, funds admin via friendbot. | `STELLAR_RPC_URL`, `STELLAR_NETWORK` | Local dev first-time setup |
 | `check-mainnet-contract-ids.js` | CI informational check — warns when `sdk/src/network-profiles.ts` mainnet still has `UNSET_CONTRACT_ID` placeholders. Always exits 0. | None | CI |
 | `check-error-map-sync.ts` | CI gate — verifies `FLUXAPAY_CONTRACT_ERROR_MAP` in `sdk/src/index.ts` matches the `Error` enum in `fluxapay/src/lib.rs`. Fails CI (exit 1) on drift **or when an expected source file cannot be found** (the missing path is printed). | None | CI |
+| `webhook-test-helper.js` | Generates a valid signed webhook payload (HMAC-SHA256) and prints a copy-pasteable `curl` command with `X-FluxaPay-Signature` and `X-FluxaPay-Timestamp` headers. | None | When testing webhook verification |
+
+## `webhook-test-helper.js`
+
+Generates a valid signed webhook payload so you can exercise your endpoint's
+signature verification end-to-end.
+
+### Usage
+
+```bash
+# Generate a signed payload for an event type
+npx fluxapay-webhook-test --secret whsec_... --event payment.confirmed
+
+# Use a custom payload body and target URL
+node scripts/webhook-test-helper.js \
+  --secret whsec_... \
+  --event payment.confirmed \
+  --payload-file ./sample.json \
+  --url https://example.com/webhooks/fluxapay
+```
+
+### Flags
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--secret` | Yes | Webhook signing secret (`whsec_...`) |
+| `--event` | No | Event type for the generated payload (default `payment.confirmed`) |
+| `--payload-file` | No | Path to a JSON file to use as the request body instead of the generated payload |
+| `--url` | No | Endpoint URL used in the printed `curl` command (default `https://example.com/webhooks/fluxapay`) |
+
+### Output
+
+The helper prints the signature header, timestamp header, raw body, and a
+copy-pasteable `curl` command:
+
+```
+X-FluxaPay-Signature: t=1728000000,v1=abc123...
+X-FluxaPay-Timestamp: 1728000000
+Body: {"type":"payment.confirmed","data":{...}}
+
+Test with curl:
+curl -X POST 'https://example.com/webhooks/fluxapay' \
+  -H 'Content-Type: application/json' \
+  -H 'X-FluxaPay-Signature: t=1728000000,v1=abc123...' \
+  -H 'X-FluxaPay-Timestamp: 1728000000' \
+  -d '{"type":"payment.confirmed","data":{...}}'
+```
+
+Signatures are valid for 300 seconds; re-run the helper if your endpoint
+rejects the timestamp as expired.
 
 ## CI Jobs
 
@@ -121,62 +171,5 @@ script must exit non-zero and print the missing path.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FAUCET_URL` | No | `https://friendbot.stellar.org` | Faucet endpoint URL |
-
-### `sandbox-init.sh`
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `STELLAR_RPC_URL` | Yes | — | From `.env.docker` |
-| `STELLAR_NETWORK` | Yes | — | From `.env.docker` |
-
-## Running
-
-All scripts should be executed from the repository root:
-
-```bash
-./deploy.sh [network]
-```
-
-The network may be supplied as an optional positional argument or via the
-`STELLAR_NETWORK` environment variable. The positional argument takes
-precedence over the environment variable. When neither is provided the network
-defaults to `testnet`.
-
-Accepted networks: `testnet` | `futurenet` | `standalone`.
-
-### Examples
-
-```bash
-# Deploy to testnet (default)
-./deploy.sh testnet
-
-# Deploy to futurenet via the environment variable
-STELLAR_NETWORK=futurenet ./deploy.sh
-
-# Deploy to a standalone sandbox
-./deploy.sh standalone
-
-# Seed test data after deploy
-SEED_DATA=true ./deploy.sh testnet
-
-# Skip the cargo build step
-SKIP_BUILD=true ./deploy.sh testnet
-```
-
-An unknown network value prints usage and exits non-zero.
-
-### Environment variables
-
-| Variable            | Required | Description                                              |
-| ------------------- | -------- | -------------------------------------------------------- |
-| `STELLAR_SECRET_KEY`| yes      | Deployer secret key (starts with `S`)                    |
-| `STELLAR_NETWORK`   | no       | Target network (`testnet` \| `futurenet` \| `standalone`)|
-| `STELLAR_RPC_URL`   | no       | Override the RPC endpoint                                |
-| `SEED_DATA`         | no       | Set to `true` to seed test data after deploy             |
-| `SKIP_BUILD`        | no       | Set to `true` to skip the cargo build step               |
-
-## `deploy-testnet.sh`
-
-Deprecated. Kept for backward compatibility; it prints a warning and delegates
-to `deploy.sh`, defaulting to `testnet` when no network is supplied.
+| `STELLAR_RPC_URL` | No | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
+| `STELLAR_NETWORK` | No | `testnet` | Target network |
