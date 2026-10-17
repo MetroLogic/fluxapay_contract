@@ -1,5 +1,6 @@
 /**
  * Issue #817 / #1032: sliding-window rate limiter for the indexer REST API.
+ * Issue #963: optional Redis-backed store so limits are shared across replicas.
  *
  * - Auth routes (`/v1/auth/*`): per-IP, default 10 req/min (`RATE_LIMIT_AUTH_RPM`)
  * - Payment-creation-adjacent routes (see `PAYMENT_CREATE_ROUTES` below):
@@ -13,6 +14,9 @@
  *   `/v1/payment-links/:id/view`, which is what this bucket protects.
  * - All other routes: per-account (API key / auth subject) falling back to IP,
  *   default 200 req/min (`RATE_LIMIT_API_RPM`)
+ *
+ * When `REDIS_URL` is set, counters live in Redis (shared across replicas);
+ * otherwise the in-memory store is used.
  *
  * On breach: HTTP 429 with a `Retry-After` header (seconds).
  */
@@ -43,6 +47,50 @@ export class MemorySlidingWindowStore implements RateLimitStore {
   }
 }
 
+/**
+ * Issue #963: minimal Redis surface used by the limiter. Kept structural so
+ * tests can inject a mock without pulling in the real `redis` client.
+ */
+export interface RedisLikeClient {
+  incr(key: string): Promise<number>;
+  pexpire(key: string, ms: number): Promise<unknown>;
+  pttl(key: string): Promise<number>;
+}
+
+/**
+ * Issue #963: Redis-backed fixed-window counter store. Uses `INCR` + `PEXPIRE`
+ * so the counter is atomic and shared across all replicas.
+ */
+export class RedisRateLimitStore implements RateLimitStore {
+  constructor(private readonly client: RedisLikeClient) {}
+
+  /**
+   * Synchronous interface is preserved for the middleware; the Redis path is
+   * driven through `hitAsync` (see `createRateLimitMiddleware`). This method
+   * exists only to satisfy the interface and is not used on the Redis path.
+   */
+  hit(): number {
+    throw new Error("RedisRateLimitStore requires the async middleware path");
+  }
+
+  async hitAsync(key: string, windowMs: number): Promise<number> {
+    const count = await this.client.incr(key);
+    if (count === 1) {
+      await this.client.pexpire(key, windowMs);
+    }
+    return count;
+  }
+
+  async resetMs(key: string): Promise<number> {
+    const ttl = await this.client.pttl(key);
+    return ttl > 0 ? ttl : 0;
+  }
+
+  clear(): void {
+    // Redis keys expire on their own; nothing to do here.
+  }
+}
+
 export interface RateLimitConfig {
   authRpm: number;
   apiRpm: number;
@@ -52,6 +100,8 @@ export interface RateLimitConfig {
   paymentCreateWindowMs: number;
   windowMs?: number;
   store?: RateLimitStore;
+  /** Issue #963: Redis client; when set, counters are shared across replicas. */
+  redis?: RedisLikeClient;
 }
 
 /**
@@ -134,6 +184,7 @@ export function createRateLimitMiddleware(config?: Partial<RateLimitConfig>) {
     config?.paymentCreateWindowMs ?? loaded.paymentCreateWindowMs;
   const windowMs = config?.windowMs ?? 60_000;
   const store = config?.store ?? new MemorySlidingWindowStore();
+  const redisStore = config?.redis ? new RedisRateLimitStore(config.redis) : undefined;
 
   return function rateLimitMiddleware(
     req: Request,
@@ -164,23 +215,49 @@ export function createRateLimitMiddleware(config?: Partial<RateLimitConfig>) {
     }
 
     const now = Date.now();
-    const count = store.hit(key, now, effectiveWindowMs);
 
-    res.setHeader("X-RateLimit-Limit", String(limit));
-    res.setHeader("X-RateLimit-Remaining", String(Math.max(0, limit - count)));
+    const finish = (count: number, resetMs: number): void => {
+      res.setHeader("X-RateLimit-Limit", String(limit));
+      res.setHeader("X-RateLimit-Remaining", String(Math.max(0, limit - count)));
+      res.setHeader(
+        "X-RateLimit-Reset",
+        String(Math.ceil((now + resetMs) / 1000)),
+      );
 
-    if (count > limit) {
-      const retryAfterSec = Math.ceil(effectiveWindowMs / 1000);
-      res.setHeader("Retry-After", String(retryAfterSec));
-      res.status(429).json({
-        error: "Too Many Requests",
-        retry_after: retryAfterSec,
-        limit,
-      });
+      if (count > limit) {
+        const retryAfterSec = Math.ceil(resetMs / 1000);
+        res.setHeader("Retry-After", String(retryAfterSec));
+        res.status(429).json({
+          error: "Too Many Requests",
+          retry_after: retryAfterSec,
+          limit,
+        });
+        return;
+      }
+
+      next();
+    };
+
+    if (redisStore) {
+      // Issue #963: shared counter across replicas.
+      const redisKey = `ratelimit:${key}`;
+      redisStore
+        .hitAsync(redisKey, effectiveWindowMs)
+        .then(async (count) => {
+          const resetMs = await redisStore.resetMs(redisKey);
+          finish(count, resetMs || effectiveWindowMs);
+        })
+        .catch(() => {
+          // Fail open on Redis errors so a Redis outage does not take down
+          // the API; fall back to the in-memory store for this request.
+          const count = store.hit(key, now, effectiveWindowMs);
+          finish(count, effectiveWindowMs);
+        });
       return;
     }
 
-    next();
+    const count = store.hit(key, now, effectiveWindowMs);
+    finish(count, effectiveWindowMs);
   };
 }
 
