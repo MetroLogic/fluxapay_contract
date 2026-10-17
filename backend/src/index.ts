@@ -18,6 +18,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #981: adds an unauthenticated `/health` endpoint reporting database
+ * and Horizon connectivity for load balancers and readiness probes.
  */
 
 const app = express();
@@ -36,6 +38,61 @@ const HOME_DOMAIN = process.env.SEP10_HOME_DOMAIN || "fluxapay.stellar.org";
 
 if (!SERVER_PUBLIC_KEY || !SERVER_SECRET_KEY || !JWT_SECRET) {
   throw new Error("SEP10_SERVER_PUBLIC_KEY, SEP10_SERVER_SECRET, and SEP10_JWT_SECRET are required to start the backend.");
+}
+
+/**
+ * Issue #981: health check configuration.
+ */
+const HORIZON_URL = process.env.HORIZON_URL || "https://horizon-testnet.stellar.org";
+const DATABASE_URL = process.env.DATABASE_URL;
+const HEALTH_HORIZON_TIMEOUT_MS = Number(process.env.HEALTH_HORIZON_TIMEOUT_MS || 3_000);
+const SERVICE_VERSION = process.env.npm_package_version || "0.0.0";
+const STARTED_AT = Date.now();
+
+/**
+ * Issue #981: ping the database. Returns null when healthy, or an error
+ * message describing the failure. When no DATABASE_URL is configured the
+ * database is treated as not configured and reported as connected.
+ */
+async function checkDatabase(): Promise<string | null> {
+  if (!DATABASE_URL) {
+    return null;
+  }
+  try {
+    const { Pool } = await import("pg");
+    const pool = new Pool({ connectionString: DATABASE_URL, connectionTimeoutMillis: 2_000 });
+    try {
+      await pool.query("SELECT 1");
+      return null;
+    } finally {
+      await pool.end();
+    }
+  } catch (err) {
+    return err instanceof Error ? err.message : "database ping failed";
+  }
+}
+
+/**
+ * Issue #981: ping Horizon. Returns null when healthy, or an error message
+ * describing the failure (including timeouts).
+ */
+async function checkHorizon(): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_HORIZON_TIMEOUT_MS);
+  try {
+    const response = await fetch(HORIZON_URL, { signal: controller.signal });
+    if (!response.ok) {
+      return `Horizon responded with status ${response.status}`;
+    }
+    return null;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      return `Horizon request timed out after ${HEALTH_HORIZON_TIMEOUT_MS}ms`;
+    }
+    return err instanceof Error ? err.message : "Horizon request failed";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 app.use(
@@ -112,7 +169,30 @@ app.use(
   }),
 );
 
-app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
+/**
+ * Issue #981: unauthenticated health check endpoint. Reports database and
+ * Horizon connectivity so load balancers and readiness probes can detect a
+ * degraded service. Returns 200 when healthy, 503 when degraded.
+ */
+app.get("/health", async (_req, res) => {
+  const [dbError, horizonError] = await Promise.all([checkDatabase(), checkHorizon()]);
+  const healthy = !dbError && !horizonError;
+
+  const body: Record<string, unknown> = {
+    status: healthy ? "ok" : "degraded",
+    version: SERVICE_VERSION,
+    database: dbError ? "disconnected" : "connected",
+    horizon: horizonError ? "disconnected" : "connected",
+    horizon_url: HORIZON_URL,
+    uptime_secs: Math.floor((Date.now() - STARTED_AT) / 1000),
+  };
+
+  if (!healthy) {
+    body.error = dbError || horizonError;
+  }
+
+  return res.status(healthy ? 200 : 503).json(body);
+});
 
 if (require.main === module) {
   app.listen(PORT, () => {

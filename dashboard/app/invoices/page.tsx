@@ -47,6 +47,33 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+// ------------------------------------------------------------------ skeleton
+
+function SkeletonRow() {
+  return (
+    <tr className="animate-pulse">
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-20 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-16 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-16 rounded bg-gray-200 dark:bg-gray-700" />
+      </td>
+    </tr>
+  );
+}
+
 // ------------------------------------------------------------------ helpers
 
 function formatAmount(raw: string | null): string {
@@ -206,7 +233,10 @@ export default function InvoicesPage() {
 
         {/* Table */}
         <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <table
+            className="min-w-full divide-y divide-gray-200 text-sm"
+            aria-busy={loading}
+          >
             <thead className="bg-gray-50">
               <tr>
                 {["Invoice ID", "Amount (USDC)", "Status", "Due Date", "Created", "Actions"].map(
@@ -223,12 +253,8 @@ export default function InvoicesPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {loading && invoices.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-400">
-                    Loading…
-                  </td>
-                </tr>
+              {loading ? (
+                Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
               ) : invoices.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-gray-400">
@@ -241,7 +267,7 @@ export default function InvoicesPage() {
                     <td className="px-4 py-3 font-mono text-xs text-gray-700">
                       {inv.invoiceId}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">
+                    <td className="px-4 py-3 text-gray-900">
                       {formatAmount(inv.totalAmount)}
                     </td>
                     <td className="px-4 py-3">
@@ -254,17 +280,16 @@ export default function InvoicesPage() {
                       {formatDate(inv.createdAt)}
                     </td>
                     <td className="px-4 py-3">
-                      {inv.status !== "Paid" && inv.status !== "Voided" ? (
+                      {inv.status !== "Voided" && inv.status !== "Paid" ? (
                         <button
                           onClick={() => void handleVoid(inv.invoiceId)}
                           disabled={voidingId === inv.invoiceId}
-                          className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"
-                          aria-label={`Void invoice ${inv.invoiceId}`}
+                          className="text-xs font-medium text-red-600 hover:text-red-800 disabled:opacity-50"
                         >
                           {voidingId === inv.invoiceId ? "Voiding…" : "Void"}
                         </button>
                       ) : (
-                        <span className="text-xs text-gray-300">—</span>
+                        <span className="text-xs text-gray-400">—</span>
                       )}
                     </td>
                   </tr>

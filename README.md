@@ -331,3 +331,6 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 - #805: bug: merchant_registry_test.rs tests share a single Soroban test environment, causing test order dependency
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
+
+<!-- handsoff-issue-980 -->
+- #980: feat: add input validation for payment amount field on checkout page
