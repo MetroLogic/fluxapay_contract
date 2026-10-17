@@ -1,5 +1,6 @@
 /**
  * Issue #817: rate limiting for auth and authenticated indexer routes.
+ * Issue #963: Redis-backed limiter path (mocked Redis client).
  */
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
@@ -9,6 +10,8 @@ import {
   createTestRateLimiter,
   MemorySlidingWindowStore,
   loadRateLimitConfig,
+  createRedisRateLimitStore,
+  type RedisLikeClient,
 } from "../src/rate-limit";
 
 function mockReq(partial: Partial<Request> & { path: string }): Request {
@@ -42,6 +45,39 @@ function mockRes() {
     getBody: () => body,
   };
   return res;
+}
+
+/**
+ * Minimal in-memory stand-in for the `redis` client, implementing only the
+ * commands the Redis rate-limit store relies on (INCR + PEXPIRE + PTTL).
+ */
+function mockRedisClient(): RedisLikeClient & { store: Map<string, { count: number; expiresAt: number }> } {
+  const store = new Map<string, { count: number; expiresAt: number }>();
+  const now = () => Date.now();
+  return {
+    store,
+    async incr(key: string) {
+      const entry = store.get(key);
+      if (!entry || entry.expiresAt <= now()) {
+        store.set(key, { count: 1, expiresAt: 0 });
+        return 1;
+      }
+      entry.count += 1;
+      return entry.count;
+    },
+    async pexpire(key: string, ms: number) {
+      const entry = store.get(key);
+      if (!entry) return 0;
+      entry.expiresAt = now() + ms;
+      return 1;
+    },
+    async pttl(key: string) {
+      const entry = store.get(key);
+      if (!entry) return -2;
+      const remaining = entry.expiresAt - now();
+      return remaining > 0 ? remaining : -2;
+    },
+  };
 }
 
 describe("indexer rate limiting (Issue #817)", () => {
@@ -237,5 +273,82 @@ describe("indexer rate limiting (Issue #817)", () => {
     }) as NextFunction);
     assert.equal(next2, false);
     assert.equal(second.getStatus(), 429);
+  });
+
+  test("Issue #963: Redis-backed store enforces a shared limit across replicas", async () => {
+    const redis = mockRedisClient();
+    const store = createRedisRateLimitStore(redis);
+
+    // Two independent limiters sharing the same Redis client simulate two
+    // replicas: the counter must be shared, not per-process.
+    const replicaA = createTestRateLimiter({
+      authRpm: 10,
+      apiRpm: 2,
+      store,
+      windowMs: 60_000,
+    });
+    const replicaB = createTestRateLimiter({
+      authRpm: 10,
+      apiRpm: 2,
+      store,
+      windowMs: 60_000,
+    });
+
+    const req = () =>
+      mockReq({
+        path: "/v1/payments",
+        method: "GET",
+        headers: { "x-api-key": "merchant-key-1" },
+      });
+
+    const first = mockRes();
+    let next1 = false;
+    replicaA.middleware(req(), first as unknown as Response, (() => {
+      next1 = true;
+    }) as NextFunction);
+    assert.equal(next1, true);
+
+    const second = mockRes();
+    let next2 = false;
+    replicaB.middleware(req(), second as unknown as Response, (() => {
+      next2 = true;
+    }) as NextFunction);
+    assert.equal(next2, true);
+
+    // Third request hits the shared budget regardless of which replica serves it.
+    const blocked = mockRes();
+    let next3 = false;
+    replicaA.middleware(req(), blocked as unknown as Response, (() => {
+      next3 = true;
+    }) as NextFunction);
+    assert.equal(next3, false);
+    assert.equal(blocked.getStatus(), 429);
+    assert.ok(blocked.getHeaders()["retry-after"]);
+  });
+
+  test("Issue #963: Redis-backed responses include X-RateLimit-* headers", async () => {
+    const redis = mockRedisClient();
+    const store = createRedisRateLimitStore(redis);
+    const { middleware } = createTestRateLimiter({
+      authRpm: 10,
+      apiRpm: 5,
+      store,
+      windowMs: 60_000,
+    });
+
+    const res = mockRes();
+    let nextCalled = false;
+    middleware(
+      mockReq({ path: "/v1/fx/convert", method: "GET" }),
+      res as unknown as Response,
+      (() => {
+        nextCalled = true;
+      }) as NextFunction,
+    );
+    assert.equal(nextCalled, true);
+    const headers = res.getHeaders();
+    assert.equal(headers["x-ratelimit-limit"], "5");
+    assert.equal(headers["x-ratelimit-remaining"], "4");
+    assert.ok(headers["x-ratelimit-reset"]);
   });
 });
