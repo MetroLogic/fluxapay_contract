@@ -18,6 +18,8 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
  * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
  * endpoints (`/settlements`) used to automate merchant fiat settlement.
  * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #984: adds `POST /v1/invoices/preview` to render an invoice PDF
+ * without persisting a draft invoice record.
  */
 
 const app = express();
@@ -111,6 +113,37 @@ app.use(
     indexerUrl: process.env.INDEXER_URL || "http://localhost:3001",
   }),
 );
+
+/**
+ * Issue #984: Invoice PDF preview.
+ *
+ * Renders the invoice PDF server-side using the same code path as the actual
+ * invoice PDF, but without persisting a draft invoice record. Requires
+ * merchant authentication. PDFs larger than 5 MB are rejected with HTTP 413.
+ */
+const MAX_PREVIEW_PDF_BYTES = 5 * 1024 * 1024;
+
+app.post("/v1/invoices/preview", async (req, res) => {
+  const authHeader = req.header("authorization") || "";
+  const [scheme, token] = authHeader.split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return res.status(401).json({ error: "merchant authentication required" });
+  }
+
+  try {
+    const pdf = await renderInvoicePdf(req.body);
+    if (pdf.length > MAX_PREVIEW_PDF_BYTES) {
+      return res.status(413).json({ error: "invoice PDF exceeds 5 MB limit" });
+    }
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", String(pdf.length));
+    return res.status(200).send(pdf);
+  } catch (err) {
+    return res.status(400).json({
+      error: err instanceof Error ? err.message : "failed to render invoice preview",
+    });
+  }
+});
 
 app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
 
