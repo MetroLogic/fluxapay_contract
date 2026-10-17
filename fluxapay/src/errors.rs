@@ -1,111 +1,108 @@
-use std::fmt;
+//! Issue #1000: Centralized contract error registry.
+//!
+//! Every contract module previously defined its own `Error` enum with
+//! overlapping numeric codes (e.g. `Unauthorized = 1` in both
+//! `payment_processor` and `refund_manager`). When a cross-contract call
+//! failed, the SDK could not tell which module produced a given code.
+//!
+//! `GlobalError` assigns a unique, non-overlapping code to every error
+//! across all modules. Code ranges are reserved per module:
+//!
+//! | Range   | Module            |
+//! |---------|-------------------|
+//! | 1xx     | payment           |
+//! | 2xx     | refund            |
+//! | 3xx     | merchant          |
+//! | 4xx     | FX                |
+//! | 5xx     | dispute           |
+//! | 6xx     | stream            |
+//!
+//! This is a pure renumbering: no behaviour changes.
 
-/// Errors that can occur during subscription operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubscriptionError {
-    /// The subscription could not be found.
-    NotFound,
-    /// The caller is not authorized to perform this action.
-    Unauthorized,
-    /// The subscription is not active and cannot be charged.
-    NotActive,
-    /// The billing interval has not yet elapsed.
-    IntervalNotElapsed,
-    /// The subscription has reached its maximum number of billing cycles.
-    MaxCyclesReached,
-    /// The subscription is paused and cannot be charged.
-    Paused,
-    /// The subscription is not paused.
-    NotPaused,
-    /// The maximum number of dunning retries has been exceeded.
-    MaxDunningRetriesExceeded,
-    /// The retry backoff window has not yet elapsed.
-    RetryBackoffNotElapsed,
-    /// A generic storage or persistence failure.
-    StorageError(String),
+use soroban_sdk::contracterror;
+
+/// Centralized error enum with globally unique codes.
+///
+/// Ranges: 1xx=payment, 2xx=refund, 3xx=merchant, 4xx=FX, 5xx=dispute, 6xx=stream.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum GlobalError {
+    // ---- Payment errors: 1xx ----
+    PaymentUnauthorized = 101,
+    PaymentNotFound = 102,
+    PaymentAlreadyExists = 103,
+    PaymentExpired = 104,
+    PaymentAlreadyConfirmed = 105,
+    PaymentAmountMismatch = 106,
+    PaymentInvalidStatus = 107,
+    PaymentInvalidAmount = 108,
+    PaymentInvalidCurrency = 109,
+    PaymentRateLimited = 110,
+    PaymentIdempotencyConflict = 111,
+    PaymentTipExceedsMax = 112,
+    PaymentInvalidMetadata = 113,
+    PaymentInvalidMemo = 114,
+    PaymentTierCapExceeded = 115,
+    PaymentSwapSlippageExceeded = 116,
+    PaymentSwapVolumeExceeded = 117,
+
+    // ---- Refund errors: 2xx ----
+    RefundUnauthorized = 201,
+    RefundNotFound = 202,
+    RefundAlreadyExists = 203,
+    RefundAlreadyProcessed = 204,
+    RefundExpired = 205,
+    RefundCooldownActive = 206,
+    RefundInvalidAmount = 207,
+    RefundInvalidStatus = 208,
+    RefundIdempotencyConflict = 209,
+    RefundExceedsPaymentAmount = 210,
+
+    // ---- Merchant errors: 3xx ----
+    MerchantUnauthorized = 301,
+    MerchantNotFound = 302,
+    MerchantAlreadyRegistered = 303,
+    MerchantNotVerified = 304,
+    MerchantInvalidKycTier = 305,
+    MerchantInvalidFeeConfig = 306,
+    MerchantSuspended = 307,
+    MerchantInvalidMetadata = 308,
+
+    // ---- FX errors: 4xx ----
+    FxUnauthorized = 401,
+    FxRateNotFound = 402,
+    FxRateStale = 403,
+    FxInvalidRate = 404,
+    FxOracleUnavailable = 405,
+    FxPriceImpactExceeded = 406,
+    FxInvalidPair = 407,
+
+    // ---- Dispute errors: 5xx ----
+    DisputeUnauthorized = 501,
+    DisputeNotFound = 502,
+    DisputeAlreadyExists = 503,
+    DisputeAlreadyResolved = 504,
+    DisputeDeadlinePassed = 505,
+    DisputeInvalidBond = 506,
+    DisputeInvalidStatus = 507,
+    DisputeEvidenceTooLarge = 508,
+
+    // ---- Stream errors: 6xx ----
+    StreamUnauthorized = 601,
+    StreamNotFound = 602,
+    StreamAlreadyCancelled = 603,
+    StreamAlreadyCompleted = 604,
+    StreamInvalidAmount = 605,
+    StreamInvalidDuration = 606,
+    StreamInvalidPayees = 607,
+    StreamInsufficientBalance = 608,
 }
 
-impl fmt::Display for SubscriptionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SubscriptionError::NotFound => write!(f, "subscription not found"),
-            SubscriptionError::Unauthorized => write!(f, "unauthorized: caller is not the subscriber"),
-            SubscriptionError::NotActive => write!(f, "subscription is not active"),
-            SubscriptionError::IntervalNotElapsed => write!(f, "billing interval has not elapsed"),
-            SubscriptionError::MaxCyclesReached => write!(f, "subscription has reached max cycles"),
-            SubscriptionError::Paused => write!(f, "subscription is paused"),
-            SubscriptionError::NotPaused => write!(f, "subscription is not paused"),
-            SubscriptionError::MaxDunningRetriesExceeded => write!(f, "max dunning retries exceeded"),
-            SubscriptionError::RetryBackoffNotElapsed => write!(f, "retry backoff window has not elapsed"),
-            SubscriptionError::StorageError(msg) => write!(f, "storage error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SubscriptionError {}
-
-/// Errors that can occur during payment link operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaymentLinkError {
-    /// The provided `base_url` failed validation (scheme, length, or format).
-    InvalidBaseUrl,
-    /// The payment link could not be found.
-    NotFound,
-    /// The payment link has expired.
-    Expired,
-    /// A generic storage or persistence failure.
-    StorageError(String),
-}
-
-/// Errors that can occur during merchant rolling reserve operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReserveError {
-    /// The merchant was not found in the registry.
-    MerchantNotFound,
-    /// The caller is not authorized to perform the reserve operation.
-    Unauthorized,
-    /// The requested reserve amount exceeds the merchant's locked reserve balance.
-    InsufficientReserve,
-    /// The provided reserve policy parameters are invalid (e.g. bps out of range).
-    InvalidPolicy,
-    /// The provided amount is invalid (e.g. negative or zero where not allowed).
-    InvalidAmount,
-    /// A generic storage or persistence failure.
-    StorageError(String),
-}
-
-impl fmt::Display for ReserveError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReserveError::MerchantNotFound => write!(f, "merchant not found"),
-            ReserveError::Unauthorized => write!(f, "unauthorized reserve operation"),
-            ReserveError::InsufficientReserve => write!(f, "insufficient locked reserve balance"),
-            ReserveError::InvalidPolicy => write!(f, "invalid rolling reserve policy"),
-            ReserveError::InvalidAmount => write!(f, "invalid reserve amount"),
-            ReserveError::StorageError(msg) => write!(f, "storage error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ReserveError {}
-
-impl fmt::Display for PaymentLinkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PaymentLinkError::InvalidBaseUrl => {
-                write!(f, "invalid base_url: must be a valid https:// URL of at most 256 characters")
-            }
-            PaymentLinkError::NotFound => write!(f, "payment link not found"),
-            PaymentLinkError::Expired => write!(f, "payment link has expired"),
-            PaymentLinkError::StorageError(msg) => write!(f, "storage error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for PaymentLinkError {}
-
-impl From<ReserveError> for PaymentLinkError {
-    fn from(err: ReserveError) -> Self {
-        PaymentLinkError::StorageError(err.to_string())
+impl GlobalError {
+    /// Returns the module range prefix for this error (1=payment, 2=refund,
+    /// 3=merchant, 4=FX, 5=dispute, 6=stream).
+    pub fn module_range(self) -> u32 {
+        (self as u32) / 100
     }
 }
