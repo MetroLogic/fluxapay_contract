@@ -76,3 +76,42 @@ export interface DeliveryLogRow {
   success: boolean;
   livemode: boolean;
 }
+
+/** Status values for a webhook DLQ entry (Issue #961). */
+export type WebhookDLQStatus = "pending" | "permanently_failed";
+
+/**
+ * A row from the `webhook_dlq` table.
+ *
+ * Represents a failed webhook delivery that is awaiting automatic retry or
+ * has been permanently failed after exhausting all attempts.
+ */
+export interface WebhookDLQItem {
+  id: string;
+  endpoint_id: string;
+  merchant_id: string;
+  event_type: string;
+  payment_id: string | null;
+  /** The full envelope that should be re-delivered. */
+  payload: WebhookEnvelope;
+  retry_count: number;
+  next_retry_at: string | null;
+  status: WebhookDLQStatus;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Input for enqueueing a failed delivery into the DLQ.
+ *
+ * Called by the delivery layer whenever deliverOnce returns success=false.
+ */
+export interface EnqueueDLQInput {
+  endpointId: string;
+  merchantId: string;
+  eventType: string;
+  paymentId: string | null;
+  payload: WebhookEnvelope;
+  error: string;
+}

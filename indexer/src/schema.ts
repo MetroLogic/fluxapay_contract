@@ -16,6 +16,7 @@ import {
   text,
   timestamp,
   varchar,
+  uuid,
 } from "drizzle-orm/pg-core";
 
 export const contractEvents = pgTable(
@@ -159,6 +160,39 @@ export const deadLetterEvents = pgTable("dead_letter_events", {
   createdAt: timestamp("created_at").defaultNow(),
   retryCount: integer("retry_count").default(0),
 });
+
+/**
+ * Webhook Dead-Letter Queue (Issue #961).
+ *
+ * One row per failed webhook delivery. The retry daemon picks up rows where
+ * status = 'pending' AND next_retry_at <= NOW() and re-delivers them with
+ * exponential backoff. After 7 attempts, status transitions to
+ * 'permanently_failed' and the merchant is notified.
+ */
+export const webhookDlq = pgTable(
+  "webhook_dlq",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    endpointId: text("endpoint_id").notNull(),
+    merchantId: text("merchant_id").notNull(),
+    eventType: text("event_type").notNull(),
+    paymentId: text("payment_id"),
+    /** The full signed envelope — stored so retries send an identical payload. */
+    payload: jsonb("payload").notNull(),
+    retryCount: integer("retry_count").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    /** 'pending' | 'permanently_failed' */
+    status: text("status").notNull().default("pending"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    dueIdx: index("idx_webhook_dlq_due").on(t.nextRetryAt, t.status),
+    merchantIdx: index("idx_webhook_dlq_merchant").on(t.merchantId, t.createdAt),
+    endpointIdx: index("idx_webhook_dlq_endpoint").on(t.endpointId, t.createdAt),
+  }),
+);
 
 export const indexerCheckpoint = pgTable("indexer_checkpoint", {
   id: serial("id").primaryKey(),

@@ -3,9 +3,14 @@ export {
   buildTestPayload,
   deliverOnce,
   DELIVERY_TIMEOUT_MS,
+  DEFAULT_RETRY_INTERVAL_MS,
   MAX_RESPONSE_BODY_BYTES,
+  startRetryDaemon,
+  attemptDLQDelivery,
   truncateResponseBody,
   type FetchLike,
+  type RetryDaemonDeps,
+  type RetryDaemonHandle,
 } from "./delivery";
 export { registerWebhookRoutes, type WebhookRouteDeps } from "./routes";
 export {
@@ -39,10 +44,20 @@ export {
   WebhookStore,
 } from "./store";
 export {
+  MAX_RETRY_ATTEMPTS,
+  RETRY_DELAYS_MS,
+  retryDelayMs,
+  nextRetryAt,
+  WebhookDLQStore,
+} from "./dlq-store";
+export {
   isWebhookEventType,
   WEBHOOK_EVENT_TYPES,
   type DeliveryAttempt,
   type DeliveryLogRow,
+  type EnqueueDLQInput,
+  type WebhookDLQItem,
+  type WebhookDLQStatus,
   type WebhookEndpoint,
   type WebhookEventType,
   type WebhookEnvelope,

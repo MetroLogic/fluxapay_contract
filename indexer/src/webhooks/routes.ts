@@ -13,17 +13,22 @@ import {
 } from "./store";
 import { isWebhookEventType, WEBHOOK_EVENT_TYPES } from "./types";
 import { getPlatformEd25519PublicKey } from "./signing";
+import type { WebhookDLQStore } from "./dlq-store";
 
 /**
- * Webhook HTTP surface (Issues #775, #808, #810).
+ * Webhook HTTP surface (Issues #775, #808, #810, #961).
  *
  * `GET  /webhooks/public-key`                  — Ed25519 active public key (#775)
  * `POST /v1/webhooks/test`                      — synthetic delivery (#808)
  * `GET  /v1/webhooks/:endpointId/deliveries`    — delivery history  (#810)
+ * `GET  /v1/webhooks/dlq`                       — DLQ entries for merchant (#961)
+ * `POST /v1/webhooks/dlq/replay`                — manual DLQ replay (#961)
  */
 
 export interface WebhookRouteDeps {
   store: WebhookStore;
+  /** DLQ store (Issue #961). Required for dlq endpoints. */
+  dlqStore?: WebhookDLQStore;
   /** Injectable so tests do not make real network calls. */
   fetch?: FetchLike;
   /** Resolve the merchant the request is authenticated as. */
@@ -182,6 +187,120 @@ export function registerWebhookRoutes(app: Express, deps: WebhookRouteDeps): voi
           // row the merchant is hunting for slip past unseen.
           next_before: rows.length > 0 ? rows[rows.length - 1].delivered_at : null,
           retention_days: DELIVERY_LOG_RETENTION_DAYS,
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  // ── GET /v1/webhooks/dlq (Issue #961) ────────────────────────────────────
+  // List the merchant's DLQ entries (retry history, permanently failed, etc.)
+  app.get(
+    "/v1/webhooks/dlq",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = merchantIdFromRequest(req);
+        if (!merchantId) {
+          return error(res, 401, "Unauthenticated", "A merchant API key is required.");
+        }
+
+        if (!deps.dlqStore) {
+          return error(res, 501, "NotConfigured", "DLQ store not configured.");
+        }
+
+        const rawStatus = req.query.status;
+        let status: "pending" | "permanently_failed" | undefined;
+        if (rawStatus !== undefined) {
+          if (rawStatus !== "pending" && rawStatus !== "permanently_failed") {
+            return error(
+              res,
+              400,
+              "InvalidRequest",
+              "status must be 'pending' or 'permanently_failed'.",
+            );
+          }
+          status = rawStatus;
+        }
+
+        const rawLimit = req.query.limit;
+        let limit: number | undefined;
+        if (rawLimit !== undefined) {
+          const parsed = Number(rawLimit);
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+            return error(res, 400, "InvalidRequest", "limit must be an integer between 1 and 100.");
+          }
+          limit = parsed;
+        }
+
+        const before =
+          typeof req.query.before === "string" ? req.query.before : undefined;
+
+        const items = await deps.dlqStore.listForMerchant(merchantId, {
+          status,
+          limit,
+          before,
+        });
+
+        return res.status(200).json({
+          data: items,
+          next_before: items.length > 0 ? items[items.length - 1].created_at : null,
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  // ── POST /v1/webhooks/dlq/replay (Issue #961) ────────────────────────────
+  // Manual replay of a DLQ item or all items for the merchant.
+  //
+  // Body: { id?: string }
+  //   - id present: replay a single item by DLQ row ID.
+  //   - id absent:  replay ALL pending/permanently_failed items for the merchant
+  //     (bulk recovery after a merchant-side outage).
+  app.post(
+    "/v1/webhooks/dlq/replay",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = merchantIdFromRequest(req);
+        if (!merchantId) {
+          return error(res, 401, "Unauthenticated", "A merchant API key is required.");
+        }
+
+        if (!deps.dlqStore) {
+          return error(res, 501, "NotConfigured", "DLQ store not configured.");
+        }
+
+        const { id } = req.body ?? {};
+
+        if (id !== undefined) {
+          // Single-item replay
+          if (typeof id !== "string" || !id) {
+            return error(res, 400, "InvalidRequest", "id must be a non-empty string.");
+          }
+
+          const item = await deps.dlqStore.getById(id);
+          if (!item || item.merchant_id !== merchantId) {
+            return error(res, 404, "NotFound", `DLQ item ${id} not found.`);
+          }
+
+          const requeued = await deps.dlqStore.requeueItem(id);
+          if (!requeued) {
+            return error(res, 404, "NotFound", `DLQ item ${id} not found.`);
+          }
+
+          return res.status(200).json({
+            queued: 1,
+            message: "Item reset to pending; it will be retried on the next daemon tick.",
+          });
+        }
+
+        // Bulk replay for the whole merchant
+        const count = await deps.dlqStore.requeueAllForMerchant(merchantId);
+        return res.status(200).json({
+          queued: count,
+          message: `${count} item(s) reset to pending; they will be retried on the next daemon tick.`,
         });
       } catch (err) {
         return next(err);
