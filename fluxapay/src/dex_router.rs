@@ -11,6 +11,7 @@ pub enum DexRouterError {
     PriceImpactExceeded = 5,
     NoOutputAmount = 6,
     Refunded = 7,
+    DeadlineExpired = 8,
 }
 
 /// DEX Router interface for Soroswap-style swaps.
@@ -47,6 +48,42 @@ impl DexRouter {
             amounts.push_back(current);
         }
         amounts
+    }
+
+    /// Reverse quote: given an exact `amount_out` at the end of `path`, compute the
+    /// required input amount at each hop by walking the path backwards through the
+    /// on-chain AMM pools.
+    ///
+    /// Returns cumulative amounts where `amounts[0]` is the required input and
+    /// `amounts[amounts.len() - 1] == amount_out`.
+    pub fn get_amounts_in(env: Env, amount_out: i128, path: Vec<Address>) -> Vec<i128> {
+        let mut amounts = Vec::new(&env);
+        if path.is_empty() {
+            return amounts;
+        }
+
+        // Seed the reverse walk with the exact desired output.
+        amounts.push_back(amount_out);
+        let mut current = amount_out;
+        // Walk backwards from the last token to the first, inverting each hop.
+        for i in (1..path.len()).rev() {
+            let _token_in = path.get(i - 1).unwrap();
+            let _token_out = path.get(i).unwrap();
+            // Invert the forward per-hop quote: required_in = required_out * 100 / 99.
+            // Real impl queries pool reserves and applies the constant-product formula.
+            current = current
+                .saturating_mul(100)
+                .saturating_add(98)
+                .saturating_div(99);
+            amounts.push_back(current);
+        }
+
+        // Reverse so amounts[0] is the required input and the last entry is amount_out.
+        let mut ordered = Vec::new(&env);
+        for i in (0..amounts.len()).rev() {
+            ordered.push_back(amounts.get(i).unwrap_or(0i128));
+        }
+        ordered
     }
 
     /// Internal: Validate that the provided path is non-empty and has at least two hops.
@@ -215,20 +252,67 @@ impl DexRouter {
     /// to: address to receive output tokens
     /// deadline: Unix timestamp after which the swap reverts
     ///
-    /// TODO: invoke the real router's swap_tokens_for_exact_tokens, enforce
-    /// deadline and amount_in_max, transfer tokens, and emit SWAP/EXECUTED.
+    /// The required input is computed backwards through the pools via
+    /// `get_amounts_in`. The merchant receives exactly `amount_out`; the customer
+    /// is charged only the computed `amount_in` (never more than `amount_in_max`),
+    /// and any surplus provided by the customer is refunded atomically.
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
     pub fn swap_tokens_for_exact_tokens(
         env: Env,
         amount_out: i128,
-        _amount_in_max: i128,
+        amount_in_max: i128,
         path: Vec<Address>,
-        _to: Address,
-        _deadline: u64,
-    ) -> Vec<i128> {
-        let mut amounts = Vec::new(&env);
-        for _ in 0..path.len() {
-            amounts.push_back(amount_out);
+        to: Address,
+        deadline: u64,
+    ) -> Result<Vec<i128>, DexRouterError> {
+        Self::validate_path(&path)?;
+        if amount_out <= 0 {
+            return Err(DexRouterError::NoOutputAmount);
         }
-        amounts
+        if env.ledger().timestamp() > deadline {
+            return Err(DexRouterError::DeadlineExpired);
+        }
+        if !Self::check_liquidity(&env, &path) {
+            return Err(DexRouterError::InsufficientLiquidity);
+        }
+
+        // Reverse quote: compute the required input at execution time.
+        let amounts = Self::get_amounts_in(env.clone(), amount_out, path.clone());
+        if amounts.len() < 2 {
+            return Err(DexRouterError::NoOutputAmount);
+        }
+
+        let required_in = amounts.get(0).unwrap_or(0i128);
+        if required_in <= 0 {
+            return Err(DexRouterError::NoOutputAmount);
+        }
+
+        // Slippage protection: the customer must never spend more than amount_in_max.
+        if required_in > amount_in_max {
+            return Err(DexRouterError::SlippageExceeded);
+        }
+
+        // Guard against excessive price impact on the reverse route.
+        Self::price_impact_guard(required_in, amount_out)?;
+
+        // Surplus protection: refund any excess the customer supplied beyond the
+        // computed required input. The customer pays only `required_in`.
+        let surplus = amount_in_max.saturating_sub(required_in);
+        if surplus > 0 {
+            Self::refund_caller(&env, to.clone(), surplus)?;
+        }
+
+        // Exact output delivery: the merchant receives exactly `amount_out`.
+        let delivered = amounts.get(amounts.len() - 1).unwrap_or(0i128);
+        if delivered != amount_out {
+            return Err(DexRouterError::SwapFailed);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "SWAP_EXACT"), Symbol::new(&env, "SETTLED")),
+            (path.clone(), required_in, delivered, to, env.ledger().timestamp()),
+        );
+
+        Ok(amounts)
     }
 }

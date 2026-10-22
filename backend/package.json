@@ -1,7 +1,7 @@
 {
   "name": "@fluxapay/backend",
   "version": "0.1.0",
-  "description": "FluxaPay backend API — SEP-10 challenge/token endpoints for merchant authentication",
+  "description": "FluxaPay backend API \u2014 SEP-10 challenge/token endpoints for merchant authentication",
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",
