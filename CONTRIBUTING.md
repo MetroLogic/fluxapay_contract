@@ -137,6 +137,48 @@ crate merely because it appears in tests if it is also reachable through a
 production dependency. Review the dependency tree (`cargo tree -e normal`) and
 remove obsolete exceptions when upgrading dependencies.
 
+### Dependency license policy
+
+Every crate in the production dependency graph must use a license on the
+allowlist in `deny.toml` (`[licenses].allow`). The check runs as part of
+`cargo deny check bans licenses advisories` in both the `Security Scan` and
+`Cargo Deny Check` CI jobs, so a pull request that adds a dependency with a
+disallowed license fails CI with a `rejected` license error naming the crate.
+
+Currently allowed (all permissive and compatible with this repository's MIT
+license):
+
+| License | Typical source |
+|---|---|
+| `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception` | most of the Rust ecosystem |
+| `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib` | small utility and crypto crates |
+| `OpenSSL` | `ring` and OpenSSL-derived code |
+| `Unicode-3.0` | `unicode-ident` and Unicode data tables |
+
+Copyleft licenses (`GPL-*`, `LGPL-*`, `AGPL-*`) and weak-copyleft licenses
+(`MPL-2.0`, `EPL-*`) are not allowed by default. Dev-dependencies are not
+checked (`include-dev = false`) because they never ship in the contract WASM.
+
+Check a change locally before opening a PR:
+
+```bash
+# Licenses only
+cargo deny check licenses
+
+# Show which license each dependency resolved to
+cargo deny list
+```
+
+If a dependency you need is rejected:
+
+1. Look for an alternative crate under an allowed license first.
+2. If there is none, add a per-crate entry to `[licenses].exceptions` in
+   `deny.toml` (for example `{ crate = "some-crate", allow = ["MPL-2.0"] }`)
+   rather than adding the license to the global `allow` list.
+3. Explain in the PR description why the crate is needed and why its license
+   is acceptable. A maintainer must approve any change to the allowlist or
+   exceptions.
+
 ### Linting GitHub Actions Workflows (actionlint)
 
 We use [actionlint](https://github.com/rhysd/actionlint) to statically check all `.github/workflows/*.yml` files.
