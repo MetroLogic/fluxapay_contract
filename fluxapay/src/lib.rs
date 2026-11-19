@@ -14194,36 +14194,24 @@ pub use payment_link::{
     CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
     PaymentLinkManagerClient,
 };
-#[cfg(test)]
-mod feature_tests;
-#[cfg(test)]
-mod memo_test;
-#[cfg(test)]
-mod merchant_auth_test;
-#[cfg(test)]
-mod partial_overpaid_test;
-#[cfg(test)]
-mod pause_test;
-#[cfg(test)]
-mod payment_link_test;
-#[cfg(test)]
-mod payment_metadata_test;
+// Pre-existing/unrelated fix (found while adding FX conversion property
+// tests for issue #1186): `feature_tests`, `memo_test`, `merchant_auth_test`,
+// `partial_overpaid_test`, `pause_test`, `payment_link_test`,
+// `payment_metadata_test`, `test`, `stream_test`, `subscription_test`, and
+// `pub mod stream` (plus its `pub use`) were each declared a second time
+// further down in this file (see the consolidated `#[cfg(test)] mod ...;`
+// list below, and `pub mod stream;` / `pub use stream::{...}` already
+// declared near the top of this file), which is a hard compile error
+// (E0428/E0255, "the name `..` is defined multiple times") for every
+// `cargo test` build, including the one that runs this issue's new
+// property tests. Only the non-duplicated declarations are kept here;
+// the rest live solely in the consolidated list.
 #[cfg(test)]
 mod payment_retry_test;
 #[cfg(test)]
 mod payment_tip_test;
 #[cfg(test)]
-mod test;
-
-// Payment streaming module (Issue #127)
-pub mod stream;
-pub use stream::{PaymentStream, PaymentStreaming, StreamError, StreamStatus};
-#[cfg(test)]
-mod stream_test;
-#[cfg(test)]
 mod stream_vesting_test;
-#[cfg(test)]
-mod subscription_test;
 
 #[cfg(test)] mod test;
 #[cfg(test)] mod stream_test;
