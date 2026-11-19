@@ -1,7 +1,15 @@
+# License allowlist (Issue #1218). Any dependency in the production graph
+# whose SPDX license expression is not satisfied by this list fails
+# `cargo deny check licenses`, and therefore the `Security Scan` and
+# `Cargo Deny Check` CI jobs. See "Dependency license policy" in
+# CONTRIBUTING.md before adding to it.
 [licenses]
 version = 2
+# Dev-only crates never ship in the contract WASM, so they are not checked.
 include-dev = false
 unused-allowed-license = "allow"
+# Permissive licenses only: all are compatible with this repository's MIT
+# license and impose no copyleft obligations on the deployed contract.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -9,11 +17,19 @@ allow = [
     "BSD-3-Clause",
     "BSD-2-Clause",
     "ISC",
-    "OpenSSL",
-    "Unicode-3.0",
+    "OpenSSL",      # ring / OpenSSL-derived crypto code
+    "Unicode-3.0",  # unicode-ident and ICU data tables
     "Zlib",
 ]
+# Per-crate exceptions for a license that is not on the global allowlist.
+# Prefer this over widening `allow`: each entry must name one crate, the
+# exact license it is allowed to use, and be justified in the PR. Example:
+#
+#   { crate = "some-crate", allow = ["MPL-2.0"] },
+exceptions = []
 
+# Workspace crates (`fluxapay`, `fluxapay-fuzz`) are `publish = false`, so
+# they are skipped instead of failing for having no `license` field.
 [licenses.private]
 ignore = true
 
