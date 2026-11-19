@@ -583,6 +583,87 @@ fn test_reject_dispute() {
     assert!(dispute.refund_id.is_none());
 }
 
+/// Issue #1202: get_merchant_disputes returns a merchant's disputes,
+/// paginated and optionally filtered by status.
+#[test]
+fn test_get_merchant_disputes_paginated_and_filtered() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, refund_client) = setup_contracts(&env);
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let operator = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+    refund_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+
+    let payment_ids = [
+        String::from_str(&env, "payment_md_1"),
+        String::from_str(&env, "payment_md_2"),
+        String::from_str(&env, "payment_md_3"),
+    ];
+    let amount = 300i128;
+    let mut dispute_ids = vec![&env];
+
+    for payment_id in payment_ids.iter() {
+        let args = create_payment_args(&env, payment_id, &merchant, amount);
+        payment_client.create_payment(&args);
+        payment_client.verify_payment(
+            &oracle,
+            payment_id,
+            &BytesN::from_array(&env, &[9u8; 32]),
+            &customer,
+            &amount,
+            &None::<u64>,
+        );
+        refund_client.register_payment(payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
+
+        let dispute_id = refund_client.create_dispute(
+            payment_id,
+            &amount,
+            &String::from_str(&env, "Item not received"),
+            &String::from_str(&env, "No evidence provided"),
+            &customer,
+            &vec![&env],
+        );
+        dispute_ids.push_back(dispute_id);
+    }
+
+    // Reject the second dispute so status filtering has something to exclude.
+    refund_client.reject_dispute(
+        &operator,
+        &dispute_ids.get(1).unwrap(),
+        &String::from_str(&env, "Insufficient evidence"),
+        &String::from_str(&env, "sig=="),
+    );
+
+    // All disputes for the merchant, unfiltered.
+    let all =
+        refund_client.get_merchant_disputes(&merchant, &0u32, &50u32, &None::<DisputeStatus>);
+    assert_eq!(all.len(), 3);
+
+    // Only Open disputes.
+    let open_only = refund_client.get_merchant_disputes(
+        &merchant,
+        &0u32,
+        &50u32,
+        &Some(DisputeStatus::Open),
+    );
+    assert_eq!(open_only.len(), 2);
+    for d in open_only.iter() {
+        assert_eq!(d.status, DisputeStatus::Open);
+    }
+
+    // Pagination: limit 1 returns just the first dispute.
+    let page =
+        refund_client.get_merchant_disputes(&merchant, &0u32, &1u32, &None::<DisputeStatus>);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().dispute_id, dispute_ids.get(0).unwrap());
+}
+
 #[test]
 fn test_get_payment_disputes() {
     let env = Env::default();

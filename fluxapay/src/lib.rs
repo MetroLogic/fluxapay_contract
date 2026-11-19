@@ -1473,6 +1473,26 @@ pub struct ContractHealth {
     pub fx_oracle_configured: bool,
     pub merchant_registry_configured: bool,
 }
+
+/// Issue #1205: Aggregated contract health/config view for dashboards and
+/// operator tooling. Unlike `ContractHealth`, this focuses on identity/config
+/// data (token, admin, multisig) rather than operational metrics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractInfo {
+    /// Current contract version string (see `version`/`get_version`).
+    pub version: String,
+    /// Consolidated global + creation pause state (see `get_pause_info`).
+    pub pause_info: PauseInfo,
+    /// Configured settlement token address, if one has been set via `set_usdc_token`.
+    pub token: Option<Address>,
+    /// Current contract admin, if initialized.
+    pub admin: Option<Address>,
+    /// Multi-sig approval threshold (see `get_multisig_config`).
+    pub multisig_threshold: u32,
+    /// Multi-sig signer set (see `get_multisig_config`).
+    pub multisig_signers: Vec<Address>,
+}
 #[cfg_attr(
     any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
     contractimpl
@@ -3521,6 +3541,16 @@ impl RefundManager {
             .set(&dispute_count_key, &new_dispute_count);
         Self::bump_ttl(env, &dispute_count_key, LONG_LIVE_TTL);
 
+        // Issue #1202: Maintain a per-merchant dispute index for the paginated
+        // get_merchant_disputes dashboard view.
+        let merchant_disputes_key = DataKey::MerchantDisputes(merchant_id.clone());
+        let mut merchant_disputes = Self::get_merchant_disputes_internal(env, &merchant_id);
+        merchant_disputes.push_back(dispute_id.clone());
+        env.storage()
+            .persistent()
+            .set(&merchant_disputes_key, &merchant_disputes);
+        Self::bump_ttl(env, &merchant_disputes_key, LONG_LIVE_TTL);
+
         // Issue #833: Cross-call MerchantRegistry so KYC scoring sees the dispute.
         if let Some(registry_address) = env
             .storage()
@@ -5091,6 +5121,50 @@ impl RefundManager {
         Ok(disputes)
     }
 
+    /// Issue #1202: Per-merchant paginated disputes view for the dashboard.
+    ///
+    /// Returns up to `limit` `Dispute` records (hard-capped at 100 per call)
+    /// starting at `offset` within the merchant's dispute index, in filing
+    /// order. When `status_filter` is `Some`, only disputes matching that
+    /// status are counted against `offset`/`limit`.
+    pub fn get_merchant_disputes(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+        status_filter: Option<DisputeStatus>,
+    ) -> Vec<Dispute> {
+        let dispute_ids = Self::get_merchant_disputes_internal(&env, &merchant_id);
+
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in dispute_ids.iter() {
+            let dispute = match Self::get_dispute_internal(&env, &id) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Some(status) = &status_filter {
+                if dispute.status != *status {
+                    continue;
+                }
+            }
+            if matched >= offset {
+                result.push_back(dispute);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
+    }
+
     pub fn get_dispute_summary(env: Env) -> DisputeSummary {
         let total_count: u64 = env
             .storage()
@@ -5257,6 +5331,14 @@ impl RefundManager {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentDisputes(payment_id.clone()))
+            .unwrap_or_else(|| vec![env])
+    }
+
+    /// Issue #1202: Load the append-only index of dispute IDs filed against a merchant.
+    fn get_merchant_disputes_internal(env: &Env, merchant_id: &Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantDisputes(merchant_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
@@ -5599,6 +5681,48 @@ impl RefundManager {
             }
         }
         subscriptions
+    }
+
+    /// Issue #1204: Returns the payer's currently active subscriptions for
+    /// wallet/UI display, paginated and hard-capped at 100 per call.
+    ///
+    /// Filters the payer's full subscription history down to
+    /// `status == SubscriptionStatus::Active` before applying `offset`/`limit`,
+    /// so a page always contains up to `limit` active subscriptions when that
+    /// many remain.
+    pub fn get_active_subscriptions_for_payer(
+        env: Env,
+        payer: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Subscription> {
+        let subscription_ids = Self::get_payer_subscriptions_internal(&env, &payer);
+
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in subscription_ids.iter() {
+            let sub = match Self::get_subscription_internal(&env, &id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if sub.status != SubscriptionStatus::Active {
+                continue;
+            }
+            if matched >= offset {
+                result.push_back(sub);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     /// Issue #633: List subscribers to a plan, paginated.
@@ -6829,6 +6953,32 @@ impl PaymentProcessor {
             active_payment_count,
             fx_oracle_configured,
             merchant_registry_configured,
+        }
+    }
+
+    /// Issue #1205: Aggregated contract health/config view combining version,
+    /// consolidated global/creation pause state, the configured settlement
+    /// token, the current admin, and the multi-sig governance configuration.
+    ///
+    /// Read-only: requires no authentication, intended for dashboards and
+    /// external health checks.
+    pub fn get_contract_info(env: Env) -> ContractInfo {
+        let version = Self::version(env.clone());
+        let pause_info = Self::get_pause_info(env.clone());
+        let token = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken);
+        let admin = AccessControl::get_admin(&env);
+        let (multisig_threshold, multisig_signers) = AccessControl::get_multisig_config(&env);
+
+        ContractInfo {
+            version,
+            pause_info,
+            token,
+            admin,
+            multisig_threshold,
+            multisig_signers,
         }
     }
 
