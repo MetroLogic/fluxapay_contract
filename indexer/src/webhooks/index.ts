@@ -14,6 +14,10 @@ export {
   type RetentionJobHandle,
 } from "./retention";
 export {
+  BACKOFF_SCHEDULE_MS, BASE_DELAY_MS, computeBackoffDelayMs, MAX_RETRY_ATTEMPTS,
+  startWebhookRetryDaemon, WEBHOOK_RETRY_INTERVAL_MS, type RetryJobHandle,
+} from "./retry";
+export {
   buildSignatureHeader,
   computeSignature,
   DELIVERY_ID_HEADER,
