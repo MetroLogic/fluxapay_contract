@@ -679,6 +679,17 @@ pub enum DisputeBatchItemResult {
     Err(u32),
 }
 
+/// Per-item outcome for `batch_process_refunds` (partial success allowed).
+/// Issue #1199.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RefundBatchItemResult {
+    /// The refund_id that was successfully processed.
+    Ok(String),
+    /// The refund_id that failed, together with the `Error` discriminant.
+    Err(String, u32),
+}
+
 /// Resolution details for one dispute in `batch_resolve_disputes`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -705,6 +716,9 @@ struct SwapLedgerVolume {
 
 /// Hard cap for dispute batch size.
 pub const MAX_DISPUTE_BATCH: u32 = 20;
+
+/// Hard cap for refund batch size (Issue #1199).
+pub const MAX_REFUND_BATCH: u32 = 20;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2555,6 +2569,79 @@ impl RefundManager {
         }
 
         Self::process_refund_internal(&env, &operator, refund_id)
+    }
+
+    /// Batch-process up to `max_batch` pending refunds in a single call.
+    ///
+    /// Issue #1199: there were batch entrypoints for payments
+    /// (`batch_expire`, `create_payments_batch`) and disputes
+    /// (`batch_create_disputes`), but refund processing still required one
+    /// invocation per refund. This reduces per-refund invocation overhead
+    /// for operators settling many approved refunds at once.
+    ///
+    /// Processes up to `max_batch` items (hard cap [`MAX_REFUND_BATCH`]).
+    /// Each `refund_id` is authorized exactly like [`Self::process_refund`]
+    /// (the caller must hold the settlement-operator or oracle role, or be
+    /// the refund's own requester with an already-approved refund) and is
+    /// then processed independently via `process_refund_internal`; a
+    /// failure on one item does not revert previously-succeeded items in
+    /// the same batch. Returns a per-item [`RefundBatchItemResult`] so
+    /// callers can tell which refunds completed and which failed (and why).
+    /// Emits `REFUND/BATCH_PROCESSED` with `(success_count, fail_count)`.
+    pub fn batch_process_refunds(
+        env: Env,
+        operator: Address,
+        refund_ids: Vec<String>,
+        max_batch: u32,
+    ) -> Result<Vec<RefundBatchItemResult>, Error> {
+        operator.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::require_not_blacklisted(&env, &operator)?;
+
+        let effective_max = max_batch.min(MAX_REFUND_BATCH);
+        if max_batch > MAX_REFUND_BATCH || refund_ids.len() > effective_max {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let has_settlement =
+            AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+
+        let mut results: Vec<RefundBatchItemResult> = vec![&env];
+        let mut success_count: u32 = 0;
+        let mut fail_count: u32 = 0;
+
+        for refund_id in refund_ids.iter() {
+            let outcome = Self::get_refund_internal(&env, &refund_id).and_then(|refund| {
+                Self::require_not_blacklisted(&env, &refund.requester)?;
+                let is_requester = operator == refund.requester;
+                if !(has_settlement || has_oracle || (is_requester && refund.approved)) {
+                    return Err(Error::Unauthorized);
+                }
+                Self::process_refund_internal(&env, &operator, refund_id.clone())
+            });
+
+            match outcome {
+                Ok(()) => {
+                    success_count = success_count.saturating_add(1);
+                    results.push_back(RefundBatchItemResult::Ok(refund_id.clone()));
+                }
+                Err(e) => {
+                    fail_count = fail_count.saturating_add(1);
+                    results.push_back(RefundBatchItemResult::Err(refund_id.clone(), e as u32));
+                }
+            }
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "REFUND"),
+                Symbol::new(&env, "BATCH_PROCESSED"),
+            ),
+            (success_count, fail_count),
+        );
+
+        Ok(results)
     }
 
     pub fn get_treasury_balance(env: Env) -> i128 {
@@ -14194,43 +14281,22 @@ pub use payment_link::{
     CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
     PaymentLinkManagerClient,
 };
-#[cfg(test)]
-mod feature_tests;
-#[cfg(test)]
-mod memo_test;
-#[cfg(test)]
-mod merchant_auth_test;
-#[cfg(test)]
-mod partial_overpaid_test;
-#[cfg(test)]
-mod pause_test;
-#[cfg(test)]
-mod payment_link_test;
-#[cfg(test)]
-mod payment_metadata_test;
-#[cfg(test)]
-mod payment_retry_test;
-#[cfg(test)]
-mod payment_tip_test;
-#[cfg(test)]
-mod test;
 
-// Payment streaming module (Issue #127)
-pub mod stream;
-pub use stream::{PaymentStream, PaymentStreaming, StreamError, StreamStatus};
-#[cfg(test)]
-mod stream_test;
-#[cfg(test)]
-mod stream_vesting_test;
-#[cfg(test)]
-mod subscription_test;
-
+// NOTE (pre-existing, unrelated to #1199): this tail of lib.rs previously declared
+// `pub mod stream;` (plus a redundant subset re-export) and roughly a dozen
+// `#[cfg(test)] mod <name>;` test-module declarations a *second* time, duplicating
+// declarations already made earlier in this file / just below. Rust rejects a module
+// being declared twice in the same scope (E0428), so the crate could not compile at
+// all in this state. Consolidated to one declaration per module so the crate (and the
+// new `batch_process_refunds` entrypoint added for #1199) can build.
 #[cfg(test)] mod test;
 #[cfg(test)] mod stream_test;
+#[cfg(test)] mod stream_vesting_test;
 #[cfg(test)] mod subscription_test;
 #[cfg(test)] mod arbitrage_test;
 #[cfg(test)] mod auth_test;
 #[cfg(test)] mod batch_payment_test;
+#[cfg(test)] mod batch_refund_test;
 #[cfg(test)] mod dex_router_test;
 #[cfg(test)] mod dispute_test;
 #[cfg(test)] mod escalate_disputes_test;
@@ -14239,6 +14305,7 @@ mod subscription_test;
 #[cfg(test)] mod htlc_test;
 #[cfg(test)] mod integration_test;
 #[cfg(test)] mod memo_test;
+#[cfg(test)] mod merchant_auth_test;
 #[cfg(test)] mod merchant_ranking_test;
 #[cfg(test)] mod merchant_registry_test;
 #[cfg(test)] mod merchant_reserve_test;
@@ -14249,12 +14316,13 @@ mod subscription_test;
 #[cfg(test)] mod pause_test;
 #[cfg(test)] mod payment_link_test;
 #[cfg(test)] mod payment_metadata_test;
+#[cfg(test)] mod payment_retry_test;
+#[cfg(test)] mod payment_tip_test;
 #[cfg(test)] mod proptests;
 #[cfg(test)] mod router_allowlist_test;
 #[cfg(test)] mod settlement_test;
 #[cfg(test)] mod swap_test;
 #[cfg(test)] mod invoice_test;
-#[cfg(test)] mod merchant_auth_test;
 #[cfg(test)] mod account_abstraction_test;
 #[cfg(test)] mod meta_transaction_test;
 #[cfg(test)] mod merkle_distributor_test;
