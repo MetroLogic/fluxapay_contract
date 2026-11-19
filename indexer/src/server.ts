@@ -6,6 +6,7 @@ import { Database } from "./database";
 import {
   getPlatformEd25519PublicKey,
   registerWebhookRoutes,
+  startWebhookRetryDaemon,
   WebhookStore,
 } from "./webhooks";
 import { getCachedRate } from "./fx-rate-cache";
@@ -1140,6 +1141,8 @@ export async function startServer(
   eventReplayHandler?: EventReplayHandler,
 ) {
   const app = createServer(database, replayDlqHandler, eventReplayHandler);
+  // Issue #961: automatic webhook delivery retry with exponential backoff.
+  startWebhookRetryDaemon(database.getPool(), new WebhookStore(database.getPool()));
   const server = app.listen(port, () => {
     console.log(`Indexer REST API listening on port ${port}`);
   });

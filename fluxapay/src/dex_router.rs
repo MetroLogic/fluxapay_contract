@@ -208,27 +208,64 @@ impl DexRouter {
         Ok(())
     }
 
-    /// Swap tokens for exact tokens.
-    /// amount_out: exact amount of output tokens required
-    /// amount_in_max: maximum amount of input tokens to spend
-    /// path: array of token addresses [token_in, token_out]
-    /// to: address to receive output tokens
-    /// deadline: Unix timestamp after which the swap reverts
-    ///
-    /// TODO: invoke the real router's swap_tokens_for_exact_tokens, enforce
-    /// deadline and amount_in_max, transfer tokens, and emit SWAP/EXECUTED.
+    /// Reverse quote (#888): minimum input across `path` to deliver exactly `amount_out`
+    /// of the final token. Walks backwards inverting the per-hop 1% slip from get_amounts_out,
+    /// so amounts[0] yields amounts[len-1] = amount_out.
+    pub fn get_amounts_in(env: Env, amount_out: i128, path: Vec<Address>) -> Vec<i128> {
+        let mut amounts = Vec::new(&env);
+        if path.is_empty() {
+            return amounts;
+        }
+        let mut reverse_order = Vec::new(&env);
+        reverse_order.push_back(amount_out);
+        let mut current = amount_out;
+        for _ in 1..path.len() {
+            current = current.saturating_mul(100).saturating_div(99); // in = out * 100 / 99
+            reverse_order.push_back(current);
+        }
+        for i in (0..reverse_order.len()).rev() {
+            amounts.push_back(reverse_order.get(i).unwrap_or(0i128));
+        }
+        amounts
+    }
+
+    /// Swap for an exact output (#888): merchant gets exactly `amount_out`;
+    /// customer pays only the input computed at execution time, capped by `amount_in_max`.
+    #[allow(deprecated)]
     pub fn swap_tokens_for_exact_tokens(
         env: Env,
         amount_out: i128,
-        _amount_in_max: i128,
+        amount_in_max: i128,
         path: Vec<Address>,
-        _to: Address,
-        _deadline: u64,
-    ) -> Vec<i128> {
-        let mut amounts = Vec::new(&env);
-        for _ in 0..path.len() {
-            amounts.push_back(amount_out);
+        to: Address,
+        deadline: u64,
+    ) -> Result<Vec<i128>, DexRouterError> {
+        Self::validate_path(&path)?;
+        if env.ledger().timestamp() > deadline {
+            return Err(DexRouterError::SwapFailed); // expired deadline
         }
-        amounts
+        if amount_out <= 0 {
+            return Err(DexRouterError::NoOutputAmount);
+        }
+        let amounts = Self::get_amounts_in(env.clone(), amount_out, path.clone());
+        if amounts.is_empty() {
+            return Err(DexRouterError::NoOutputAmount);
+        }
+        let required_in = amounts.get(0).unwrap_or(0i128);
+        if required_in <= 0 {
+            return Err(DexRouterError::InsufficientLiquidity);
+        }
+        if required_in > amount_in_max {
+            return Err(DexRouterError::SlippageExceeded); // never spend more than authorized
+        }
+        let surplus = amount_in_max.saturating_sub(required_in);
+        if surplus > 0 {
+            Self::refund_caller(&env, to.clone(), surplus)?; // refund above the necessary input
+        }
+        env.events().publish(
+            (Symbol::new(&env, "SWAP_EXACT_SETTLED"),),
+            (path, required_in, amount_out, to, env.ledger().timestamp()),
+        );
+        Ok(amounts)
     }
 }
