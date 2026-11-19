@@ -17,6 +17,8 @@ For security vulnerabilities, see [SECURITY.md](SECURITY.md) instead of opening 
 6. [Commit Message Format](#6-commit-message-format)
 7. [Pull Request Requirements](#7-pull-request-requirements)
    - [Adding Contract Events](#72-adding-contract-events)
+   - [`lib.rs` Module Boundaries](#73-librs-module-boundaries-issue-1222)
+   - [Error Code Documentation Sync](#74-error-code-documentation-sync-issue-1193)
 8. [Issue Workflow](#8-issue-workflow)
 
 ---
@@ -464,6 +466,39 @@ This is enforced in CI by `scripts/check_librs_boundaries.sh` (see
 beyond the frozen baseline in `.librs-baseline` (line count, with a small tolerance, or `pub fn`
 count, strict). If your PR moves logic **out** of `lib.rs`, lower the numbers in
 `.librs-baseline` accordingly; never raise them.
+
+---
+
+## 7.4. Error Code Documentation Sync (Issue #1193)
+
+[`docs/error-codes.md`](docs/error-codes.md) is the single source of truth for what every
+numeric error code returned by the contracts means. It is hand-maintained, so it only stays
+useful if it's updated in the same PR that changes the code it documents.
+
+**Whenever your PR adds, renames, renumbers, or removes a variant of `fluxapay::Error`**
+(`fluxapay/src/lib.rs`), you must also update the **Core** table at the top of
+`docs/error-codes.md` in the same PR:
+
+- Added a variant? Add a row with its code, name, a plain-language description, the common
+  cause, and the remediation.
+- Renamed or renumbered a variant? Update its row in place — do not leave the old name/code
+  behind as a stale row.
+- Removed a variant? Delete its row.
+- Reusing a discriminant that's already shared by another variant (see the collision note in
+  the doc)? List both names in the `Name` column, separated by ` / `.
+
+This is distinct from `scripts/check-error-map-sync.ts` (issue #829 fixed a bug in that script),
+which only checks `sdk/src/index.ts`'s `FLUXAPAY_CONTRACT_ERROR_MAP` against the same enum — it
+does not look at `docs/error-codes.md` at all.
+
+**CI enforcement:** `scripts/check-error-codes-doc-sync.js` runs on every push/PR (see
+`.github/workflows/error-codes-sync.yml`) and fails the build if the Core table's `(code, name)`
+pairs don't exactly match the `Error` enum's. Run it locally before pushing if you touched
+`Error`:
+
+```bash
+node scripts/check-error-codes-doc-sync.js
+```
 
 ---
 

@@ -2291,6 +2291,69 @@ impl RefundManager {
         Ok(refunds)
     }
 
+    /// Issue #1201: Returns paginated `Refund` records for every payment the
+    /// merchant owns, for dashboard reconciliation — the refund-side
+    /// counterpart to `PaymentProcessor::get_merchant_payments_full`.
+    ///
+    /// Refunds are indexed per-payment (`DataKey::PaymentRefunds`), not
+    /// per-merchant, so this walks the merchant's own payment-id index
+    /// (`DataKey::MerchantPayments`, the same one `get_merchant_payments_full`
+    /// pages over) and collects every refund attached to those payments.
+    ///
+    /// `limit` is capped at 50 to avoid ledger compute limits. Returns an
+    /// empty vec (not an error) when `offset` is at or beyond the total
+    /// matching-refund count. When `status` is provided, only refunds in that
+    /// `RefundStatus` are included (and counted for pagination purposes).
+    pub fn get_merchant_refunds(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+        status: Option<RefundStatus>,
+    ) -> Vec<Refund> {
+        let capped_limit = core::cmp::min(limit, 50);
+        if capped_limit == 0 {
+            return vec![&env];
+        }
+
+        let payment_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPayments(merchant_id))
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut matching: Vec<Refund> = vec![&env];
+        for payment_id in payment_ids.iter() {
+            let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
+            for refund_id in refund_ids.iter() {
+                if let Ok(refund) = Self::get_refund_internal(&env, &refund_id) {
+                    let status_match = match &status {
+                        Some(want) => refund.status == *want,
+                        None => true,
+                    };
+                    if status_match {
+                        matching.push_back(refund);
+                    }
+                }
+            }
+        }
+
+        if offset >= matching.len() {
+            return vec![&env];
+        }
+
+        let end = core::cmp::min(matching.len(), offset.saturating_add(capped_limit));
+        let mut result: Vec<Refund> = vec![&env];
+        let mut i = offset;
+        while i < end {
+            if let Some(refund) = matching.get(i) {
+                result.push_back(refund.clone());
+            }
+            i += 1;
+        }
+        result
+    }
+
     fn get_next_refund_id(env: &Env) -> u64 {
         let mut counter: u64 = env
             .storage()

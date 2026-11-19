@@ -618,6 +618,28 @@ pub struct SettlementSplit {
     pub amount: i128,
 }
 
+/// Issue #1200: One settlement request within a `batch_settle_payments` call —
+/// the same `payment_id` / `splits` pair accepted by `settle_payment`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSettlePaymentItem {
+    pub payment_id: String,
+    pub splits: Vec<SettlementSplit>,
+}
+
+/// Issue #1200: Per-item outcome of a `batch_settle_payments` call. The batch
+/// never reverts as a whole: each item either settles (`success: true`,
+/// `error_code: None`) or fails independently (`success: false`,
+/// `error_code` holding the numeric `Error` discriminant that `settle_payment`
+/// would have returned had it been called for that payment on its own).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSettleResult {
+    pub payment_id: String,
+    pub success: bool,
+    pub error_code: Option<u32>,
+}
+
 /// Vote choice for stake-weighted dispute voting.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

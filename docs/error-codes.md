@@ -80,25 +80,41 @@ document on every CI run to catch drift between them.
 | 67 | `InputTooLong` | A user-supplied string field exceeds its maximum allowed length. | `reason` > 256 chars in refund creation; `evidence` > 512 chars in dispute creation; `resolution_notes` > 512 chars in dispute rejection. | Shorten the field: `reason` ≤ 256 chars, `evidence` ≤ 512 chars, `resolution_notes` ≤ 512 chars. |
 | 68 | `TimelockNotExpired` | A timelocked admin action was executed before delay expired. | Executing action before timelock delay has elapsed. | Wait for the delay period to elapse. |
 | 69 | `InvalidEvidenceCid` | Evidence field is not a valid IPFS CID. | Passing a non-CID string as dispute evidence. | Pass a valid IPFS CID (v0 starting with Qm or v1 starting with bafy). |
-| 70 | `InvalidPaymentLink` | Payment link configuration or parameters are invalid. | Malformed payment link creation parameters. | Verify payment link arguments and try again. |
-| 71 | `KycLimitExceeded` | Payment amount or cumulative monthly volume exceeds merchant's KYC tier cap. | Single payment exceeds tier max, or cumulative monthly volume exceeds tier cap under ADR-0003. | Upgrade merchant KYC tier to increase payment volume limits. |
-| 87 | `InvalidMerkleLeafCount` | `leaf_count` passed to `create_batch` is zero or exceeds the maximum. | Creating a batch distribution with 0 or more than 10,000 leaves. | Pass a `leaf_count` between 1 and `MAX_MERKLE_BATCH_LEAVES`. |
-| 88 | `MerkleDistributionNotFound` | No Merkle batch distribution exists with the given `distribution_id`. | Typo'd or stale `distribution_id`. | Verify the ID via `get_batch`. |
-| 89 | `MerkleAlreadyClaimed` | This `(distribution_id, index)` allocation was already claimed. | Submitting the same claim twice. | No action needed — the recipient already received their funds. |
-| 90 | `InvalidMerkleProof` | The submitted proof does not resolve to the distribution's stored Merkle root. | Wrong `index`/`amount`/sibling hashes, or a proof built against a different tree. | Regenerate the proof with `sdk/src/merkle.ts` from the exact leaf set used to create the batch. |
-| 91 | `MerkleDistributionExpired` | The batch distribution's `expires_at` has passed. | Claiming after the distribution's claim window closed. | Claims must happen before `expires_at`; contact the creator about a new batch. |
-| 92 | `MerkleDistributionNotExpired` | Attempted to `defund_batch` before `expires_at`. | Calling `defund_batch` while claims are still open. | Wait until after `expires_at` to defund. |
-| 93 | `MerkleDistributionAlreadyDefunded` | The batch distribution was already defunded by its creator. | Calling `claim_batch_payment` or `defund_batch` again after defunding. | No action needed — the distribution is closed. |
-| 94 | `TreasuryExceedsSingleAdminThreshold` | Withdrawal amount exceeds the configured single-admin threshold. | Calling `withdraw_treasury` for more than `get_treasury_single_admin_threshold()` (default 1000 USDC). | Use `propose_treasury_withdrawal` / `approve_treasury_withdrawal` / `execute_treasury_withdrawal` for larger amounts, or lower the amount. |
-| 95 | `ExceedsTierSingleLimit` | Payment amount exceeds the merchant's KYC tier single-payment limit. | Merchant's KYC tier (`TIER_0_MAX_SINGLE` / `TIER_1_MAX_SINGLE` / `TIER_2_MAX_SINGLE`) can't cover this payment. | Reduce the amount, or upgrade the merchant's KYC tier. |
-| 96 | `ExceedsTierMonthlyLimit` | Payment would exceed the merchant's KYC tier monthly volume limit. | Cumulative volume for the current calendar month (UTC) plus this payment exceeds the tier's monthly cap. | Wait for the next calendar month, reduce the amount, or upgrade the merchant's KYC tier. |
+| 70 | `MuxedAccountMismatch` | Incoming muxed sub-account ID does not match the expected `muxed_payer`. | Issue #841: payer presented a different `muxed_id` than the one recorded on the payment. | Pay from the same muxed sub-account that created/verified the payment. |
+| 71 | `TreasuryMultisigNotConfigured` | Treasury multisig configuration not set or invalid. | Calling a treasury-multisig proposal/approval entry point before `configure_treasury_multisig`. | Call `configure_treasury_multisig` with signers and a threshold first. |
+| 72 | `NotAuthorizedTreasurySigner` | Caller is not an authorized treasury multisig signer. | A non-signer address tried to propose/approve/execute a treasury withdrawal. | Call from one of the configured multisig signer addresses. |
+| 73 | `TreasuryProposalNotFound` | No treasury withdrawal proposal exists with the given ID. | Typo'd proposal ID, or the proposal was never created. | Verify the proposal ID via the treasury proposal listing. |
+| 74 | `TreasuryProposalAlreadyExecuted` | The treasury withdrawal proposal has already been executed. | Calling `execute_treasury_withdrawal` twice for the same proposal. | No action needed — the withdrawal already completed. |
+| 75 | `TreasuryProposalCancelled` | The treasury withdrawal proposal has been cancelled. | Acting on a proposal after it was explicitly cancelled. | Create a new treasury withdrawal proposal. |
+| 76 | `TreasuryTimelockNotExpired` | The treasury withdrawal proposal's timelock has not elapsed. | Executing before the configured delay has passed. | Wait until the proposal's `execute_after` timestamp. |
+| 77 | `TreasuryProposalExpired` | The treasury withdrawal proposal has expired. | Executing after the proposal's expiry window closed. | Create a new treasury withdrawal proposal. |
+| 78 | `TreasuryAlreadyApproved` | Signer has already approved this treasury withdrawal proposal. | The same signer calling `approve_treasury_withdrawal` twice. | Each signer may approve a proposal once; wait for other signers. |
+| 79 | `TreasuryInsufficientApprovals` | Insufficient approvals to execute the treasury withdrawal. | Executing before the configured signer threshold has been met. | Collect approvals from enough signers to meet the threshold. |
+| 80 | `InvalidTreasuryThreshold` | Invalid treasury multisig threshold (zero, or exceeds signer count). | Configuring a threshold of 0, or greater than the number of signers. | Pass a threshold between 1 and the number of configured signers. |
+| 81 | `InsufficientTokenTreasuryBalance` | Treasury withdrawal amount exceeds the token balance held by the contract. | Proposing/executing a withdrawal larger than the treasury's actual token balance. | Reduce the withdrawal amount, or wait for treasury deposits. |
+| 82 | `TrialActive` | Subscription is still in its free trial; no charge yet. | Issue #836: attempting to charge a subscription still inside `trial_days`. | Wait for the trial to end, or call the intended trial-aware entry point. |
+| 83 | `TrialTooLong` | Requested `trial_days` exceeds the maximum of 90 days. | Issue #836: creating a subscription with an excessive trial period. | Pass `trial_days` ≤ 90. |
+| 84 | `InvalidPaymentLink` | Payment link does not exist or belongs to a different merchant. | Malformed payment link ID, or using a link created by another merchant. | Verify the payment link ID and its owning merchant. |
+| 85 | `KycLimitExceeded` | Payment amount or cumulative monthly volume exceeds merchant's KYC tier cap. | Issue #777: single payment exceeds tier max, or cumulative monthly volume exceeds tier cap. | Upgrade merchant KYC tier to increase payment volume limits. |
+| 86 | `LinkAlreadyUsed` | A single-use payment link has already been redeemed and cannot be used again. | Issue #1061: reusing a `max_uses: 1` payment link after it was already claimed. | Create a new payment link for the next payment. |
+| 87 | `InvalidVersion` | Contract version must be a numeric `x.y.z` string of at most 32 characters. | Passing a malformed version string to `set_version`. | Pass a valid `x.y.z` semantic version string. |
+| 88 | `OracleStale` / `SettlementIntervalNotElapsed` / `InvalidRetryTarget` | Three independent conditions currently share this discriminant (see the collision note below): an FX rate older than the configured staleness threshold; `settle_payment` called before the merchant's Daily/Weekly settlement interval elapsed; or `retry_of_payment_id` does not refer to an `Expired` payment owned by the same merchant. | Stale oracle rate at `confirm_payment`/`verify_payment` time; settling ahead of schedule; or retrying a payment that isn't `Expired`. | Trigger a fresh oracle update, wait for the settlement interval, or pass a valid `Expired` `retry_of_payment_id`, depending on which call returned the error. |
+| 89 | `DepositAddressInUse` / `SettlementBelowMinimum` / `TipExceedsMax` | Three independent conditions currently share this discriminant (see the collision note below): the `deposit_address` is already assigned to another open payment; the merchant's accumulated settlement balance is below `SETTLEMENT_MIN_AMOUNT`; or the tip passed to `verify_payment` exceeds `MAX_TIP_BPS`. | Reusing a deposit address across two open payments; settling below the minimum batch amount; or an oversized tip. | Use a fresh deposit address, accumulate more pending balance before settling, or reduce the tip, depending on which call returned the error. |
+| 90 | `DelegationExpired` | A sub-account's merchant delegation has passed its `expires_at`. | Issue #1029: acting under a delegation after its expiry timestamp. | Renew the delegation before it expires. |
+| 91 | `DelegationRevoked` | A sub-account's merchant delegation has been revoked. | Issue #1029: acting under a delegation the merchant explicitly revoked. | Request a new delegation from the merchant. |
 | 404 | `PaymentNotFound` | No payment exists with the given `payment_id`. | Typo'd ID, or payment was never created. | Verify the ID via `get_payment` / listing endpoints. |
 | 405 | `RefundNotFound` | No refund exists with the given `refund_id`. | Typo'd ID, or refund was never created. | Verify the ID via `get_refund` / `get_payment_refunds`. |
 | 406 | `InvalidAmount` | Amount is zero, negative, or otherwise invalid. | Passing a non-positive amount to a payment/refund call. | Pass a strictly positive `i128` amount. |
-| 88 | `OracleStale` | FX rate used by `confirm_payment`/`verify_payment` is older than the PaymentProcessor's own configured staleness threshold. | `MAX_ORACLE_STALENESS_SECS` (default 5 minutes) or the admin-configured override via `set_oracle_staleness_threshold` has elapsed since the rate was last updated, or the FX oracle itself reports the rate as stale. | Trigger (or wait for) an oracle rate update, or raise the threshold via `set_oracle_staleness_threshold` if 5 minutes is too strict for your deployment. |
-| 89 | `DepositAddressInUse` | The requested `deposit_address` is already assigned to another open (`Pending`, unexpired) payment. | Reusing a deposit address across two concurrently-open payments (Issue #1032 spam mitigation). | Use a fresh deposit address, or wait for the existing payment on that address to resolve or expire. |
 
-> **Note:** Every `Error` variant has a unique discriminant — there are no code collisions in the current Rust source.
+> **Note on code collisions:** `Error` currently assigns discriminant `88` to
+> three variants (`OracleStale`, `SettlementIntervalNotElapsed`,
+> `InvalidRetryTarget`) and discriminant `89` to three variants
+> (`DepositAddressInUse`, `SettlementBelowMinimum`, `TipExceedsMax`). This
+> table reflects the enum as written in `fluxapay/src/lib.rs`; resolving the
+> collision would alter wire-level error codes for existing integrators and
+> should be its own tracked change (see `scripts/check-error-codes-doc-sync.js`,
+> which treats a repeated code as valid only when every name sharing it here
+> also shares it in the Rust source).
 
 ## `AccessControlError` (`fluxapay/src/access_control.rs`)
 
@@ -247,68 +263,13 @@ Notes:
 
 ## Error Enum (`fluxapay::Error`)
 
-| Variant | Code |
-|---|---|
-| Unauthorized | 1 |
-| PaymentAlreadyExists | 2 |
-| PaymentExpired | 3 |
-| InvalidPaymentId | 4 |
-| RefundAlreadyProcessed | 8 |
-| DisputeNotFound | 9 |
-| DisputeAlreadyResolved | 12 |
-| PaymentAlreadyProcessed | 14 |
-| AccessControlError | 15 |
-| RefundExceedsPayment | 16 |
-| ContractPaused | 17 |
-| RateLimitExceeded | 18 |
-| RefundCancelled | 19 |
-| UnsupportedToken | 20 |
-| AmountBelowMin | 21 |
-| AmountAboveMax | 22 |
-| InvalidExpiry | 23 |
-| InvalidSettlement | 24 |
-| DuplicateIdempotencyKey | 25 |
-| InvalidAddress | 26 |
-| ArbitrageDetected | 27 |
-| SwapPathInvalid | 28 |
-| OraclePriceDeviation | 29 |
-| SubscriptionInGracePeriod | 30 |
-| SubscriptionRetryExhausted | 31 |
-| InvalidResumeTimestamp | 32 |
-| MerchantAuthError | 33 |
-| TierVolumeLimitExceeded | 34 |
-| BatchTooLarge | 35 |
-| RefundExpired | 36 |
-| InsufficientArbitrators | 37 |
-| ArbitrationVotingThresholdNotMet | 38 |
-| FeeProposalNotReady | 39 |
-| InvalidEvidenceFormat | 40 |
-| InvalidSettlementSignature | 41 |
-| RefundCooldownNotElapsed | 42 |
-| Reentrancy | 43 |
-| NoFeeProposal | 44 |
-| StaleOracleRate | 45 |
-| LinkExpired / InsufficientTreasuryBalance | 46 |
-| MetadataValueTooLong | 47 |
-| UpgradeFailed | 48 |
-| MetadataTooLarge | 49 |
-| InvalidMemoType | 50 |
-| MemoTooLong | 51 |
-| InvalidMemoId | 52 |
-| PayerNotWhitelisted | 53 |
-| LinkMaxUsesReached / DirectTransferNotDisputable / MaxRetriesExceeded / InvalidStatusTransition | 54 |
-| RateDeviationExceeded | 55 |
-| DisputeRateLimitExceeded | 54 |
-| PaymentNotFound | 404 |
-| RefundNotFound | 405 |
-| InvalidAmount | 406 |
-
-> Several variants above intentionally or unintentionally share the same
-> numeric discriminant (e.g. `46`, `54`) in the current contract source.
-> This table reflects the enum as written in `fluxapay/src/lib.rs` rather
-> than resolving that pre-existing duplication, which is out of scope for
-> this change. Resolving it would alter wire-level error codes for
-> existing integrators and should be its own tracked change.
+This is the same enum documented by the **Core** table at the top of this
+document — see that table for the full `code -> name` mapping. Keeping a
+single table (rather than this list duplicating it with independently
+hand-maintained numbering) is intentional: the previous copy here had
+drifted out of sync with `fluxapay/src/lib.rs::Error` and is why issue
+#1193 added `scripts/check-error-codes-doc-sync.js` to catch this class of
+drift going forward.
 
 ## Refund-Specific Errors Most Relevant to Tiered Fees
 
