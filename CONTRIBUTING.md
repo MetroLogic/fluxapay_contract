@@ -383,6 +383,22 @@ Contributors can add support for new languages to the SDK error system:
 
 ---
 
+## 7.3. `lib.rs` Module Boundaries (Issue #1222)
+
+`fluxapay/src/lib.rs` is a thin wiring file: module declarations, re-exports, shared
+cross-module `#[contracttype]`/`#[contracterror]` enums, and `#[contractimpl]` bodies that
+**delegate** to submodule logic. Do not add business logic, storage helpers, or state machines
+to `lib.rs` — put them in the relevant submodule (`payment_processor.rs`, `refund_manager.rs`,
+`payment_state_machine.rs`, etc.).
+
+This is enforced in CI by `scripts/check_librs_boundaries.sh` (see
+[ADR-0006](docs/ADR-0006-module-boundaries-lib-rs.md)), which fails the build if `lib.rs` grows
+beyond the frozen baseline in `.librs-baseline` (line count, with a small tolerance, or `pub fn`
+count, strict). If your PR moves logic **out** of `lib.rs`, lower the numbers in
+`.librs-baseline` accordingly; never raise them.
+
+---
+
 ## 8. Issue Workflow
 
 ### Labels

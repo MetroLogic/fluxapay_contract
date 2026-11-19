@@ -308,7 +308,20 @@ FluxaPay emits the following on-chain events for refund lifecycle tracking:
 
 ## Architecture
 
-For a detailed understanding of the contract structure, cross-contract interactions, role model, and payment lifecycle, see [docs/architecture.md](docs/architecture.md).
+For a detailed understanding of the contract structure, cross-contract interactions, role model, payment lifecycle, and the storage ownership map, see [docs/architecture.md](docs/architecture.md).
+
+## Architecture Decision Records
+
+- [ADR-0001: Access Control Split](docs/ADR-0001-access-control-split.md)
+- [ADR-0002: Payment Stream Design](docs/ADR-0002-payment-stream-design.md)
+- [ADR-0003: KYC Tier System](docs/ADR-0003-kyc-tier-system.md)
+- [ADR-0004: Multi-Sig Admin Governance](docs/ADR-0004-multisig-admin-governance.md)
+- [ADR-0005: DEX Simulation-to-Real (Soroswap) Migration](docs/ADR-0005-dex-simulation-to-real-migration.md)
+- [ADR-0006: Module Boundaries for `lib.rs`](docs/ADR-0006-module-boundaries-lib-rs.md)
+
+## Event Topics
+
+The on-chain event topic naming convention and indexer-compatible migration plan are documented in [docs/events.md](docs/events.md).
 
 ## Error Codes
 

@@ -73,6 +73,38 @@ PaymentLinkManager
   └─ stores links independently (no external calls)
 ```
 
+## Cross-Contract Storage Ownership Map (Issue #1223)
+
+Each contract is the sole writer of its own storage; cross-contract access is read-only via the
+matching `*Client` (e.g. `MerchantRegistryClient`, `FXOracleClient`, `DexRouterClient`). The main
+`DataKey` enum (`fluxapay/src/data_keys.rs`) is shared by `PaymentProcessor` and `RefundManager`,
+but each deployed instance owns its own instance of those keys.
+
+| Contract | Storage enum | Owns (representative keys) |
+|---------|--------------|----------------------------|
+| PaymentProcessor | `DataKey` (`data_keys.rs`) | `Payment`, `PaymentStatusHistory`, `MerchantPayments`, `Dispute*`, `Stream`, `Subscription*`, `Invoice*`, `TreasuryBalanceByToken`, `IdempotencyKey`, `MerchantRateLimit`, `AllowedToken`, `Blacklisted`, `MerchantAmountLimits`, `FxOracleAddress`, `DexRouterAddress`, `AllowedRouter(s)`, `WrappedXlmContract`, `PaymentLinkManagerAddress`, `MerkleDistribution*`, `PauseScope`, `ReentrancyLock`, `SettlementFeeRate`, fee waivers, expiry buckets |
+| RefundManager | `DataKey` (shared enum, own instance) | `Refund`, `RefundCounter`, `RefundIdempotencyKey`, `PaymentRefunds`, `RefundFeeBps`, `FeeSplitConfig`, `RefundExpirySecs`, `RefundCooldownSecs`, `AutoRefundQueue`, `RefundIndex`, treasury withdrawal proposals/history |
+| MerchantRegistry | `MerchantDataKey` (`merchant_registry.rs`) | `Merchant`, `MerchantList`, `FeeConfig`/`PlatformFeeConfig`, `TierLimit`, `MerchantCustomerWhitelist`, `MerchantPendingSettlement`, `DisputeThreshold`, `Suspension*`, `MerchantReserve*`, `MerchantMonthlyVolume`, `MerchantPayoutHistory`, `PaymentProcessorAddress`, `RefundManagerAddress` |
+| FXOracle | `OracleDataKey` (`fx_oracle.rs`) | `Rate(pair)`, `StalenessThreshold`, `MaxDeviation(pair)`, `Quorum`, `Submissions`, `AllowedTokens` |
+| DexRouter | none of its own | swap execution only; allowlist/WXLM/router-address config lives in PaymentProcessor's `DataKey` |
+| PaymentLinkManager | `LinkDataKey` (`payment_link.rs`) | `Link`, `LinkAdmin`, `LinkPayments`, `LinkPayment`, `MerchantLinks`, `PaymentBaseUrl`, `GlobalFeeBps`, `LinkRateLimitConfig`, `PayerLinkUseWindow`, `LinkViewRateLimitConfig`, `PayerLinkViewWindow` |
+| AccessControl | `AccessControlDataKey` (`access_control.rs`) | role grants, `Admin`, `MultisigConfig`, proposals/nonces, timelocked admin actions |
+| Stream | `StreamDataKey` (`stream.rs`) | stream ledger records, withdrawals, destinations |
+
+### Ownership boundary rules
+
+- A key is owned by the single contract that **writes** it. Other contracts never write to a key
+  they do not own; they read via the matching `*Client`.
+- `PaymentProcessor` stores the addresses of its dependencies (`MerchantRegistryAddress`,
+  `FxOracleAddress`, `DexRouterAddress`, `PaymentLinkManagerAddress`) and is the only writer of
+  those address pointers; dependencies do not write back into `PaymentProcessor`.
+- `MerchantRegistry` stores the reverse pointers `PaymentProcessorAddress` /
+  `RefundManagerAddress` so it can grant roles back to the processor; it is the sole writer of
+  those keys.
+- DEX router config (allowlist, WXLM address) lives in `PaymentProcessor`'s `DataKey`; the
+  `DexRouter` contract owns no persistent cross-contract state in the current (simulated) design
+  — see [ADR-0005](ADR-0005-dex-simulation-to-real-migration.md).
+
 ## Subscription Metrics (#1083)
 
 The indexer retains subscription plan ownership/pricing and lifecycle events
@@ -496,3 +528,5 @@ reference table, including common causes and remediation: see
 - [ADR-0002: Payment Stream Design](ADR-0002-payment-stream-design.md)
 - [ADR-0003: KYC Tier System](ADR-0003-kyc-tier-system.md)
 - [ADR-0004: Multi-Sig Admin Governance](ADR-0004-multisig-admin-governance.md)
+- [ADR-0005: DEX Simulation-to-Real (Soroswap) Migration](ADR-0005-dex-simulation-to-real-migration.md)
+- [ADR-0006: Module Boundaries for `lib.rs`](ADR-0006-module-boundaries-lib-rs.md)
