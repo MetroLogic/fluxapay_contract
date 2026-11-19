@@ -4666,6 +4666,86 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1200: Maximum number of items accepted by a single
+    /// `batch_settle_payments` call. Kept well under `create_payments_batch`'s
+    /// cap of 50 since each settlement does materially more work per item
+    /// (fee-waiver lookups, merchant registry calls, token transfers, event
+    /// publishing) than a payment creation.
+    pub const MAX_BATCH_SETTLE_PAYMENTS: u32 = 20;
+
+    /// Issue #1200: Settle up to `MAX_BATCH_SETTLE_PAYMENTS` confirmed payments
+    /// in a single invocation.
+    ///
+    /// Unlike `create_payments_batch`, a failure on one payment does **not**
+    /// revert the whole call: each item is settled independently by calling
+    /// `settle_payment`, and its outcome — success, or the `Error` discriminant
+    /// `settle_payment` would have returned for that payment on its own — is
+    /// recorded in the corresponding `BatchSettleResult`. This lets an operator
+    /// submit a day's worth of confirmed payments in one transaction without a
+    /// single already-settled or invalid `payment_id` blocking the rest.
+    ///
+    /// Each settled item still emits its own `PAYMENT`/`SETTLED` event (and the
+    /// other per-settlement events `settle_payment` emits) exactly as if it had
+    /// been settled individually; this call additionally emits a single
+    /// `PAYMENT`/`BATCH_SETTLED` summary event once all items have been
+    /// processed.
+    pub fn batch_settle_payments(
+        env: Env,
+        operator: Address,
+        items: Vec<BatchSettlePaymentItem>,
+    ) -> Result<Vec<BatchSettleResult>, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator) {
+            return Err(Error::Unauthorized);
+        }
+
+        if items.len() > Self::MAX_BATCH_SETTLE_PAYMENTS {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut results: Vec<BatchSettleResult> = vec![&env];
+        let mut settled_count: u32 = 0;
+
+        for item in items.iter() {
+            let outcome = Self::settle_payment(
+                env.clone(),
+                operator.clone(),
+                item.payment_id.clone(),
+                item.splits.clone(),
+            );
+
+            match outcome {
+                Ok(()) => {
+                    settled_count += 1;
+                    results.push_back(BatchSettleResult {
+                        payment_id: item.payment_id.clone(),
+                        success: true,
+                        error_code: None,
+                    });
+                }
+                Err(e) => {
+                    results.push_back(BatchSettleResult {
+                        payment_id: item.payment_id.clone(),
+                        success: false,
+                        error_code: Some(e as u32),
+                    });
+                }
+            }
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PAYMENT"),
+                Symbol::new(&env, "BATCH_SETTLED"),
+                operator,
+            ),
+            (items.len() as u32, settled_count),
+        );
+
+        Ok(results)
+    }
+
     /// Issue #480: Trigger a settlement for a merchant's accumulated pending balance.
     ///
     /// Sweeps the merchant's pending settlement balance to their payout address.

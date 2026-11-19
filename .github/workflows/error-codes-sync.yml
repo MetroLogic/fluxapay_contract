@@ -1,0 +1,33 @@
+name: Error Codes Doc Sync
+
+# Issue #1193: docs/error-codes.md is hand-maintained and has no other
+# mechanical guard against drifting from fluxapay/src/lib.rs::Error when
+# variants are added, renamed, renumbered, or removed. This is distinct from
+# `check-error-map-sync.ts` (issue #829 fixed a bug in that script), which
+# only checks the SDK's error map against the same Rust enum.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  error-codes-doc-sync:
+    name: Verify docs/error-codes.md matches Error enum
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check error-codes.md sync with fluxapay/src/lib.rs::Error
+        run: node scripts/check-error-codes-doc-sync.js

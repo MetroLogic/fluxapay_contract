@@ -14699,3 +14699,5 @@ mod stream_vesting_test;
 #[cfg(test)] mod meta_transaction_test;
 #[cfg(test)] mod merkle_distributor_test;
 #[cfg(test)] mod treasury_single_admin_threshold_test;
+#[cfg(test)] mod merchant_refunds_test;
+#[cfg(test)] mod batch_settle_test;
