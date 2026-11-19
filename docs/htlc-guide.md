@@ -1,5 +1,21 @@
 # Hash Time-Locked Contract (HTLC) Escrow Module
 
+> **Implementation status (verified for issue #1187):** Implemented. As of
+> this writing, `fluxapay/src/htlc.rs` is a complete, valid Rust module - it
+> is declared with `pub mod htlc;` and re-exported with
+> `pub use htlc::{Htlc, HtlcClient, HtlcDataKey, HtlcError, HtlcRecord, HtlcStatus};`
+> in `fluxapay/src/lib.rs`, its `#[contractimpl]` block is gated behind the
+> `contract-htlc` feature exactly like the crate's other single-purpose
+> contracts (see `docs/feature-flags.md`), and all five entry points
+> (`create_htlc`, `claim_htlc`, `refund_htlc`, `claim_htlc_timeout`,
+> `get_htlc`) are covered by `fluxapay/src/htlc_test.rs` (happy path, late
+> claim, invalid preimage, early/late refund, timeout sweep, double-claim,
+> unauthorized callers). Issue #1187 was opened on the premise that
+> `htlc.rs` was "a non-compiling base64 file and not a module" - that is not
+> the case for this file; see the PR that added this note for the full
+> verification and an unrelated, dead (non-module) file that *does* match
+> that description.
+
 The FluxaPay HTLC module (`fluxapay/src/htlc.rs`) is its own Soroban contract (`Htlc`, feature flag `contract-htlc`) that provides trustless conditional payments. Tokens are locked in an escrow that can only be released to the receiver when the correct cryptographic preimage is revealed before a timelock expires, or refunded to the sender after it expires. This is the building block for cross-chain atomic swaps (e.g. Stellar <> Bitcoin/Ethereum lightning bridges) and off-chain counterparty settlement.
 
 ## Overview

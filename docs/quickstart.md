@@ -232,4 +232,5 @@ The endpoint (`GET /v1/payment-links/{id}/stats`) requires merchant authenticati
 
 - [docs/webhooks.md](webhooks.md) — full webhook payload reference, retries, idempotency
 - [docs/architecture.md](architecture.md) — contract structure and payment lifecycle
+- [docs/account-abstraction.md](account-abstraction.md) — delegate a scoped, spend-capped session key (e.g. a read-only or checkout-only key) to a POS terminal or automated agent instead of sharing your merchant key
 - [sdk/README.md](../sdk/README.md) — full SDK API reference
