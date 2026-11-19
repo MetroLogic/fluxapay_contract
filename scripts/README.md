@@ -26,6 +26,7 @@ Operational scripts for deployment, SDK generation, local development, and CI ch
 | `sandbox-init.sh` | Bootstrap local Stellar sandbox — builds WASM, generates local identities, funds admin via friendbot. | `STELLAR_RPC_URL`, `STELLAR_NETWORK` | Local dev first-time setup |
 | `check-mainnet-contract-ids.js` | CI informational check — warns when `sdk/src/network-profiles.ts` mainnet still has `UNSET_CONTRACT_ID` placeholders. Always exits 0. | None | CI |
 | `check-error-map-sync.ts` | CI gate — verifies `FLUXAPAY_CONTRACT_ERROR_MAP` in `sdk/src/index.ts` matches the `Error` enum in `fluxapay/src/lib.rs`. Fails CI (exit 1) on drift **or when an expected source file cannot be found** (the missing path is printed). | None | CI |
+| `check_librs_boundaries.sh` | CI gate (Issue #1222 / ADR-0006) — fails if `fluxapay/src/lib.rs` grows beyond the frozen baseline in `.librs-baseline` (line count, with a small tolerance, or `pub fn` count, strict). Keeps `lib.rs` a thin wiring file. | None | CI |
 | `webhook-test-helper.js` | Generates a valid signed webhook payload (HMAC-SHA256) and prints a copy-pasteable `curl` command with `X-FluxaPay-Signature` and `X-FluxaPay-Timestamp` headers. | None | When testing webhook verification |
 
 ## `webhook-test-helper.js`

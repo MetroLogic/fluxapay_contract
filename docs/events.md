@@ -1,7 +1,40 @@
 # FluxaPay On-Chain Event Catalog
 
-All events use a **2-tuple topic** `(namespace: Symbol, action: Symbol)` and are emitted via
-`env.events().publish((namespace, action), payload)`.
+## Naming Convention (Issue #1224)
+
+FluxaPay emits exactly one canonical topic shape per event: a **2-tuple topic
+`(NAMESPACE: Symbol, ACTION: Symbol)`** followed by a data payload. `NAMESPACE` and `ACTION`
+are uppercase `Symbol`s with no slashes (e.g. `PAYMENT`, `CREATED`). The entity ID and all other
+fields live in the data payload, never in the topic.
+
+Two implementation patterns exist in the code today and both MUST produce this same on-wire
+2-tuple topic:
+
+1. **Preferred — `#[contractevent]` struct** (in `fluxapay/src/events.rs`). A struct that replaces
+   a legacy tuple event MUST carry two `#[contractevent(topic)] Symbol` fields
+   (`topic_namespace`, `topic_action`) so the published topic tuple is byte-identical to the
+   legacy form, preserving indexer `?topic[]` filters. Example:
+
+   ```rust
+   #[contractevent]
+   #[derive(Clone, Debug)]
+   pub struct PaymentCancelled {
+       #[contractevent(topic)]
+       pub topic_namespace: Symbol, // PAYMENT
+       #[contractevent(topic)]
+       pub topic_action: Symbol,    // CANCELLED
+       pub payment_id: String,
+       pub merchant_id: Address,
+   }
+   ```
+
+2. **Compatibility — `env.events().publish((NAMESPACE, ACTION), payload)`** via the `emit_*`
+   helpers in `events.rs`. These are the legacy form and remain valid; new events should use the
+   struct form above.
+
+The 3-tuple form `(NAMESPACE, ACTION, entity_id)` documented in `fluxapay/EVENTS.md` is
+**deprecated** — `entity_id` moves into the payload. The contract code and this catalog use the
+2-tuple form as the single source of truth.
 
 ---
 
@@ -608,6 +641,31 @@ Validation failures (deadline, domain, nonce, signature) do not emit this event.
 | `target_function` | `Symbol` | Requested action |
 | `nonce` | `u64` | Sequence number consumed |
 | `gas` | `MetaTxGas` | Estimated resource use |
+
+---
+
+## Migration Plan — Preserving Indexer Topic Filters (Issue #1224)
+
+The catalog below documents events as 2-tuple topics. Some code paths still emit the deprecated
+3-tuple form or use `env.events().publish` directly. Migrate them without breaking indexer
+filters:
+
+1. **Freeze the published topics.** The `(NAMESPACE, ACTION)` 2-tuple is the indexer contract.
+   No migration step may change an existing event's topic symbols.
+2. **Add the struct alongside the helper.** For each `emit_*` helper, add a matching
+   `#[contractevent]` struct whose `topic_namespace`/`topic_action` reproduce the helper's
+   `(NAMESPACE, ACTION)` tuple exactly. Emit both during the deprecation window.
+3. **Drop the 3-tuple form.** Events that currently publish `(NAMESPACE, ACTION, entity_id)`
+   must move `entity_id` into the payload and publish `(NAMESPACE, ACTION)`. Add a parallel
+   2-tuple emission first; once indexers confirm the 2-tuple stream, remove the 3-tuple call.
+4. **Retire the helper.** Once the struct emission is the only producer, remove the
+   `#[allow(deprecated)] emit_*` helper and its `env.events().publish` call.
+5. **Verify topic shape.** Each migrated event's topic tuple MUST equal `(NAMESPACE, ACTION)` and
+   nothing else, so existing `?topic[]=NAMESPACE&topic[]=ACTION` Horizon filters keep working with
+   no indexer change.
+
+Indexers filter on `(NAMESPACE, ACTION)` only; payload field reordering is safe as long as the
+documented field names in this catalog are preserved.
 
 ---
 
