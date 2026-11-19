@@ -96,6 +96,32 @@ PROPTEST_CASES=64 cargo test -p fluxapay proptests:: --all-features -- --test-th
 cd fluxapay && make test
 ```
 
+### Nightly full test run (Issue #1219)
+
+`.github/workflows/nightly.yml` runs every day at 02:00 UTC (and on demand
+via **Actions → Nightly full test run → Run workflow**). It runs the whole
+suite in a way PR CI does not:
+
+| Step | What it catches |
+|------|-----------------|
+| `cargo test --workspace --all-features --all-targets` | breakage in any contract feature, unit or integration target |
+| `cargo test --workspace --all-targets` | code that only compiles or passes with extra features on |
+| same as the first step with `--test-threads=1` | order- and interleaving-dependent tests |
+
+`PROPTEST_CASES=4096` is set for the whole job, so property tests get
+16x the PR budget.
+
+When a scheduled run fails, the `notify-failure` job opens an issue titled
+**Nightly full test run failing**, labelled `nightly-failure`, with a link
+to the run. Later failures comment on that same issue while it stays open.
+Close it once the fix lands.
+
+To reproduce a nightly failure locally:
+
+```bash
+PROPTEST_CASES=4096 cargo test --workspace --all-features --all-targets -- --test-threads=1
+```
+
 For testnet testing, see [docs/local-invoke.md](docs/local-invoke.md).
 
 ---
