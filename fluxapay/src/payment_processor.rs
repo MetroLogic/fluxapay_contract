@@ -613,6 +613,89 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1206: Admin-configurable default payment duration (seconds),
+    /// used by `create_payment`/batch variants when the caller supplies
+    /// neither `expires_at` nor `duration_secs`. Bounded by the existing
+    /// Min/MaxPaymentDurationSecs policy so it can never resolve to an
+    /// expiry outside the admin-configured safe window.
+    pub fn set_default_payment_duration(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DefaultPaymentDurationSecs, &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Per-merchant override for the default payment duration
+    /// (seconds). Self-service: the merchant authorizes the call and sets
+    /// their own override, bounded by the same Min/MaxPaymentDurationSecs
+    /// policy as the global default.
+    pub fn set_merchant_payment_duration(
+        env: Env,
+        merchant_id: Address,
+        secs: u64,
+    ) -> Result<(), Error> {
+        merchant_id.require_auth();
+        if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantPaymentDurationSecs(merchant_id), &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Read the admin-configured min/max payment duration bounds,
+    /// falling back to the same defaults used by `create_payment`.
+    fn payment_duration_bounds(env: &Env) -> (u64, u64) {
+        let min_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MinPaymentDurationSecs)
+            .unwrap_or(CREATE_PAYMENT_WINDOW_SECS);
+        let max_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MaxPaymentDurationSecs)
+            .unwrap_or(30 * 24 * 3600);
+        (min_duration, max_duration)
+    }
+
+    /// Issue #1206: Resolve the effective default payment duration (seconds)
+    /// for a merchant when the caller does not supply `duration_secs` or
+    /// `expires_at`. Resolution order: per-merchant override, then the
+    /// admin-configured global default, then the compile-time
+    /// `DEFAULT_PAYMENT_DURATION_SECS` constant.
+    fn get_default_payment_duration(env: &Env, merchant_id: &Address) -> u64 {
+        if let Some(secs) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MerchantPaymentDurationSecs(merchant_id.clone()))
+        {
+            return secs;
+        }
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::DefaultPaymentDurationSecs)
+            .unwrap_or(DEFAULT_PAYMENT_DURATION_SECS)
+    }
+
     /// Return the accumulated treasury balance collected via settlement fees.
     /// Uses the default USDC token for backward compatibility.
     pub fn get_treasury_balance(env: Env) -> i128 {
@@ -1686,7 +1769,7 @@ impl PaymentProcessor {
         // Idempotency check: if client_token was already used, return the existing payment
         // (or error if it maps to a different payment_id).
         if let Some(ref token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                 if existing_id == args.payment_id {
                     return Self::get_payment_internal(&env, &args.payment_id);
@@ -1876,13 +1959,25 @@ impl PaymentProcessor {
                 ts
             }
             None => {
-                let duration = args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS);
+                let duration = args
+                    .duration_secs
+                    .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id));
                 if duration < min_duration || duration > max_duration {
                     return Err(Error::InvalidExpiry);
                 }
                 now.saturating_add(duration)
             }
         };
+
+        // Issue #1209: Validate an optional deferred-settlement timestamp. It must
+        // be strictly in the future and no later than the payment's own expiry,
+        // otherwise the payment could expire before `settle_payment` is ever
+        // allowed to run.
+        if let Some(settle_at) = args.settle_at {
+            if settle_at <= now || settle_at > resolved_expires_at {
+                return Err(Error::InvalidExpiry);
+            }
+        }
 
         let payment = PaymentCharge {
             payment_id: args.payment_id.clone(),
@@ -1979,7 +2074,7 @@ impl PaymentProcessor {
         // Issue #399: Persist idempotency key → payment_id mapping with a TTL that matches
         // the payment expiry window so keys do not accumulate indefinitely.
         if let Some(token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             env.storage().persistent().set(&key, &args.payment_id);
             // TTL in ledgers ≈ (expires_at − now) / 5s per ledger, clamped to SHORT_LIVE_TTL min.
             let payment_duration_secs = resolved_expires_at.saturating_sub(now);
@@ -1990,9 +2085,21 @@ impl PaymentProcessor {
             // Store reverse mapping so cancel/expire can clean up the token.
             // We prefix the payment_id with "r:" to avoid collision with real tokens.
             let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-            let rev_key = DataKey::IdempotencyKey(rev_token_id);
+            let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
             env.storage().persistent().set(&rev_key, &token);
             Self::bump_ttl(&env, &rev_key, ttl_ledgers);
+        }
+
+        // Issue #1209: Persist the deferred-settlement timestamp so
+        // `settle_payment` can enforce it; TTL mirrors the payment's own expiry.
+        if let Some(settle_at) = args.settle_at {
+            let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+            env.storage().persistent().set(&settle_key, &settle_at);
+            let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+            let ledgers_per_sec: u64 = 5;
+            let ttl_ledgers =
+                ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
+            Self::bump_ttl(&env, &settle_key, ttl_ledgers);
         }
 
         Ok(payment)
@@ -2154,7 +2261,7 @@ impl PaymentProcessor {
 
             // Check idempotency
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != args.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -2174,12 +2281,20 @@ impl PaymentProcessor {
         for args in args_list.iter() {
             let resolved_expires_at = match args.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    args.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = args.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -2220,6 +2335,13 @@ impl PaymentProcessor {
             Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
 
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = args.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
             // Issue #489: Store reverse index for metadata_hash → payment_id lookup in batch
             if let Some(ref hash) = args.metadata_hash {
                 let key = DataKey::MetadataHashPayment(hash.clone());
@@ -2248,7 +2370,7 @@ impl PaymentProcessor {
 
             // Issue #399: Persist idempotency key with TTL matching payment expiry window.
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 env.storage().persistent().set(&key, &args.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -2257,7 +2379,7 @@ impl PaymentProcessor {
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 // Reverse mapping for cleanup on cancel/expire.
                 let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -2440,7 +2562,7 @@ impl PaymentProcessor {
             }
 
             if let Some(ref token) = req.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != req.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -2458,12 +2580,20 @@ impl PaymentProcessor {
         for req in payments.iter() {
             let resolved_expires_at = match req.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(req.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    req.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = req.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -2504,6 +2634,13 @@ impl PaymentProcessor {
             Self::extend_payment_ttl(&env, &req.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &req.payment_id, payment.expires_at);
 
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = req.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(req.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
             if let Some(ref hash) = req.metadata_hash {
                 let key = DataKey::MetadataHashPayment(hash.clone());
                 env.storage().persistent().set(&key, &req.payment_id);
@@ -2530,7 +2667,7 @@ impl PaymentProcessor {
             );
 
             if let Some(ref token) = req.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 env.storage().persistent().set(&key, &req.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -2538,7 +2675,7 @@ impl PaymentProcessor {
                     ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 let rev_token_id = Self::rev_key_for(&env, &req.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -3990,6 +4127,18 @@ impl PaymentProcessor {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
+        // Issue #1209: Reject settlement before the payment's optional deferred
+        // `settle_at` timestamp, supporting escrow-like deferred release.
+        if let Some(settle_at) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::PaymentSettleAt(payment_id.clone()))
+        {
+            if env.ledger().timestamp() < settle_at {
+                return Err(Error::SettlementNotYetDue);
+            }
+        }
+
         // Resolve the settlement token: use payment.token_address if set, else the configured USDC token
         let settlement_token: Option<Address> = payment.token_address.clone().or_else(|| {
             env.storage()
@@ -5034,6 +5183,7 @@ impl PaymentProcessor {
             idempotency_key: None,
             allow_partial: None,
             tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -5140,6 +5290,7 @@ impl PaymentProcessor {
             idempotency_key: None,
             allow_partial: None,
             tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -5576,11 +5727,11 @@ impl PaymentProcessor {
     /// client_token can be reused after expiry or cancellation.
     fn remove_idempotency_key(env: &Env, payment_id: &String) {
         let rev_token_id = Self::rev_key_for(env, payment_id);
-        let rev_key = DataKey::IdempotencyKey(rev_token_id);
+        let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
         if let Some(token) = env.storage().persistent().get::<DataKey, String>(&rev_key) {
             env.storage()
                 .persistent()
-                .remove(&DataKey::IdempotencyKey(token));
+                .remove(&DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token)));
             env.storage().persistent().remove(&rev_key);
         }
     }

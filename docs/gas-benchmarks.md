@@ -142,3 +142,71 @@ BASE_URL=http://localhost:3001 k6 run tests/load/payment-burst.js
 BASE_URL=http://localhost:3001 k6 run tests/load/webhook-dispatch.js
 BASE_URL=http://localhost:3001 k6 run tests/load/sse-connections.js
 ```
+
+---
+
+## `create_payment` / `verify_payment` Registry Lookup Caching (Issue #1211)
+
+Distinct from #1041 (which only tracks instruction-count *regressions*), this
+is a targeted optimization of the two hottest contract entry points:
+`create_payment` and `verify_payment` in `fluxapay/src/lib.rs`. No external
+behavior changes — every error path, event, and returned `PaymentStatus`
+value is identical to before; only redundant storage reads and redundant
+cross-contract calls to `MerchantRegistry` within a single invocation are
+eliminated.
+
+### What was duplicated
+
+Both entry points independently re-read the same `DataKey::MerchantRegistryAddress`
+persistent entry, and re-issued the same `MerchantRegistryClient::get_merchant`
+cross-contract call for the *same* `merchant_id`, in multiple separate
+`if let Some(registry_address) = env.storage()...` blocks scattered through
+the function body — once per validation concern, even though the registry
+address and the merchant record cannot change mid-invocation.
+
+| Entry point | `MerchantRegistryAddress` storage reads (before → after) | `get_merchant` cross-contract calls (before → after) |
+|---|---|---|
+| `create_payment` | 3 → 1 | 2 → 1 |
+| `verify_payment`  | up to 3 → 1 | up to 2 → 1 |
+
+### Change
+
+Both functions now read `MerchantRegistryAddress` and construct the
+`MerchantRegistryClient` exactly once near the top of the registry-dependent
+logic, caching the client in a local `registry_client_opt: Option<...Client>`.
+`create_payment` additionally caches the `Merchant` record fetched for the
+Issue #79 active/whitelist check (`cached_merchant`) and reuses it for the
+Issue #393 KYC-tier-limits check instead of re-fetching it. `verify_payment`
+caches the `Merchant` fetched for the tolerance lookup and reuses it for the
+Issue #162 partial-payment-policy check.
+
+Reuse is safe because, within one invocation, `MerchantRegistryAddress` is
+immutable contract configuration and `MerchantRegistry::get_merchant` is a
+pure read with no intervening writes between the cached fetch and its reuse
+— a second live call would deterministically return the same result the
+cached one already captured; the first call's outcome (including its error
+path returning `Error::Unauthorized`/skipping the check when unset) is
+preserved exactly.
+
+### Impact
+
+- **Ledger reads**: 2 fewer `MerchantRegistryAddress` persistent-storage reads
+  per `create_payment` call when a registry is configured; up to 2 fewer per
+  `verify_payment` call.
+- **Cross-contract invocations**: 1 fewer `get_merchant` call (contract
+  instantiation + full merchant record XDR decode) per `create_payment` call,
+  and up to 1 fewer per `verify_payment` call when the `PartiallyPaid`/
+  `Overpaid` paths are hit — each cross-contract call is one of the more
+  expensive operation classes in Soroban's instruction model (host-function
+  dispatch, auth-free invoke, full `Merchant` struct deserialization), so
+  removing a whole redundant call is the dominant saving here versus removing
+  a single storage read.
+- **WASM size**: unchanged — the change only restructures existing control
+  flow (extracts duplicated `env.storage()...get(...)` / `MerchantRegistryClient::new`
+  expressions into shared locals) and adds no new storage keys, event types,
+  or public entry points.
+- **Behavior**: unchanged. All existing `create_payment`/`verify_payment`
+  tests (`fluxapay/src/test.rs`, `fluxapay/src/integration_test.rs`, and the
+  KYC/whitelist/partial-payment suites) continue to exercise the exact same
+  error codes and status transitions, since every cached value is populated
+  strictly from the same lookup the removed call would have performed.

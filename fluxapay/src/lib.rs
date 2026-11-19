@@ -599,6 +599,9 @@ pub enum Error {
     InvalidRetryTarget = 88,
     /// Issue #1025: Tip passed to `verify_payment` exceeds `MAX_TIP_BPS` of the base amount.
     TipExceedsMax = 89,
+    /// Issue #1209: `settle_payment` was called before the payment's configured
+    /// `settle_at` deferred-settlement timestamp has been reached.
+    SettlementNotYetDue = 1209,
 }
 
 #[contracttype]
@@ -636,6 +639,10 @@ pub struct CreatePaymentArgs {
     /// Issue #1025 makes this actually enforceable: `verify_payment` validates
     /// and records a tip, capped at `MAX_TIP_BPS`, only when this is `true`.
     pub tip_enabled: bool,
+    /// Issue #1209: Optional future timestamp before which `settle_payment`
+    /// must reject settlement, supporting escrow-like deferred release.
+    /// `None` means settlement is allowed as soon as the payment is confirmed.
+    pub settle_at: Option<u64>,
 }
 
 /// Issue #771: Payment request item for `create_payment_batch`.
@@ -657,6 +664,9 @@ pub struct PaymentRequest {
     pub fee_waiver_code: Option<String>,
     pub payer: Option<Address>,
     pub payer_muxed_id: Option<u64>,
+    /// Issue #1209: Optional future timestamp before which `settle_payment`
+    /// must reject settlement, supporting escrow-like deferred release.
+    pub settle_at: Option<u64>,
 }
 
 /// Arguments for a single dispute in `batch_create_disputes` / `create_dispute`.
@@ -677,6 +687,17 @@ pub struct CreateDisputeArgs {
 pub enum DisputeBatchItemResult {
     Ok(String),
     Err(u32),
+}
+
+/// Per-item outcome for `batch_process_refunds` (partial success allowed).
+/// Issue #1199.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RefundBatchItemResult {
+    /// The refund_id that was successfully processed.
+    Ok(String),
+    /// The refund_id that failed, together with the `Error` discriminant.
+    Err(String, u32),
 }
 
 /// Resolution details for one dispute in `batch_resolve_disputes`.
@@ -705,6 +726,9 @@ struct SwapLedgerVolume {
 
 /// Hard cap for dispute batch size.
 pub const MAX_DISPUTE_BATCH: u32 = 20;
+
+/// Hard cap for refund batch size (Issue #1199).
+pub const MAX_REFUND_BATCH: u32 = 20;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1186,7 +1210,9 @@ pub enum DataKey {
     Refund(String),
     PaymentRefunds(String),
     RefundCounter,
-    Dispute(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `dispute_id_to_key`.
+    Dispute(BytesN<32>),
     PaymentDisputes(String),
     DisputeCounter,
     Stream(String),
@@ -1199,9 +1225,13 @@ pub enum DataKey {
     Blacklisted(Address),
     MerchantAmountLimits(Address),
     GlobalAmountLimits,
-    IdempotencyKey(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `idempotency_key_to_key`.
+    IdempotencyKey(BytesN<32>),
     SubscriptionPlan(String),
-    Subscription(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `subscription_id_to_key`.
+    Subscription(BytesN<32>),
     PayerSubscriptions(Address),
     SubscriptionCounter,
     StreamCounter,
@@ -1317,6 +1347,18 @@ pub enum DataKey {
     MinPaymentDurationSecs,
     /// Maximum payment duration in seconds (default: 30 days).
     MaxPaymentDurationSecs,
+    /// Issue #1206: Admin-configurable default payment duration in seconds, used
+    /// by `create_payment`/batch variants when the caller supplies neither
+    /// `expires_at` nor `duration_secs`. Falls back to
+    /// `DEFAULT_PAYMENT_DURATION_SECS` when unset.
+    DefaultPaymentDurationSecs,
+    /// Issue #1206: Per-merchant override for the default payment duration in
+    /// seconds. Takes precedence over `DefaultPaymentDurationSecs` when set.
+    MerchantPaymentDurationSecs(Address),
+    /// Issue #1209: Optional deferred-settlement timestamp for a payment;
+    /// `settle_payment` rejects settlement while `now` is before this value.
+    /// Keyed by `payment_id`; absent means no deferred-settlement constraint.
+    PaymentSettleAt(String),
     /// Issue #489: Reverse index from metadata_hash to payment_id for order reconciliation.
     MetadataHashPayment(BytesN<32>),
     /// Issue #492: Customer profile keyed by (merchant_id, customer_id) for CRM features.
@@ -1472,6 +1514,26 @@ pub struct ContractHealth {
     pub active_payment_count: u32,
     pub fx_oracle_configured: bool,
     pub merchant_registry_configured: bool,
+}
+
+/// Issue #1205: Aggregated contract health/config view for dashboards and
+/// operator tooling. Unlike `ContractHealth`, this focuses on identity/config
+/// data (token, admin, multisig) rather than operational metrics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractInfo {
+    /// Current contract version string (see `version`/`get_version`).
+    pub version: String,
+    /// Consolidated global + creation pause state (see `get_pause_info`).
+    pub pause_info: PauseInfo,
+    /// Configured settlement token address, if one has been set via `set_usdc_token`.
+    pub token: Option<Address>,
+    /// Current contract admin, if initialized.
+    pub admin: Option<Address>,
+    /// Multi-sig approval threshold (see `get_multisig_config`).
+    pub multisig_threshold: u32,
+    /// Multi-sig signer set (see `get_multisig_config`).
+    pub multisig_signers: Vec<Address>,
 }
 #[cfg_attr(
     any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
@@ -2444,23 +2506,31 @@ impl RefundManager {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
-        // Issue #174: Check cooldown period after payment confirmation
+        // Issue #174 / #1207: Enforce a cooldown after payment confirmation, and a
+        // configurable cooldown between consecutive refunds on the same payment.
+        // The baseline is the most recent non-rejected/non-cancelled refund's
+        // `created_at` when one exists, otherwise the payment's `confirmed_at`.
         let confirmed_at = payment.confirmed_at.ok_or(Error::PaymentAlreadyProcessed)?;
         let now = env.ledger().timestamp();
         let cooldown_secs = Self::get_refund_cooldown_secs(env);
-        if now < confirmed_at + cooldown_secs {
-            return Err(Error::RefundCooldownNotElapsed);
-        }
 
-        // Sum existing refund amounts for this payment
+        // Sum existing refund amounts for this payment and track the most recent
+        // qualifying refund's timestamp for the cooldown baseline.
         let existing_refunds = Self::get_payment_refunds_internal(env, &payment_id);
         let mut total_refunded: i128 = 0;
+        let mut last_refund_at: Option<u64> = None;
         for id in existing_refunds.iter() {
             if let Ok(r) = Self::get_refund_internal(env, &id) {
                 if r.status != RefundStatus::Rejected && r.status != RefundStatus::Cancelled {
                     total_refunded += r.amount;
+                    last_refund_at = Some(last_refund_at.map_or(r.created_at, |t| t.max(r.created_at)));
                 }
             }
+        }
+
+        let cooldown_baseline = last_refund_at.unwrap_or(confirmed_at);
+        if now < cooldown_baseline.saturating_add(cooldown_secs) {
+            return Err(Error::RefundCooldownNotElapsed);
         }
 
         if total_refunded + refund_amount > payment.amount {
@@ -2555,6 +2625,79 @@ impl RefundManager {
         }
 
         Self::process_refund_internal(&env, &operator, refund_id)
+    }
+
+    /// Batch-process up to `max_batch` pending refunds in a single call.
+    ///
+    /// Issue #1199: there were batch entrypoints for payments
+    /// (`batch_expire`, `create_payments_batch`) and disputes
+    /// (`batch_create_disputes`), but refund processing still required one
+    /// invocation per refund. This reduces per-refund invocation overhead
+    /// for operators settling many approved refunds at once.
+    ///
+    /// Processes up to `max_batch` items (hard cap [`MAX_REFUND_BATCH`]).
+    /// Each `refund_id` is authorized exactly like [`Self::process_refund`]
+    /// (the caller must hold the settlement-operator or oracle role, or be
+    /// the refund's own requester with an already-approved refund) and is
+    /// then processed independently via `process_refund_internal`; a
+    /// failure on one item does not revert previously-succeeded items in
+    /// the same batch. Returns a per-item [`RefundBatchItemResult`] so
+    /// callers can tell which refunds completed and which failed (and why).
+    /// Emits `REFUND/BATCH_PROCESSED` with `(success_count, fail_count)`.
+    pub fn batch_process_refunds(
+        env: Env,
+        operator: Address,
+        refund_ids: Vec<String>,
+        max_batch: u32,
+    ) -> Result<Vec<RefundBatchItemResult>, Error> {
+        operator.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::require_not_blacklisted(&env, &operator)?;
+
+        let effective_max = max_batch.min(MAX_REFUND_BATCH);
+        if max_batch > MAX_REFUND_BATCH || refund_ids.len() > effective_max {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let has_settlement =
+            AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+
+        let mut results: Vec<RefundBatchItemResult> = vec![&env];
+        let mut success_count: u32 = 0;
+        let mut fail_count: u32 = 0;
+
+        for refund_id in refund_ids.iter() {
+            let outcome = Self::get_refund_internal(&env, &refund_id).and_then(|refund| {
+                Self::require_not_blacklisted(&env, &refund.requester)?;
+                let is_requester = operator == refund.requester;
+                if !(has_settlement || has_oracle || (is_requester && refund.approved)) {
+                    return Err(Error::Unauthorized);
+                }
+                Self::process_refund_internal(&env, &operator, refund_id.clone())
+            });
+
+            match outcome {
+                Ok(()) => {
+                    success_count = success_count.saturating_add(1);
+                    results.push_back(RefundBatchItemResult::Ok(refund_id.clone()));
+                }
+                Err(e) => {
+                    fail_count = fail_count.saturating_add(1);
+                    results.push_back(RefundBatchItemResult::Err(refund_id.clone(), e as u32));
+                }
+            }
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "REFUND"),
+                Symbol::new(&env, "BATCH_PROCESSED"),
+            ),
+            (success_count, fail_count),
+        );
+
+        Ok(results)
     }
 
     pub fn get_treasury_balance(env: Env) -> i128 {
@@ -3488,7 +3631,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
 
         let mut payment_disputes = Self::get_payment_disputes_internal(env, &payment_id);
         payment_disputes.push_back(dispute_id.clone());
@@ -3520,6 +3663,16 @@ impl RefundManager {
             .persistent()
             .set(&dispute_count_key, &new_dispute_count);
         Self::bump_ttl(env, &dispute_count_key, LONG_LIVE_TTL);
+
+        // Issue #1202: Maintain a per-merchant dispute index for the paginated
+        // get_merchant_disputes dashboard view.
+        let merchant_disputes_key = DataKey::MerchantDisputes(merchant_id.clone());
+        let mut merchant_disputes = Self::get_merchant_disputes_internal(env, &merchant_id);
+        merchant_disputes.push_back(dispute_id.clone());
+        env.storage()
+            .persistent()
+            .set(&merchant_disputes_key, &merchant_disputes);
+        Self::bump_ttl(env, &merchant_disputes_key, LONG_LIVE_TTL);
 
         // Issue #833: Cross-call MerchantRegistry so KYC scoring sees the dispute.
         if let Some(registry_address) = env
@@ -3627,7 +3780,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE_REVIEWED event
@@ -3829,7 +3982,7 @@ impl RefundManager {
             dispute.escalated = true;
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
             Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
             env.events().publish(
                 (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "ESCALATED")),
@@ -3842,7 +3995,7 @@ impl RefundManager {
         } else {
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
             Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
         }
 
@@ -3891,7 +4044,7 @@ impl RefundManager {
         dispute.payout_splits = splits;
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         Ok(())
@@ -3923,7 +4076,7 @@ impl RefundManager {
         dispute.escalated = true;
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &*dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &*dispute);
         Self::bump_dispute_ttl(env, dispute_id, &dispute.status);
         env.events().publish(
             (Symbol::new(env, "DISPUTE"), Symbol::new(env, "ESCALATED")),
@@ -4022,7 +4175,7 @@ impl RefundManager {
 
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
             Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
             env.events().publish(
@@ -4110,7 +4263,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
         Self::release_open_dispute_slot(&env, &dispute.disputer);
         env.events().publish(
@@ -4254,7 +4407,7 @@ impl RefundManager {
         dispute.resolution_notes = Some(resolution.notes.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(env, &dispute_id, &dispute.status);
         Self::release_open_dispute_slot(env, &dispute.disputer);
 
@@ -4330,7 +4483,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Store resolution note for record-keeping
@@ -4522,7 +4675,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
         Self::release_open_dispute_slot(&env, &dispute.disputer);
 
@@ -4852,7 +5005,7 @@ impl RefundManager {
             d.resolved_at = Some(env.ledger().timestamp());
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &d);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &d);
             Self::bump_dispute_ttl(&env, &dispute_id, &d.status);
             Self::release_open_dispute_slot(&env, &d.disputer);
         } else {
@@ -4861,7 +5014,7 @@ impl RefundManager {
             d.resolved_at = Some(env.ledger().timestamp());
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &d);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &d);
             Self::bump_dispute_ttl(&env, &dispute_id, &d.status);
             Self::release_open_dispute_slot(&env, &d.disputer);
         }
@@ -4984,7 +5137,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(env, dispute_id, &dispute.status);
 
         env.events().publish(
@@ -5034,6 +5187,17 @@ impl RefundManager {
         let dispute = Self::get_dispute_internal(&env, &dispute_id)?;
         if submitter != dispute.disputer && submitter != dispute.merchant_id {
             return Err(Error::Unauthorized);
+        }
+
+        // Issue #1208: Soroban's XDR codec already guarantees `evidence_hash`
+        // decodes to exactly 32 bytes (that's what `BytesN<32>` is), so the
+        // only "invalid format" a correctly-typed caller can still submit is
+        // the degenerate all-zero hash (e.g. an uninitialized/placeholder
+        // value never actually derived from `SHA-256(evidence)`). Reject it
+        // explicitly rather than anchoring a hash that can't correspond to
+        // real uploaded evidence.
+        if evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEvidenceFormat);
         }
 
         let key = DataKey::DisputeEvidenceHashes(dispute_id.clone());
@@ -5089,6 +5253,50 @@ impl RefundManager {
             }
         }
         Ok(disputes)
+    }
+
+    /// Issue #1202: Per-merchant paginated disputes view for the dashboard.
+    ///
+    /// Returns up to `limit` `Dispute` records (hard-capped at 100 per call)
+    /// starting at `offset` within the merchant's dispute index, in filing
+    /// order. When `status_filter` is `Some`, only disputes matching that
+    /// status are counted against `offset`/`limit`.
+    pub fn get_merchant_disputes(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+        status_filter: Option<DisputeStatus>,
+    ) -> Vec<Dispute> {
+        let dispute_ids = Self::get_merchant_disputes_internal(&env, &merchant_id);
+
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in dispute_ids.iter() {
+            let dispute = match Self::get_dispute_internal(&env, &id) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Some(status) = &status_filter {
+                if dispute.status != *status {
+                    continue;
+                }
+            }
+            if matched >= offset {
+                result.push_back(dispute);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     pub fn get_dispute_summary(env: Env) -> DisputeSummary {
@@ -5249,7 +5457,7 @@ impl RefundManager {
     fn get_dispute_internal(env: &Env, dispute_id: &String) -> Result<Dispute, Error> {
         env.storage()
             .persistent()
-            .get(&DataKey::Dispute(dispute_id.clone()))
+            .get(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)))
             .ok_or(Error::DisputeNotFound)
     }
 
@@ -5257,6 +5465,14 @@ impl RefundManager {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentDisputes(payment_id.clone()))
+            .unwrap_or_else(|| vec![env])
+    }
+
+    /// Issue #1202: Load the append-only index of dispute IDs filed against a merchant.
+    fn get_merchant_disputes_internal(env: &Env, merchant_id: &Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantDisputes(merchant_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
@@ -5451,7 +5667,7 @@ impl RefundManager {
         };
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -5502,7 +5718,7 @@ impl RefundManager {
         if env
             .storage()
             .persistent()
-            .has(&DataKey::Subscription(subscription_id.clone()))
+            .has(&DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)))
         {
             return Err(Error::PaymentAlreadyExists);
         }
@@ -5549,7 +5765,7 @@ impl RefundManager {
         };
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -5599,6 +5815,48 @@ impl RefundManager {
             }
         }
         subscriptions
+    }
+
+    /// Issue #1204: Returns the payer's currently active subscriptions for
+    /// wallet/UI display, paginated and hard-capped at 100 per call.
+    ///
+    /// Filters the payer's full subscription history down to
+    /// `status == SubscriptionStatus::Active` before applying `offset`/`limit`,
+    /// so a page always contains up to `limit` active subscriptions when that
+    /// many remain.
+    pub fn get_active_subscriptions_for_payer(
+        env: Env,
+        payer: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Subscription> {
+        let subscription_ids = Self::get_payer_subscriptions_internal(&env, &payer);
+
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in subscription_ids.iter() {
+            let sub = match Self::get_subscription_internal(&env, &id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if sub.status != SubscriptionStatus::Active {
+                continue;
+            }
+            if matched >= offset {
+                result.push_back(sub);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     /// Issue #633: List subscribers to a plan, paginated.
@@ -5669,7 +5927,7 @@ impl RefundManager {
 
         subscription.status = SubscriptionStatus::Paused;
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -5706,7 +5964,7 @@ impl RefundManager {
         subscription.resume_at = Some(resume_timestamp);
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -5782,7 +6040,7 @@ impl RefundManager {
         // Only charge Active subscriptions.
         if subscription.status != SubscriptionStatus::Active {
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
             return Ok(subscription.status);
@@ -5792,7 +6050,7 @@ impl RefundManager {
         if let Some(trial_ends) = subscription.trial_ends_at {
             if now < trial_ends {
                 env.storage().persistent().set(
-                    &DataKey::Subscription(subscription_id.clone()),
+                    &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                     &subscription,
                 );
                 return Err(Error::TrialActive);
@@ -5810,7 +6068,7 @@ impl RefundManager {
         if now < due {
             // Not yet due — nothing to do.
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
             return Ok(subscription.status);
@@ -5904,7 +6162,7 @@ impl RefundManager {
             }
 
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
 
@@ -5945,7 +6203,7 @@ impl RefundManager {
                 Self::remove_active_subscription(&env, &subscription_id);
 
                 env.storage().persistent().set(
-                    &DataKey::Subscription(subscription_id.clone()),
+                    &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                     &subscription,
                 );
 
@@ -5969,7 +6227,7 @@ impl RefundManager {
                 subscription.next_retry_at = Some(next_retry);
 
                 env.storage().persistent().set(
-                    &DataKey::Subscription(subscription_id.clone()),
+                    &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                     &subscription,
                 );
 
@@ -6049,7 +6307,7 @@ impl RefundManager {
             .timestamp()
             .saturating_add(subscription.interval_secs);
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -6117,7 +6375,7 @@ impl RefundManager {
 
         subscription.status = SubscriptionStatus::Cancelled;
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -6278,7 +6536,7 @@ impl RefundManager {
         subscription.next_payment_at = now.saturating_add(subscription.interval_secs);
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -6344,7 +6602,7 @@ impl RefundManager {
         let metered_amount = units_used.saturating_mul(unit_price);
         subscription.amount = metered_amount;
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -6513,7 +6771,7 @@ impl RefundManager {
             let mut subscription = match env
                 .storage()
                 .persistent()
-                .get::<DataKey, Subscription>(&DataKey::Subscription(subscription_id.clone()))
+                .get::<DataKey, Subscription>(&DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)))
             {
                 Some(s) => s,
                 None => continue,
@@ -6612,7 +6870,7 @@ impl RefundManager {
             }
 
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
 
@@ -6651,7 +6909,7 @@ impl RefundManager {
     ) -> Result<Subscription, Error> {
         env.storage()
             .persistent()
-            .get(&DataKey::Subscription(subscription_id.clone()))
+            .get(&DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)))
             .ok_or(Error::PaymentNotFound)
     }
 
@@ -6684,7 +6942,7 @@ impl RefundManager {
     }
 
     fn bump_dispute_ttl(env: &Env, dispute_id: &String, status: &DisputeStatus) {
-        let key = DataKey::Dispute(dispute_id.clone());
+        let key = DataKey::Dispute(dispute_id_to_key(&env, &dispute_id));
         Self::bump_ttl(env, &key, Self::dispute_ttl(status));
     }
 
@@ -6829,6 +7087,32 @@ impl PaymentProcessor {
             active_payment_count,
             fx_oracle_configured,
             merchant_registry_configured,
+        }
+    }
+
+    /// Issue #1205: Aggregated contract health/config view combining version,
+    /// consolidated global/creation pause state, the configured settlement
+    /// token, the current admin, and the multi-sig governance configuration.
+    ///
+    /// Read-only: requires no authentication, intended for dashboards and
+    /// external health checks.
+    pub fn get_contract_info(env: Env) -> ContractInfo {
+        let version = Self::version(env.clone());
+        let pause_info = Self::get_pause_info(env.clone());
+        let token = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken);
+        let admin = AccessControl::get_admin(&env);
+        let (multisig_threshold, multisig_signers) = AccessControl::get_multisig_config(&env);
+
+        ContractInfo {
+            version,
+            pause_info,
+            token,
+            admin,
+            multisig_threshold,
+            multisig_signers,
         }
     }
 
@@ -7110,6 +7394,89 @@ impl PaymentProcessor {
             .persistent()
             .set(&DataKey::MaxPaymentDurationSecs, &max_secs);
         Ok(())
+    }
+
+    /// Issue #1206: Admin-configurable default payment duration (seconds),
+    /// used by `create_payment`/batch variants when the caller supplies
+    /// neither `expires_at` nor `duration_secs`. Bounded by the existing
+    /// Min/MaxPaymentDurationSecs policy so it can never resolve to an
+    /// expiry outside the admin-configured safe window.
+    pub fn set_default_payment_duration(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DefaultPaymentDurationSecs, &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Per-merchant override for the default payment duration
+    /// (seconds). Self-service: the merchant authorizes the call and sets
+    /// their own override, bounded by the same Min/MaxPaymentDurationSecs
+    /// policy as the global default.
+    pub fn set_merchant_payment_duration(
+        env: Env,
+        merchant_id: Address,
+        secs: u64,
+    ) -> Result<(), Error> {
+        merchant_id.require_auth();
+        if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantPaymentDurationSecs(merchant_id), &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Read the admin-configured min/max payment duration bounds,
+    /// falling back to the same defaults used by `create_payment`.
+    fn payment_duration_bounds(env: &Env) -> (u64, u64) {
+        let min_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MinPaymentDurationSecs)
+            .unwrap_or(CREATE_PAYMENT_WINDOW_SECS);
+        let max_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MaxPaymentDurationSecs)
+            .unwrap_or(30 * 24 * 3600);
+        (min_duration, max_duration)
+    }
+
+    /// Issue #1206: Resolve the effective default payment duration (seconds)
+    /// for a merchant when the caller does not supply `duration_secs` or
+    /// `expires_at`. Resolution order: per-merchant override, then the
+    /// admin-configured global default, then the compile-time
+    /// `DEFAULT_PAYMENT_DURATION_SECS` constant.
+    fn get_default_payment_duration(env: &Env, merchant_id: &Address) -> u64 {
+        if let Some(secs) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MerchantPaymentDurationSecs(merchant_id.clone()))
+        {
+            return secs;
+        }
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::DefaultPaymentDurationSecs)
+            .unwrap_or(DEFAULT_PAYMENT_DURATION_SECS)
     }
 
     /// Return the accumulated treasury balance collected via settlement fees.
@@ -8254,7 +8621,7 @@ impl PaymentProcessor {
         // Idempotency check: if client_token was already used, return the existing payment
         // (or error if it maps to a different payment_id).
         if let Some(ref token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, token));
             if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                 if existing_id == args.payment_id {
                     return Self::get_payment_internal(&env, &args.payment_id);
@@ -8288,14 +8655,28 @@ impl PaymentProcessor {
             }
         }
 
-        // Issue #79: Cross-contract validate merchant is verified and active
-        if let Some(registry_address) = env
+        // Issue #1211 (perf): Read `MerchantRegistryAddress` and build the
+        // registry client at most once for this call, instead of re-reading
+        // persistent storage and re-constructing the client in each of the
+        // three registry-related blocks below. Also cache the `Merchant`
+        // fetched here so the KYC-tier-limits block further down can reuse
+        // it instead of issuing a second identical cross-contract
+        // `get_merchant` call. No behavior changes: every block still only
+        // runs when a registry is configured, and `cached_merchant` is only
+        // ever populated with the exact merchant this block already
+        // validated (active/not-suspended/whitelisted), so reusing it later
+        // in the same transaction observes no different state.
+        let registry_address_opt: Option<Address> = env
             .storage()
             .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress);
+        let registry_client_opt = registry_address_opt
+            .as_ref()
+            .map(|addr| crate::merchant_registry::MerchantRegistryClient::new(&env, addr));
+        let mut cached_merchant: Option<crate::merchant_registry::Merchant> = None;
+
+        // Issue #79: Cross-contract validate merchant is verified and active
+        if let Some(ref registry_client) = registry_client_opt {
             match registry_client.try_get_merchant(&args.merchant_id) {
                 Ok(Ok(merchant)) => {
                     // Require merchant to be active and not suspended
@@ -8312,6 +8693,7 @@ impl PaymentProcessor {
                             _ => return Err(Error::PayerNotWhitelisted),
                         }
                     }
+                    cached_merchant = Some(merchant);
                 }
                 _ => {
                     // If registry lookup fails, reject the payment
@@ -8327,13 +8709,7 @@ impl PaymentProcessor {
         Self::enforce_amount_limits(&env, &args.merchant_id, args.amount)?;
 
         // Issue #777: Enforce KYC tier limits (single-payment and monthly volume caps) via MerchantRegistry
-        if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+        if let Some(ref registry_client) = registry_client_opt {
             match registry_client.try_check_kyc_limit(&args.merchant_id, &args.amount) {
                 Ok(Ok(())) => {}
                 // Issue #1014: surface which specific tier limit tripped
@@ -8353,25 +8729,21 @@ impl PaymentProcessor {
             }
         }
 
-        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured
-        if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured.
+        // Reuses `cached_merchant` from the Issue #79 check above instead of
+        // issuing a second `get_merchant` cross-contract call for the same merchant.
+        if let (Some(ref merchant), Some(ref registry_client)) =
+            (cached_merchant.as_ref(), registry_client_opt.as_ref())
         {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            if let Ok(Ok(merchant)) = registry_client.try_get_merchant(&args.merchant_id) {
-                if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
-                    if let Some(min) = limits.min {
-                        if args.amount < min {
-                            return Err(Error::AmountBelowMin);
-                        }
+            if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
+                if let Some(min) = limits.min {
+                    if args.amount < min {
+                        return Err(Error::AmountBelowMin);
                     }
-                    if let Some(max) = limits.max {
-                        if args.amount > max {
-                            return Err(Error::AmountAboveMax);
-                        }
+                }
+                if let Some(max) = limits.max {
+                    if args.amount > max {
+                        return Err(Error::AmountAboveMax);
                     }
                 }
             }
@@ -8461,13 +8833,25 @@ impl PaymentProcessor {
                 ts
             }
             None => {
-                let duration = args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS);
+                let duration = args
+                    .duration_secs
+                    .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id));
                 if duration < min_duration || duration > max_duration {
                     return Err(Error::InvalidExpiry);
                 }
                 now.saturating_add(duration)
             }
         };
+
+        // Issue #1209: Validate an optional deferred-settlement timestamp. It must
+        // be strictly in the future and no later than the payment's own expiry,
+        // otherwise the payment could expire before `settle_payment` is ever
+        // allowed to run.
+        if let Some(settle_at) = args.settle_at {
+            if settle_at <= now || settle_at > resolved_expires_at {
+                return Err(Error::InvalidExpiry);
+            }
+        }
 
         let payment = PaymentCharge {
             payment_id: args.payment_id.clone(),
@@ -8587,7 +8971,7 @@ impl PaymentProcessor {
         // Issue #399: Persist idempotency key → payment_id mapping with a TTL that matches
         // the payment expiry window so keys do not accumulate indefinitely.
         if let Some(token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             env.storage().persistent().set(&key, &args.payment_id);
             // TTL in ledgers ≈ (expires_at − now) / 5s per ledger, clamped to SHORT_LIVE_TTL min.
             let payment_duration_secs = resolved_expires_at.saturating_sub(now);
@@ -8598,7 +8982,7 @@ impl PaymentProcessor {
             // Store reverse mapping so cancel/expire can clean up the token.
             // We prefix the payment_id with "r:" to avoid collision with real tokens.
             let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-            let rev_key = DataKey::IdempotencyKey(rev_token_id);
+            let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
             env.storage().persistent().set(&rev_key, &token);
             Self::bump_ttl(&env, &rev_key, ttl_ledgers);
         }
@@ -8609,6 +8993,18 @@ impl PaymentProcessor {
                 .persistent()
                 .set(&storage_key, &args.payment_id);
             Self::bump_ttl(&env, &storage_key, PAYMENT_IDEMPOTENCY_TTL_LEDGERS);
+        }
+
+        // Issue #1209: Persist the deferred-settlement timestamp so
+        // `settle_payment` can enforce it; TTL mirrors the payment's own expiry.
+        if let Some(settle_at) = args.settle_at {
+            let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+            env.storage().persistent().set(&settle_key, &settle_at);
+            let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+            let ledgers_per_sec: u64 = 5;
+            let ttl_ledgers =
+                ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
+            Self::bump_ttl(&env, &settle_key, ttl_ledgers);
         }
 
         Ok(payment)
@@ -8860,7 +9256,7 @@ impl PaymentProcessor {
 
             // Check idempotency
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != args.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -8880,12 +9276,20 @@ impl PaymentProcessor {
         for args in args_list.iter() {
             let resolved_expires_at = match args.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    args.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = args.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -8929,6 +9333,13 @@ impl PaymentProcessor {
             Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
 
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = args.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
             // Issue #489: Store reverse index for metadata_hash → payment_id lookup in batch
             if let Some(ref hash) = args.metadata_hash {
                 let key = DataKey::MetadataHashPayment(hash.clone());
@@ -8957,7 +9368,7 @@ impl PaymentProcessor {
 
             // Issue #399: Persist idempotency key with TTL matching payment expiry window.
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, token));
                 env.storage().persistent().set(&key, &args.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -8966,7 +9377,7 @@ impl PaymentProcessor {
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 // Reverse mapping for cleanup on cancel/expire.
                 let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -9149,7 +9560,7 @@ impl PaymentProcessor {
             }
 
             if let Some(ref token) = req.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != req.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -9167,12 +9578,20 @@ impl PaymentProcessor {
         for req in payments.iter() {
             let resolved_expires_at = match req.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(req.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    req.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = req.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -9213,6 +9632,13 @@ impl PaymentProcessor {
             Self::extend_payment_ttl(&env, &req.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &req.payment_id, payment.expires_at);
 
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = req.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(req.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
             if let Some(ref hash) = req.metadata_hash {
                 let key = DataKey::MetadataHashPayment(hash.clone());
                 env.storage().persistent().set(&key, &req.payment_id);
@@ -9239,7 +9665,7 @@ impl PaymentProcessor {
             );
 
             if let Some(ref token) = req.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, token));
                 env.storage().persistent().set(&key, &req.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -9247,7 +9673,7 @@ impl PaymentProcessor {
                     ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 let rev_token_id = Self::rev_key_for(&env, &req.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -9356,21 +9782,32 @@ impl PaymentProcessor {
         // The expected total received is the base amount plus any validated tip.
         let expected_total = payment.amount.saturating_add(tip.unwrap_or(0));
 
-        // Get merchant-specific tolerance if available, otherwise use global default
-        let merchant_tolerance = if let Some(registry_address) = env
+        // Issue #1211 (perf): Read `MerchantRegistryAddress` and build the
+        // registry client once for the rest of this call, instead of
+        // re-reading persistent storage and re-constructing the client in
+        // each of the registry-related blocks below. Also cache the
+        // `Merchant` fetched here (deterministic for this transaction, so a
+        // later block observes exactly the same result a fresh
+        // `get_merchant` call would) so it can be reused instead of issuing
+        // a second identical cross-contract call further down.
+        let registry_client_opt = env
             .storage()
             .persistent()
             .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            match registry_client.try_get_merchant(&payment.merchant_id) {
-                Ok(Ok(merchant)) => merchant.payment_tolerance,
-                _ => None,
-            }
-        } else {
-            None
-        };
+            .map(|registry_address| {
+                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address)
+            });
+
+        // Get merchant-specific tolerance if available, otherwise use global default
+        let cached_merchant: Option<crate::merchant_registry::Merchant> = registry_client_opt
+            .as_ref()
+            .and_then(|registry_client| {
+                match registry_client.try_get_merchant(&payment.merchant_id) {
+                    Ok(Ok(merchant)) => Some(merchant),
+                    _ => None,
+                }
+            });
+        let merchant_tolerance = cached_merchant.as_ref().and_then(|m| m.payment_tolerance);
 
         // Scale tolerance by token decimals: 1 unit in the smallest denomination per decimal place.
         // USDC has 7 decimals on Stellar (stroops); other tokens may differ.
@@ -9395,16 +9832,9 @@ impl PaymentProcessor {
         };
 
         // Use merchant tolerance if set, otherwise use global tolerance, otherwise base tolerance
-        let global_tolerance = if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            registry_client.get_global_payment_tolerance()
-        } else {
-            PAYMENT_TOLERANCE
+        let global_tolerance = match registry_client_opt.as_ref() {
+            Some(registry_client) => registry_client.get_global_payment_tolerance(),
+            None => PAYMENT_TOLERANCE,
         };
 
         let tolerance = merchant_tolerance.unwrap_or(global_tolerance);
@@ -9444,15 +9874,7 @@ impl PaymentProcessor {
         if new_status == PaymentStatus::Overpaid {
             let extra = total_received.saturating_sub(payment.amount);
             if extra > 0 {
-                if let Some(registry_address) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-                {
-                    let registry_client = crate::merchant_registry::MerchantRegistryClient::new(
-                        &env,
-                        &registry_address,
-                    );
+                if let Some(registry_client) = registry_client_opt.as_ref() {
                     match registry_client
                         .try_check_monthly_limit_only(&payment.merchant_id, &extra)
                     {
@@ -9555,21 +9977,13 @@ impl PaymentProcessor {
         }
 
         // Issue #162: Merchant-configurable partial payment policy.
+        // Issue #1211 (perf): reuse `cached_merchant` fetched earlier in this
+        // call instead of a second `get_merchant` cross-contract call.
         if new_status == PaymentStatus::PartiallyPaid && !is_partial_mode {
-            let partial_allowed = if let Some(registry_address) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-            {
-                let registry_client =
-                    crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-                match registry_client.try_get_merchant(&payment.merchant_id) {
-                    Ok(Ok(merchant)) => merchant.partial_payment_allowed,
-                    _ => false,
-                }
-            } else {
-                false
-            };
+            let partial_allowed = cached_merchant
+                .as_ref()
+                .map(|merchant| merchant.partial_payment_allowed)
+                .unwrap_or(false);
 
             if !partial_allowed {
                 new_status = PaymentStatus::Failed;
@@ -10691,6 +11105,18 @@ impl PaymentProcessor {
 
         if payment.status != PaymentStatus::Confirmed {
             return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        // Issue #1209: Reject settlement before the payment's optional deferred
+        // `settle_at` timestamp, supporting escrow-like deferred release.
+        if let Some(settle_at) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::PaymentSettleAt(payment_id.clone()))
+        {
+            if env.ledger().timestamp() < settle_at {
+                return Err(Error::SettlementNotYetDue);
+            }
         }
 
         // Issue #1031: Enforce the merchant's configured settlement schedule
@@ -11895,6 +12321,7 @@ impl PaymentProcessor {
             payer_muxed_id: None,
             allow_partial: None,
             tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -12010,6 +12437,7 @@ impl PaymentProcessor {
             payer_muxed_id: None,
             allow_partial: None,
             tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -12470,11 +12898,11 @@ impl PaymentProcessor {
     /// client_token can be reused after expiry or cancellation.
     fn remove_idempotency_key(env: &Env, payment_id: &String) {
         let rev_token_id = Self::rev_key_for(env, payment_id);
-        let rev_key = DataKey::IdempotencyKey(rev_token_id);
+        let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(env, &rev_token_id));
         if let Some(token) = env.storage().persistent().get::<DataKey, String>(&rev_key) {
             env.storage()
                 .persistent()
-                .remove(&DataKey::IdempotencyKey(token));
+                .remove(&DataKey::IdempotencyKey(idempotency_key_to_key(env, &token)));
             env.storage().persistent().remove(&rev_key);
         }
     }
@@ -14194,20 +14622,18 @@ pub use payment_link::{
     CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
     PaymentLinkManagerClient,
 };
-#[cfg(test)]
-mod feature_tests;
-#[cfg(test)]
-mod memo_test;
-#[cfg(test)]
-mod merchant_auth_test;
-#[cfg(test)]
-mod partial_overpaid_test;
-#[cfg(test)]
-mod pause_test;
-#[cfg(test)]
-mod payment_link_test;
-#[cfg(test)]
-mod payment_metadata_test;
+// Pre-existing/unrelated fix (found while adding FX conversion property
+// tests for issue #1186): `feature_tests`, `memo_test`, `merchant_auth_test`,
+// `partial_overpaid_test`, `pause_test`, `payment_link_test`,
+// `payment_metadata_test`, `test`, `stream_test`, `subscription_test`, and
+// `pub mod stream` (plus its `pub use`) were each declared a second time
+// further down in this file (see the consolidated `#[cfg(test)] mod ...;`
+// list below, and `pub mod stream;` / `pub use stream::{...}` already
+// declared near the top of this file), which is a hard compile error
+// (E0428/E0255, "the name `..` is defined multiple times") for every
+// `cargo test` build, including the one that runs this issue's new
+// property tests. Only the non-duplicated declarations are kept here;
+// the rest live solely in the consolidated list.
 #[cfg(test)]
 mod payment_retry_test;
 #[cfg(test)]
@@ -14215,30 +14641,43 @@ mod payment_tip_test;
 #[cfg(test)]
 mod test;
 
-// Payment streaming module (Issue #127)
-pub mod stream;
+// Payment streaming module (Issue #127) - declared via `pub mod stream;` above.
 pub use stream::{PaymentStream, PaymentStreaming, StreamError, StreamStatus};
 #[cfg(test)]
 mod stream_test;
 #[cfg(test)]
 mod stream_vesting_test;
-#[cfg(test)]
-mod subscription_test;
 
+// Note (pre-existing bug, fixed while touching this file for #1206/#1207/#1209/#1210):
+// `test`, `stream_test`, `subscription_test`, `feature_tests`, `memo_test`,
+// `partial_overpaid_test`, `pause_test`, `payment_link_test`, `payment_metadata_test`,
+// and `merchant_auth_test` were each declared a second time below (duplicate `mod`
+// items), which is a hard compile error (E0428 - duplicate module definition).
+// `pub mod stream;` was likewise declared twice. The duplicate declarations are
+// removed here; every module below is declared exactly once now.
+// NOTE (pre-existing, unrelated to #1199): this tail of lib.rs previously declared
+// `pub mod stream;` (plus a redundant subset re-export) and roughly a dozen
+// `#[cfg(test)] mod <name>;` test-module declarations a *second* time, duplicating
+// declarations already made earlier in this file / just below. Rust rejects a module
+// being declared twice in the same scope (E0428), so the crate could not compile at
+// all in this state. Consolidated to one declaration per module so the crate (and the
+// new `batch_process_refunds` entrypoint added for #1199) can build.
 #[cfg(test)] mod test;
 #[cfg(test)] mod stream_test;
+#[cfg(test)] mod stream_vesting_test;
 #[cfg(test)] mod subscription_test;
 #[cfg(test)] mod arbitrage_test;
 #[cfg(test)] mod auth_test;
 #[cfg(test)] mod batch_payment_test;
+#[cfg(test)] mod batch_refund_test;
 #[cfg(test)] mod dex_router_test;
 #[cfg(test)] mod dispute_test;
 #[cfg(test)] mod escalate_disputes_test;
-#[cfg(test)] mod feature_tests;
 #[cfg(test)] mod fx_oracle_test;
 #[cfg(test)] mod htlc_test;
 #[cfg(test)] mod integration_test;
 #[cfg(test)] mod memo_test;
+#[cfg(test)] mod merchant_auth_test;
 #[cfg(test)] mod merchant_ranking_test;
 #[cfg(test)] mod merchant_registry_test;
 #[cfg(test)] mod merchant_reserve_test;
@@ -14249,12 +14688,13 @@ mod subscription_test;
 #[cfg(test)] mod pause_test;
 #[cfg(test)] mod payment_link_test;
 #[cfg(test)] mod payment_metadata_test;
+#[cfg(test)] mod payment_retry_test;
+#[cfg(test)] mod payment_tip_test;
 #[cfg(test)] mod proptests;
 #[cfg(test)] mod router_allowlist_test;
 #[cfg(test)] mod settlement_test;
 #[cfg(test)] mod swap_test;
 #[cfg(test)] mod invoice_test;
-#[cfg(test)] mod merchant_auth_test;
 #[cfg(test)] mod account_abstraction_test;
 #[cfg(test)] mod meta_transaction_test;
 #[cfg(test)] mod merkle_distributor_test;

@@ -19,6 +19,8 @@ For security vulnerabilities, see [SECURITY.md](SECURITY.md) instead of opening 
    - [Adding Contract Events](#72-adding-contract-events)
    - [`lib.rs` Module Boundaries](#73-librs-module-boundaries-issue-1222)
    - [Error Code Documentation Sync](#74-error-code-documentation-sync-issue-1193)
+   - [Entrypoint Reference](#74-entrypoint-reference)
+   - [Storage Key Layout Reference](#75-storage-key-layout-reference)
 8. [Issue Workflow](#8-issue-workflow)
 
 ---
@@ -352,6 +354,7 @@ Before marking a PR ready for review:
 - [ ] PR title follows Conventional Commits format
 - [ ] PR description explains *what* changed, *why*, and how it was tested
 - [ ] If your change affects the compiled contract (new dependency, new public function, large refactor), run `./scripts/update-wasm-baseline.sh` and commit the updated `.wasm-size-baseline` so the CI size gate compares against the right number
+- [ ] If your change implements, removes, or changes the status of a feature listed in the README's ["Feature Status"](README.md#feature-status) matrix (Issue #1189) — e.g. moves the DEX router from "Partial (simulated)" to "Implemented" once real Soroswap routing lands (ADR-0005) — update that row in the same PR
 
 ### Changelog Format
 
@@ -374,9 +377,18 @@ Follow [Keep a Changelog](https://keepachangelog.com/) categories:
 ### Added
 - **Issue #831 / PR #123**: Multi-payee payment streams with proportional withdraw.
 
+### Changed
+- **Issue #1013 / PR #124**: `withdraw_treasury` now allows single-admin execution
+  below `TreasurySingleAdminThreshold`; larger withdrawals still require multisig.
+
 ### Fixed
 - **PR #123**: `payment_id` format validation now enforces 3–64 alphanumeric/-/_ characters.
 ```
+
+A single PR commonly only needs one of these subsections — add `### Changed` /
+`### Fixed` / etc. only when that category applies, in the order given by
+[Keep a Changelog](https://keepachangelog.com/) (`Added`, `Changed`, `Deprecated`,
+`Removed`, `Fixed`, `Security`).
 
 Use the `skip-changelog` label only for CI/CD, docs, or internal refactors with no user-facing impact.
 
@@ -499,6 +511,31 @@ pairs don't exactly match the `Error` enum's. Run it locally before pushing if y
 ```bash
 node scripts/check-error-codes-doc-sync.js
 ```
+## 7.4. Entrypoint Reference
+
+[`docs/entrypoint-reference.md`](docs/entrypoint-reference.md) is the single reference
+listing every public contract entrypoint (every `pub fn` inside a `#[contractimpl] impl`
+block) across all FluxaPay contracts, with its signature, authorization requirement,
+emitted events, and the `Error` variants it can return.
+
+**Any PR that adds, removes, or changes the signature, auth, or events of a `pub fn`
+entrypoint must update the corresponding entry in `docs/entrypoint-reference.md` in the
+same PR.** This keeps the reference trustworthy without requiring a separate audit pass —
+reviewers should treat a missing update here the same as a missing CHANGELOG entry.
+
+---
+
+## 7.5. Storage Key Layout Reference
+
+[`docs/storage-layout.md`](docs/storage-layout.md) lists every `DataKey` /
+`MerchantDataKey` (and other contract-local key enum) variant, how its TTL is managed,
+and the migration history of keys that have changed shape or location.
+
+**Any PR that adds, removes, renames, or changes the stored type of a storage key must
+update the corresponding table/section of `docs/storage-layout.md` in the same PR.** If
+the change is breaking per [`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md) (see
+"Storage Key Changes" there), also add a dated entry under `docs/storage-layout.md`'s own
+"Migration notes" section, in addition to the required `CHANGELOG.md` entry.
 
 ---
 
