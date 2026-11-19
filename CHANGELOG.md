@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- **Issue #1219**: Nightly scheduled CI (`.github/workflows/nightly.yml`) runs the full test suite with all features, default features, and a serial pass, with `PROPTEST_CASES=4096`. A failed scheduled run opens or comments on a `nightly-failure` issue. Documented in `CONTRIBUTING.md`.
+- **Issue #1219 / PR #1230**: Nightly scheduled CI (`.github/workflows/nightly.yml`) runs the full test suite with all features, default features, and a serial pass, with `PROPTEST_CASES=4096`. A failed scheduled run opens or comments on a `nightly-failure` issue. Documented in `CONTRIBUTING.md`.
 - **Issue #1039**: SSE broadcast for all 6 dispute lifecycle events (`dispute.opened`, `.responded`, `.escalated`, `.vote_cast`, `.resolved`, `.auto_resolved`) on `GET /v1/events/stream`, filterable by `payment_id`/`dispute_id`. Previously `SSEManager.broadcast` was never called by the event consumer for any event type. New dispute detail dashboard page subscribes live.
 - **Issue #1035**: `payer_muxed_id` now flows end-to-end from `verify_payment`'s M-address extraction through the `PAYMENT/VERIFIED` event, the indexer's `payments` table (new `payer_muxed_id` column, migration `009_payments_muxed_id.sql`), and the REST API (`GET /payments/:paymentId`, filterable on `GET /v1/payments`).
 - **Issue #1024**: Four new `cargo-fuzz` targets — `fuzz_refund_fee_calculation`, `fuzz_dispute_bond_computation`, `fuzz_stream_accrual`, `fuzz_metadata_validation` — covering refund fee arithmetic, the (previously unused) proportional dispute bond formula from issue #820, lazy stream accrual, and metadata size limits. Added to the weekly `fuzz.yml` matrix.
