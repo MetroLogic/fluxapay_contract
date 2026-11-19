@@ -1,5 +1,18 @@
 # Merkle Tree Batch Payment Distributor
 
+> **Status: implemented and live**, not a draft or events-only placeholder. `create_batch`,
+> `claim_batch_payment`, `defund_batch`, `get_batch`, and `is_batch_claimed` are real entry
+> points on `impl PaymentProcessor` in `fluxapay/src/lib.rs` (lines ~13923–14101 at the time of
+> writing), backed by the hashing/bitmap helpers in `fluxapay/src/merkle_distributor.rs` and the
+> `MerkleDistribution` storage type in `fluxapay/src/types.rs`. `create_batch` pulls
+> `total_amount` into contract custody via `token::TokenClient::transfer`, `claim_batch_payment`
+> verifies the proof and pays `recipient` directly, and `defund_batch` returns the unclaimed
+> balance to the creator after `expires_at` — none of this is simulated or emit-only. Nine
+> passing unit tests in `fluxapay/src/merkle_distributor_test.rs` cover the full flow (see
+> "Testing" below). This guide was previously flagged as possibly ahead of the code
+> (issue #1188); that check has been re-verified against the current `lib.rs` and the feature is
+> confirmed implemented, so no "unimplemented" notice is warranted here.
+
 The Merkle Tree Batch Payment Distributor lets a payer commit a single 32-byte Merkle root and fund the total amount in one transaction. Each recipient then independently claims their allocation by submitting an O(log N) cryptographic inclusion proof. This avoids the operation-count and transaction-size limits of a naive batch transfer, making it practical for payroll- and airdrop-style bulk disbursements. Resolves issues #1026 and #1027 (duplicates of the same feature request).
 
 ## Overview

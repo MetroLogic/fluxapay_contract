@@ -156,6 +156,15 @@ Merchant lifecycle and response steps: [docs/disputes.md](docs/disputes.md). For
 
 See the full guide: [docs/payment-streams-guide.md](docs/payment-streams-guide.md)
 
+### 6) Merkle batch payments (payroll / airdrops)
+
+•⁠ ⁠Payer commits one 32-byte Merkle root over `(index, recipient, amount)` allocations and funds the total in a single transaction
+•⁠ ⁠Each recipient claims their own allocation with an O(log N) inclusion proof — no per-recipient transaction from the payer
+•⁠ ⁠Claims are tracked with a per-distribution bitmap to reject double-claims
+•⁠ ⁠After expiry, the creator reclaims any unclaimed balance
+
+See the full guide: [docs/merkle-batch-payments.md](docs/merkle-batch-payments.md)
+
 ## Tech Stack (Planned)
 
 •⁠ ⁠*Blockchain:* Stellar  
