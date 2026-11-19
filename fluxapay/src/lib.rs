@@ -1487,6 +1487,26 @@ pub struct ContractHealth {
     pub fx_oracle_configured: bool,
     pub merchant_registry_configured: bool,
 }
+
+/// Issue #1205: Aggregated contract health/config view for dashboards and
+/// operator tooling. Unlike `ContractHealth`, this focuses on identity/config
+/// data (token, admin, multisig) rather than operational metrics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractInfo {
+    /// Current contract version string (see `version`/`get_version`).
+    pub version: String,
+    /// Consolidated global + creation pause state (see `get_pause_info`).
+    pub pause_info: PauseInfo,
+    /// Configured settlement token address, if one has been set via `set_usdc_token`.
+    pub token: Option<Address>,
+    /// Current contract admin, if initialized.
+    pub admin: Option<Address>,
+    /// Multi-sig approval threshold (see `get_multisig_config`).
+    pub multisig_threshold: u32,
+    /// Multi-sig signer set (see `get_multisig_config`).
+    pub multisig_signers: Vec<Address>,
+}
 #[cfg_attr(
     any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
     contractimpl
@@ -3608,6 +3628,16 @@ impl RefundManager {
             .set(&dispute_count_key, &new_dispute_count);
         Self::bump_ttl(env, &dispute_count_key, LONG_LIVE_TTL);
 
+        // Issue #1202: Maintain a per-merchant dispute index for the paginated
+        // get_merchant_disputes dashboard view.
+        let merchant_disputes_key = DataKey::MerchantDisputes(merchant_id.clone());
+        let mut merchant_disputes = Self::get_merchant_disputes_internal(env, &merchant_id);
+        merchant_disputes.push_back(dispute_id.clone());
+        env.storage()
+            .persistent()
+            .set(&merchant_disputes_key, &merchant_disputes);
+        Self::bump_ttl(env, &merchant_disputes_key, LONG_LIVE_TTL);
+
         // Issue #833: Cross-call MerchantRegistry so KYC scoring sees the dispute.
         if let Some(registry_address) = env
             .storage()
@@ -5123,6 +5153,17 @@ impl RefundManager {
             return Err(Error::Unauthorized);
         }
 
+        // Issue #1208: Soroban's XDR codec already guarantees `evidence_hash`
+        // decodes to exactly 32 bytes (that's what `BytesN<32>` is), so the
+        // only "invalid format" a correctly-typed caller can still submit is
+        // the degenerate all-zero hash (e.g. an uninitialized/placeholder
+        // value never actually derived from `SHA-256(evidence)`). Reject it
+        // explicitly rather than anchoring a hash that can't correspond to
+        // real uploaded evidence.
+        if evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEvidenceFormat);
+        }
+
         let key = DataKey::DisputeEvidenceHashes(dispute_id.clone());
         let mut hashes: Vec<BytesN<32>> = env
             .storage()
@@ -5176,6 +5217,50 @@ impl RefundManager {
             }
         }
         Ok(disputes)
+    }
+
+    /// Issue #1202: Per-merchant paginated disputes view for the dashboard.
+    ///
+    /// Returns up to `limit` `Dispute` records (hard-capped at 100 per call)
+    /// starting at `offset` within the merchant's dispute index, in filing
+    /// order. When `status_filter` is `Some`, only disputes matching that
+    /// status are counted against `offset`/`limit`.
+    pub fn get_merchant_disputes(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+        status_filter: Option<DisputeStatus>,
+    ) -> Vec<Dispute> {
+        let dispute_ids = Self::get_merchant_disputes_internal(&env, &merchant_id);
+
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in dispute_ids.iter() {
+            let dispute = match Self::get_dispute_internal(&env, &id) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Some(status) = &status_filter {
+                if dispute.status != *status {
+                    continue;
+                }
+            }
+            if matched >= offset {
+                result.push_back(dispute);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     pub fn get_dispute_summary(env: Env) -> DisputeSummary {
@@ -5344,6 +5429,14 @@ impl RefundManager {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentDisputes(payment_id.clone()))
+            .unwrap_or_else(|| vec![env])
+    }
+
+    /// Issue #1202: Load the append-only index of dispute IDs filed against a merchant.
+    fn get_merchant_disputes_internal(env: &Env, merchant_id: &Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantDisputes(merchant_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
@@ -5686,6 +5779,48 @@ impl RefundManager {
             }
         }
         subscriptions
+    }
+
+    /// Issue #1204: Returns the payer's currently active subscriptions for
+    /// wallet/UI display, paginated and hard-capped at 100 per call.
+    ///
+    /// Filters the payer's full subscription history down to
+    /// `status == SubscriptionStatus::Active` before applying `offset`/`limit`,
+    /// so a page always contains up to `limit` active subscriptions when that
+    /// many remain.
+    pub fn get_active_subscriptions_for_payer(
+        env: Env,
+        payer: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Subscription> {
+        let subscription_ids = Self::get_payer_subscriptions_internal(&env, &payer);
+
+        let capped_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
+
+        let mut result = vec![&env];
+        let mut matched: u32 = 0;
+        for id in subscription_ids.iter() {
+            let sub = match Self::get_subscription_internal(&env, &id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if sub.status != SubscriptionStatus::Active {
+                continue;
+            }
+            if matched >= offset {
+                result.push_back(sub);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     /// Issue #633: List subscribers to a plan, paginated.
@@ -6916,6 +7051,32 @@ impl PaymentProcessor {
             active_payment_count,
             fx_oracle_configured,
             merchant_registry_configured,
+        }
+    }
+
+    /// Issue #1205: Aggregated contract health/config view combining version,
+    /// consolidated global/creation pause state, the configured settlement
+    /// token, the current admin, and the multi-sig governance configuration.
+    ///
+    /// Read-only: requires no authentication, intended for dashboards and
+    /// external health checks.
+    pub fn get_contract_info(env: Env) -> ContractInfo {
+        let version = Self::version(env.clone());
+        let pause_info = Self::get_pause_info(env.clone());
+        let token = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken);
+        let admin = AccessControl::get_admin(&env);
+        let (multisig_threshold, multisig_signers) = AccessControl::get_multisig_config(&env);
+
+        ContractInfo {
+            version,
+            pause_info,
+            token,
+            admin,
+            multisig_threshold,
+            multisig_signers,
         }
     }
 
@@ -8375,14 +8536,28 @@ impl PaymentProcessor {
             }
         }
 
-        // Issue #79: Cross-contract validate merchant is verified and active
-        if let Some(registry_address) = env
+        // Issue #1211 (perf): Read `MerchantRegistryAddress` and build the
+        // registry client at most once for this call, instead of re-reading
+        // persistent storage and re-constructing the client in each of the
+        // three registry-related blocks below. Also cache the `Merchant`
+        // fetched here so the KYC-tier-limits block further down can reuse
+        // it instead of issuing a second identical cross-contract
+        // `get_merchant` call. No behavior changes: every block still only
+        // runs when a registry is configured, and `cached_merchant` is only
+        // ever populated with the exact merchant this block already
+        // validated (active/not-suspended/whitelisted), so reusing it later
+        // in the same transaction observes no different state.
+        let registry_address_opt: Option<Address> = env
             .storage()
             .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress);
+        let registry_client_opt = registry_address_opt
+            .as_ref()
+            .map(|addr| crate::merchant_registry::MerchantRegistryClient::new(&env, addr));
+        let mut cached_merchant: Option<crate::merchant_registry::Merchant> = None;
+
+        // Issue #79: Cross-contract validate merchant is verified and active
+        if let Some(ref registry_client) = registry_client_opt {
             match registry_client.try_get_merchant(&args.merchant_id) {
                 Ok(Ok(merchant)) => {
                     // Require merchant to be active and not suspended
@@ -8399,6 +8574,7 @@ impl PaymentProcessor {
                             _ => return Err(Error::PayerNotWhitelisted),
                         }
                     }
+                    cached_merchant = Some(merchant);
                 }
                 _ => {
                     // If registry lookup fails, reject the payment
@@ -8414,13 +8590,7 @@ impl PaymentProcessor {
         Self::enforce_amount_limits(&env, &args.merchant_id, args.amount)?;
 
         // Issue #777: Enforce KYC tier limits (single-payment and monthly volume caps) via MerchantRegistry
-        if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+        if let Some(ref registry_client) = registry_client_opt {
             match registry_client.try_check_kyc_limit(&args.merchant_id, &args.amount) {
                 Ok(Ok(())) => {}
                 // Issue #1014: surface which specific tier limit tripped
@@ -8440,25 +8610,21 @@ impl PaymentProcessor {
             }
         }
 
-        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured
-        if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured.
+        // Reuses `cached_merchant` from the Issue #79 check above instead of
+        // issuing a second `get_merchant` cross-contract call for the same merchant.
+        if let (Some(ref merchant), Some(ref registry_client)) =
+            (cached_merchant.as_ref(), registry_client_opt.as_ref())
         {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            if let Ok(Ok(merchant)) = registry_client.try_get_merchant(&args.merchant_id) {
-                if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
-                    if let Some(min) = limits.min {
-                        if args.amount < min {
-                            return Err(Error::AmountBelowMin);
-                        }
+            if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
+                if let Some(min) = limits.min {
+                    if args.amount < min {
+                        return Err(Error::AmountBelowMin);
                     }
-                    if let Some(max) = limits.max {
-                        if args.amount > max {
-                            return Err(Error::AmountAboveMax);
-                        }
+                }
+                if let Some(max) = limits.max {
+                    if args.amount > max {
+                        return Err(Error::AmountAboveMax);
                     }
                 }
             }
@@ -9443,21 +9609,32 @@ impl PaymentProcessor {
         // The expected total received is the base amount plus any validated tip.
         let expected_total = payment.amount.saturating_add(tip.unwrap_or(0));
 
-        // Get merchant-specific tolerance if available, otherwise use global default
-        let merchant_tolerance = if let Some(registry_address) = env
+        // Issue #1211 (perf): Read `MerchantRegistryAddress` and build the
+        // registry client once for the rest of this call, instead of
+        // re-reading persistent storage and re-constructing the client in
+        // each of the registry-related blocks below. Also cache the
+        // `Merchant` fetched here (deterministic for this transaction, so a
+        // later block observes exactly the same result a fresh
+        // `get_merchant` call would) so it can be reused instead of issuing
+        // a second identical cross-contract call further down.
+        let registry_client_opt = env
             .storage()
             .persistent()
             .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            match registry_client.try_get_merchant(&payment.merchant_id) {
-                Ok(Ok(merchant)) => merchant.payment_tolerance,
-                _ => None,
-            }
-        } else {
-            None
-        };
+            .map(|registry_address| {
+                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address)
+            });
+
+        // Get merchant-specific tolerance if available, otherwise use global default
+        let cached_merchant: Option<crate::merchant_registry::Merchant> = registry_client_opt
+            .as_ref()
+            .and_then(|registry_client| {
+                match registry_client.try_get_merchant(&payment.merchant_id) {
+                    Ok(Ok(merchant)) => Some(merchant),
+                    _ => None,
+                }
+            });
+        let merchant_tolerance = cached_merchant.as_ref().and_then(|m| m.payment_tolerance);
 
         // Scale tolerance by token decimals: 1 unit in the smallest denomination per decimal place.
         // USDC has 7 decimals on Stellar (stroops); other tokens may differ.
@@ -9482,16 +9659,9 @@ impl PaymentProcessor {
         };
 
         // Use merchant tolerance if set, otherwise use global tolerance, otherwise base tolerance
-        let global_tolerance = if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            registry_client.get_global_payment_tolerance()
-        } else {
-            PAYMENT_TOLERANCE
+        let global_tolerance = match registry_client_opt.as_ref() {
+            Some(registry_client) => registry_client.get_global_payment_tolerance(),
+            None => PAYMENT_TOLERANCE,
         };
 
         let tolerance = merchant_tolerance.unwrap_or(global_tolerance);
@@ -9531,15 +9701,7 @@ impl PaymentProcessor {
         if new_status == PaymentStatus::Overpaid {
             let extra = total_received.saturating_sub(payment.amount);
             if extra > 0 {
-                if let Some(registry_address) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-                {
-                    let registry_client = crate::merchant_registry::MerchantRegistryClient::new(
-                        &env,
-                        &registry_address,
-                    );
+                if let Some(registry_client) = registry_client_opt.as_ref() {
                     match registry_client
                         .try_check_monthly_limit_only(&payment.merchant_id, &extra)
                     {
@@ -9642,21 +9804,13 @@ impl PaymentProcessor {
         }
 
         // Issue #162: Merchant-configurable partial payment policy.
+        // Issue #1211 (perf): reuse `cached_merchant` fetched earlier in this
+        // call instead of a second `get_merchant` cross-contract call.
         if new_status == PaymentStatus::PartiallyPaid && !is_partial_mode {
-            let partial_allowed = if let Some(registry_address) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-            {
-                let registry_client =
-                    crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-                match registry_client.try_get_merchant(&payment.merchant_id) {
-                    Ok(Ok(merchant)) => merchant.partial_payment_allowed,
-                    _ => false,
-                }
-            } else {
-                false
-            };
+            let partial_allowed = cached_merchant
+                .as_ref()
+                .map(|merchant| merchant.partial_payment_allowed)
+                .unwrap_or(false);
 
             if !partial_allowed {
                 new_status = PaymentStatus::Failed;
@@ -14281,6 +14435,24 @@ pub use payment_link::{
     CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
     PaymentLinkManagerClient,
 };
+// Pre-existing/unrelated fix (found while adding FX conversion property
+// tests for issue #1186): `feature_tests`, `memo_test`, `merchant_auth_test`,
+// `partial_overpaid_test`, `pause_test`, `payment_link_test`,
+// `payment_metadata_test`, `test`, `stream_test`, `subscription_test`, and
+// `pub mod stream` (plus its `pub use`) were each declared a second time
+// further down in this file (see the consolidated `#[cfg(test)] mod ...;`
+// list below, and `pub mod stream;` / `pub use stream::{...}` already
+// declared near the top of this file), which is a hard compile error
+// (E0428/E0255, "the name `..` is defined multiple times") for every
+// `cargo test` build, including the one that runs this issue's new
+// property tests. Only the non-duplicated declarations are kept here;
+// the rest live solely in the consolidated list.
+#[cfg(test)]
+mod payment_retry_test;
+#[cfg(test)]
+mod payment_tip_test;
+#[cfg(test)]
+mod stream_vesting_test;
 
 // NOTE (pre-existing, unrelated to #1199): this tail of lib.rs previously declared
 // `pub mod stream;` (plus a redundant subset re-export) and roughly a dozen

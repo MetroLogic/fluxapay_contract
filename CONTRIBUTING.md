@@ -353,6 +353,7 @@ Before marking a PR ready for review:
 - [ ] PR title follows Conventional Commits format
 - [ ] PR description explains *what* changed, *why*, and how it was tested
 - [ ] If your change affects the compiled contract (new dependency, new public function, large refactor), run `./scripts/update-wasm-baseline.sh` and commit the updated `.wasm-size-baseline` so the CI size gate compares against the right number
+- [ ] If your change implements, removes, or changes the status of a feature listed in the README's ["Feature Status"](README.md#feature-status) matrix (Issue #1189) — e.g. moves the DEX router from "Partial (simulated)" to "Implemented" once real Soroswap routing lands (ADR-0005) — update that row in the same PR
 
 ### Changelog Format
 

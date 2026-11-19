@@ -7,6 +7,15 @@ use crate::access_control::{role_admin, role_oracle, AccessControl};
 
 /// Maximum allowed age of a rate in seconds, regardless of admin-configured threshold.
 const MAX_RATE_AGE_SECS: u64 = 86_400; // 24 hours
+/// Pre-existing/unrelated fix (found while writing FX conversion property
+/// tests for issue #1186): this constant was referenced by
+/// `oracle_initialize_with_tokens` and `set_max_staleness` but never
+/// defined anywhere in the crate, so the crate failed to compile at all
+/// (this module has no feature gate on its free functions, only on the
+/// `#[contractimpl]` block, so it is always built). `60` matches the floor
+/// already asserted by `fx_oracle_test::test_staleness_threshold_bounds_are_enforced`
+/// (59 rejected, 60 accepted).
+const MIN_RATE_AGE_SECS: u64 = 60;
 const MAX_RATE_DECIMALS: u32 = 38;
 
 /// Maximum ledger sequence gap since last rate update (~24 h at ~5 s/ledger).
@@ -68,6 +77,21 @@ pub enum FXOracleError {
     PairNotFound = 6,
     /// Rate must be positive and use at most 38 fixed-point decimals.
     InvalidRate = 7,
+    /// Pre-existing/unrelated fix (found alongside `MIN_RATE_AGE_SECS` while
+    /// writing FX conversion property tests for issue #1186): `set_max_staleness`
+    /// already returned this variant, but it was never added to the enum, which
+    /// is a second reason the crate failed to compile. `threshold` passed to
+    /// `set_staleness_threshold`/`set_max_staleness` is outside
+    /// `[MIN_RATE_AGE_SECS, MAX_RATE_AGE_SECS]`.
+    InvalidStalenessThreshold = 8,
+    /// Pre-existing/unrelated fix (found alongside the other missing
+    /// variants above while writing FX conversion property tests for issue
+    /// #1186): `set_rates_batch` already returned this for an empty batch,
+    /// but it was never added to the enum.
+    EmptyBatch = 9,
+    /// Pre-existing/unrelated fix, same as above: returned when a pair's
+    /// base/quote token is not on the allowlist, but never added to the enum.
+    TokenNotAllowed = 10,
 }
 
 #[contracttype]

@@ -6,6 +6,10 @@
 
 ## Context
 
+See [docs/dex-router-status.md](dex-router-status.md) for a per-function breakdown of
+today's simulation gaps and their tracking issues; this ADR covers the migration sequence,
+not the current limitations.
+
 FluxaPay currently ships a **simulated** DEX router (`fluxapay/src/dex_router.rs`).
 `get_amounts_out` applies a hardcoded 1% per-hop haircut and `swap_exact_tokens_for_tokens`
 moves tokens locally rather than routing through an on-chain liquidity source (see the

@@ -126,8 +126,46 @@ const payload = buildMetaTransactionPayload({
 const signature = signMetaTransaction(payload, merchant);
 ```
 
+### Submitting
+
 The relayer then calls `execute_meta_transaction` with `payload` and the
-64-byte `signature`.
+64-byte `signature`. The relayer is the one whose Stellar account authorizes
+and pays the fee for this outer call, so `client.contract` must be configured
+to sign with the **relayer's** keypair, not the merchant's — the merchant's
+authorization is already captured in `signature`.
+
+`FluxapayClient.contract` is the generated Soroban contract client
+(`sdk/src/index.ts`), so `execute_meta_transaction` is invoked the same way
+every other contract method on it is — the field names below
+(`merchant_id`, `target_function`, `call_data`, `domain_separator`) are the
+contract's snake_case field names, not the camelCase ones used by the
+`MetaTransactionPayload` TS type above:
+
+```ts
+import { FluxapayClient } from "@fluxapay/sdk";
+
+// `client` must be constructed with the relayer's signing keypair/callback —
+// the relayer pays the network fee and authorizes this call.
+const client = new FluxapayClient("testnet" /* , relayerSignerOptions */);
+
+const receipt = await client.contract.execute_meta_transaction({
+  relayer: relayer.publicKey(),
+  payload: {
+    merchant_id: payload.merchantId,
+    target_function: payload.targetFunction,
+    call_data: payload.callData,
+    nonce: payload.nonce,
+    deadline: payload.deadline,
+    domain_separator: payload.domainSeparator,
+  },
+  signature,
+});
+```
+
+`receipt` is `meta_transaction::MetaTxReceipt` — it reports whether the inner
+action succeeded even when the overall call doesn't throw (an envelope that
+verifies correctly but whose inner action fails still consumes the nonce and
+emits `META_TX/FAILED`, as described below).
 
 ## Issue #1020: replay-hardening audit
 

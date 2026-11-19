@@ -30,6 +30,27 @@
 //!   accrued value equals the checkpoint (clamped to deposit).
 //! - `proptest_stream_withdraw_clamped` — remaining deposit after
 //!   withdrawal is always in `[0, remaining]`.
+//!
+//! ## FX conversion invariants for payment links (added for #1186)
+//! - `proptest_fiat_to_usdc_conversion_matches_oracle_rate` — for any
+//!   positive rate/decimals/fiat_amount, `use_link` accepts exactly
+//!   `fiat_amount * 10^decimals / rate` (floor) USDC and records it in
+//!   `total_revenue`.
+//! - `proptest_fiat_to_usdc_rounding_is_floor_and_tight` — the accepted
+//!   amount, multiplied back by the rate, never exceeds the fiat numerator,
+//!   and one more stroop would; i.e. rounding is a tight floor, not merely
+//!   "some value close enough".
+//! - `proptest_fiat_to_usdc_rejects_mismatched_amount` — any USDC amount
+//!   other than the exact resolved equivalent is rejected with
+//!   `InvalidAmount` and leaves link state untouched.
+//! - `proptest_fiat_to_usdc_overflow_never_panics` — decimals/fiat_amount
+//!   pushed toward `i128::MAX` (guaranteed saturation) still resolve
+//!   deterministically rather than panicking, exercising the
+//!   `saturating_mul`/`checked_div` guard in `payment_link.rs`.
+//! - `proptest_stale_fiat_rate_rejected_at_use_time` — once the ledger
+//!   clock passes the configured staleness threshold with no new
+//!   `set_rate`, `use_link` rejects with `StaleOracleRate` regardless of
+//!   rate/decimals/fiat amount.
 
 extern crate alloc;
 use crate::format_id;
@@ -44,9 +65,11 @@ use soroban_sdk::{
 use crate::{
     access_control::{role_merchant, role_oracle, role_settlement_operator},
     merchant_registry::KycTier,
-    BillingInterval, Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
-    RefundManagerClient, RefundStatus, SubscriptionStatus, PAYMENT_TOLERANCE,
-    SUBSCRIPTION_RETRY_INTERVAL_SECS, TIER_CAP_BASIC, TIER_CAP_BUSINESS, TIER_CAP_FULL,
+    BillingInterval, Error, FXOracle, FXOracleClient, FiatConfig, MaybeFiatConfig,
+    PaymentLinkManager, PaymentLinkManagerClient, PaymentProcessor, PaymentProcessorClient,
+    PaymentStatus, RefundManager, RefundManagerClient, RefundStatus, SubscriptionStatus,
+    PAYMENT_TOLERANCE, SUBSCRIPTION_RETRY_INTERVAL_SECS, TIER_CAP_BASIC, TIER_CAP_BUSINESS,
+    TIER_CAP_FULL,
     TIER_CAP_UNVERIFIED,
 };
 
@@ -160,6 +183,38 @@ fn setup_pending_payment(
     client.create_payment(&args);
 
     (oracle, client, payment_id)
+}
+
+/// Issue #1186: deploys a `PaymentLinkManager` (with the caller merchant
+/// already granted the merchant role) alongside a fresh `FXOracle`
+/// initialized with `staleness_threshold` (clamped server-side to
+/// `[MIN_RATE_AGE_SECS, MAX_RATE_AGE_SECS]`, i.e. `[60, 86_400]`), and an
+/// oracle operator address already granted the `ORACLE` role so the caller
+/// can publish rates with `oracle_client.set_rate(...)`.
+fn setup_fiat_payment_link(
+    env: &Env,
+    staleness_threshold: u64,
+) -> (
+    Address,
+    PaymentLinkManagerClient<'_>,
+    Address,
+    Address,
+    FXOracleClient<'_>,
+) {
+    let link_contract = env.register(PaymentLinkManager, ());
+    let link_client = PaymentLinkManagerClient::new(env, &link_contract);
+    let merchant = Address::generate(env);
+    link_client.initialize(&merchant).unwrap();
+    link_client.grant_merchant_role(&merchant, &merchant);
+
+    let oracle_id = env.register(FXOracle, ());
+    let oracle_client = FXOracleClient::new(env, &oracle_id);
+    let oracle_admin = Address::generate(env);
+    oracle_client.oracle_initialize(&oracle_admin, &staleness_threshold);
+    let oracle_operator = Address::generate(env);
+    oracle_client.oracle_grant_role(&oracle_admin, &Symbol::new(env, "ORACLE"), &oracle_operator);
+
+    (merchant, link_client, oracle_id, oracle_operator, oracle_client)
 }
 
 proptest! {
@@ -1178,6 +1233,318 @@ proptest! {
 
         let after_second = client.get_payment(&payment_id);
         prop_assert_eq!(after_second.amount_received, Some(first_amount));
+    }
+
+    // ---- Issue #1186: FX conversion properties for payment links ----
+    //
+    // `PaymentLinkManager::use_link` resolves a fiat-denominated link's USDC
+    // equivalent with `fiat_cfg.amount.saturating_mul(10^decimals).checked_div(rate)`
+    // (see `payment_link.rs`). These properties fuzz `rate`, `decimals`, and
+    // `fiat_amount` to pin down that formula end-to-end through the real
+    // contract (not a reimplementation), confirm the division always floors
+    // (and is tight, i.e. the true mathematical quotient), confirm a caller
+    // who guesses any other USDC amount is rejected, confirm extreme
+    // magnitudes near `i128::MAX` never panic/trap (the production code uses
+    // only `saturating_mul`/`checked_div`, never a bare `*` or `.unwrap()` on
+    // the division), and confirm a stale oracle rate is rejected at
+    // `use_link` time regardless of the configured staleness threshold.
+
+    /// Property: the USDC amount accepted by `use_link` for a fiat-priced
+    /// link is exactly `fiat_amount * 10^decimals / rate` (floor), for any
+    /// positive rate/decimals/fiat_amount combination, and that amount is
+    /// recorded verbatim in the link's `total_revenue`.
+    #[test]
+    fn proptest_fiat_to_usdc_conversion_matches_oracle_rate(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=12u32,
+        fiat_amount in 1i128..1_000_000_000i128,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        // Mirror `use_link`'s exact saturating-arithmetic formula.
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+        prop_assume!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxprop_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX conversion property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        let payment_id = link_client.use_link(&payer, &link_id, &expected_usdc, &None);
+        prop_assert!(!payment_id.is_empty());
+
+        let link = link_client.get_link(&link_id);
+        prop_assert_eq!(link.total_revenue, expected_usdc);
+        prop_assert_eq!(link.use_count, 1);
+    }
+
+    /// Property: rounding is a *tight* floor. The USDC amount `use_link`
+    /// accepts, multiplied back by `rate`, must never exceed the fiat
+    /// numerator (`fiat_amount * 10^decimals`) - and one additional USDC
+    /// stroop would overshoot it. This pins down the direction and
+    /// tightness of the division's rounding, not just that *some* value is
+    /// accepted.
+    #[test]
+    fn proptest_fiat_to_usdc_rounding_is_floor_and_tight(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=12u32,
+        fiat_amount in 1i128..1_000_000_000i128,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let numerator = fiat_amount.saturating_mul(divisor);
+        let expected_usdc = numerator.checked_div(rate).unwrap();
+        prop_assume!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxround_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX rounding property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        link_client.use_link(&payer, &link_id, &expected_usdc, &None);
+        let resolved = link_client.get_link(&link_id).total_revenue;
+
+        // Floor: the resolved amount times the rate never overshoots the
+        // fiat numerator...
+        prop_assert!(resolved.saturating_mul(rate) <= numerator);
+        // ...and tight: one more USDC stroop would overshoot it, so
+        // `resolved` is the unique floor quotient, not merely *a* valid one.
+        prop_assert!((resolved + 1).saturating_mul(rate) > numerator);
+    }
+
+    /// Property: a payer who sends any USDC amount other than the exact
+    /// oracle-resolved equivalent is rejected with `InvalidAmount`,
+    /// regardless of rate/decimals/fiat amount, and the link's state
+    /// (use_count, total_revenue) is left untouched.
+    #[test]
+    fn proptest_fiat_to_usdc_rejects_mismatched_amount(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=12u32,
+        fiat_amount in 1i128..1_000_000_000i128,
+        delta in 1i128..1_000i128,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+
+        let link_id = format_id(&env, "fxwrong_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX mismatch property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        let wrong_amount = expected_usdc.saturating_add(delta);
+        prop_assume!(wrong_amount != expected_usdc);
+
+        let result = link_client.try_use_link(&payer, &link_id, &wrong_amount, &None);
+        prop_assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+        let link = link_client.get_link(&link_id);
+        prop_assert_eq!(link.use_count, 0);
+        prop_assert_eq!(link.total_revenue, 0);
+    }
+
+    /// Property: overflow guard. Even when `decimals` and `fiat_amount` are
+    /// both pushed toward `i128::MAX` (so `fiat_amount * 10^decimals`
+    /// necessarily saturates), `use_link` must resolve deterministically -
+    /// to the identical saturated value our own saturating-arithmetic
+    /// reference computes - rather than panicking/trapping. This is a
+    /// regression guard for the production code's `saturating_mul` /
+    /// `checked_div` chain (`payment_link.rs`), which has no bare arithmetic
+    /// operator or `.unwrap()` on the division in the fiat-conversion path.
+    #[test]
+    fn proptest_fiat_to_usdc_overflow_never_panics(
+        rate in 1i128..1_000i128,
+        decimals in 30u32..=38u32,
+        fiat_amount in (i128::MAX / 2)..i128::MAX,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+        prop_assert!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxoverflow_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX overflow guard property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        let result = link_client.try_use_link(&payer, &link_id, &expected_usdc, &None);
+        prop_assert!(
+            result.is_ok(),
+            "overflow-range rate/decimals/fiat_amount must resolve deterministically, not trap: {:?}",
+            result
+        );
+    }
+
+    /// Property: a rate that has gone stale (ledger time advanced strictly
+    /// past the configured staleness threshold, with no new `set_rate`
+    /// call) is rejected at `use_link` time with `StaleOracleRate`,
+    /// regardless of the specific threshold, rate, decimals, or fiat
+    /// amount.
+    #[test]
+    fn proptest_stale_fiat_rate_rejected_at_use_time(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=7u32,
+        fiat_amount in 1i128..1_000_000i128,
+        threshold in 60u64..=86_400u64,
+        overage in 1u64..10_000u64,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, threshold);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+        prop_assume!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxstale_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX stale rate property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        // Advance the ledger clock strictly past the configured staleness
+        // threshold, with no further `set_rate` call, so the stored rate
+        // goes stale.
+        let now = env.ledger().timestamp();
+        env.ledger().set_timestamp(now + threshold + overage);
+
+        let payer = Address::generate(&env);
+        let result = link_client.try_use_link(&payer, &link_id, &expected_usdc, &None);
+        prop_assert_eq!(result, Err(Ok(Error::StaleOracleRate)));
+
+        let link = link_client.get_link(&link_id);
+        prop_assert_eq!(link.use_count, 0);
+        prop_assert_eq!(link.total_revenue, 0);
     }
 }
 

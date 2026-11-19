@@ -4459,6 +4459,42 @@ fn test_version_after_init() {
     assert_eq!(get_ver, String::from_str(&env, "1.0.0"));
 }
 
+/// Issue #1205: get_contract_info aggregates version, pause state, the
+/// configured settlement token, admin, and multi-sig config into one
+/// read-only view, and reflects config changes made after initialization.
+#[test]
+fn test_get_contract_info_reflects_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    // Freshly initialized: no token configured yet, not paused, default
+    // (unconfigured) multi-sig settings.
+    let info = client.get_contract_info();
+    assert_eq!(info.version, String::from_str(&env, "1.0.0"));
+    assert_eq!(info.admin, Some(admin.clone()));
+    assert!(!info.pause_info.global.paused);
+    assert!(!info.pause_info.creation.paused);
+    assert_eq!(info.token, None);
+    assert_eq!(info.multisig_threshold, 1);
+    assert_eq!(info.multisig_signers.len(), 0);
+
+    // Configure the settlement token; get_contract_info should reflect it.
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    client.set_usdc_token(&admin, &token);
+
+    let info2 = client.get_contract_info();
+    assert_eq!(info2.token, Some(token));
+
+    // Pausing globally should be reflected too.
+    client.set_global_pause(&admin, &true, &String::from_str(&env, "maintenance"));
+    let info3 = client.get_contract_info();
+    assert!(info3.pause_info.global.paused);
+}
+
 #[test]
 fn test_payment_processor_set_version_validates_and_emits_event() {
     let env = Env::default();

@@ -51,6 +51,46 @@ Automated in CI workflow (`ci.yml`) and runnable locally:
 
 ---
 
+## Feature Status
+
+A quick reference for integrators: what's production-ready today versus
+still in progress, verified directly against the current contract code
+(not just this README's prose). Every "Implemented" row below ships behind
+its own Soroban feature flag or lives in the primary `PaymentProcessor`
+contract — see [docs/feature-flags.md](docs/feature-flags.md) for which.
+
+This table is checked for drift in code review whenever `fluxapay/src/*.rs`
+changes; see [CONTRIBUTING.md](CONTRIBUTING.md) for the review checklist
+item that keeps it in sync.
+
+| Feature | Status | Code / Guide |
+|---|---|---|
+| Core payments (create / verify / settle) | Implemented | [docs/architecture.md](docs/architecture.md) |
+| Refunds (full & partial) | Implemented | [Refunds](#refunds) below, `fluxapay/src/refund_manager.rs` |
+| Payment links (fixed USDC amount) | Implemented | `fluxapay/src/payment_link.rs` |
+| Payment links — multi-currency / fiat (FX oracle conversion) | Implemented | `fluxapay/src/fx_oracle.rs`, `fluxapay/src/payment_link.rs` (property-tested: `fluxapay/src/proptests.rs`) |
+| Invoices | Implemented | `fluxapay/src/payment_link.rs`, `fluxapay/src/invoice_test.rs` |
+| Subscriptions / recurring billing | Implemented | [docs/subscription-guide.md](docs/subscription-guide.md) |
+| Dispute resolution | Implemented | [docs/disputes.md](docs/disputes.md), [docs/dispute-resolution-guide.md](docs/dispute-resolution-guide.md) |
+| Payment streams (payroll / milestones) | Implemented | [docs/payment-streams-guide.md](docs/payment-streams-guide.md) |
+| Merkle batch payments (bulk payroll / airdrops) | Implemented | [docs/merkle-batch-payments.md](docs/merkle-batch-payments.md) |
+| HTLC escrow (cross-chain atomic swaps) | Implemented | [docs/htlc-guide.md](docs/htlc-guide.md) — feature-gated (`contract-htlc`), see note there |
+| DEX router / token swaps | **Partial (simulated)** | [docs/ADR-0005: DEX Simulation-to-Real Migration](docs/ADR-0005-dex-simulation-to-real-migration.md) — quotes and settlement are simulated locally, not yet routed through a real on-chain DEX |
+| Account abstraction — session keys & spending policies | Implemented | [docs/account-abstraction.md](docs/account-abstraction.md) |
+| Merchant → sub-account delegation | Implemented | [docs/account-abstraction.md](docs/account-abstraction.md) (see "Merchant → sub-account delegation") |
+| Sponsored meta-transactions | Implemented | [docs/sponsored-meta-transactions.md](docs/sponsored-meta-transactions.md) |
+| Offline signing (air-gapped transactions) | Implemented | [docs/account-abstraction.md](docs/account-abstraction.md#offline-signing-air-gapped-transactions) |
+| Merchant registry / KYC tiers | Implemented | [docs/merchant-registry-api-reference.md](docs/merchant-registry-api-reference.md) |
+| Webhooks | Implemented | [docs/webhooks.md](docs/webhooks.md) |
+| SEP-10 authentication | Implemented | [docs/quickstart.md](docs/quickstart.md#1-authenticate-with-sep-10-issue-675) |
+| SEP-6 / SEP-24 anchor settlement (fiat off-ramp) | Implemented | [docs/sep6-sep24-anchor-integration.md](docs/sep6-sep24-anchor-integration.md), `indexer/src/settlement.ts` |
+| Treasury governance / multisig admin | Implemented | [ADR-0004: Multi-Sig Admin Governance](docs/ADR-0004-multisig-admin-governance.md), [docs/treasury-governance.md](docs/treasury-governance.md) |
+
+Anything not listed above (including items under "Tech Stack (Planned)" and
+"Roadmap" below) should be treated as **planned** — not yet started on-chain.
+
+---
+
 ## What Problem does Fluxapay solve?
 
 Despite growing crypto adoption, everyday commerce remains largely fiat-based.
@@ -155,6 +195,15 @@ Merchant lifecycle and response steps: [docs/disputes.md](docs/disputes.md). For
 •⁠ ⁠Rate changes refund surplus deposit when the stream is slowed down
 
 See the full guide: [docs/payment-streams-guide.md](docs/payment-streams-guide.md)
+
+### 6) Merkle batch payments (payroll / airdrops)
+
+•⁠ ⁠Payer commits one 32-byte Merkle root over `(index, recipient, amount)` allocations and funds the total in a single transaction
+•⁠ ⁠Each recipient claims their own allocation with an O(log N) inclusion proof — no per-recipient transaction from the payer
+•⁠ ⁠Claims are tracked with a per-distribution bitmap to reject double-claims
+•⁠ ⁠After expiry, the creator reclaims any unclaimed balance
+
+See the full guide: [docs/merkle-batch-payments.md](docs/merkle-batch-payments.md)
 
 ## Tech Stack (Planned)
 
