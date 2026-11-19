@@ -232,4 +232,7 @@ pub enum DataKey {
     /// Issue #1013: Configurable amount below which `withdraw_treasury` may be
     /// executed by a single admin without going through multisig governance.
     TreasurySingleAdminThreshold,
+    /// Issue #1202: Append-only index of dispute IDs filed against a merchant,
+    /// used by the paginated `get_merchant_disputes` dashboard view.
+    MerchantDisputes(Address),
 }
