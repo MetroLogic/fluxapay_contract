@@ -5036,6 +5036,17 @@ impl RefundManager {
             return Err(Error::Unauthorized);
         }
 
+        // Issue #1208: Soroban's XDR codec already guarantees `evidence_hash`
+        // decodes to exactly 32 bytes (that's what `BytesN<32>` is), so the
+        // only "invalid format" a correctly-typed caller can still submit is
+        // the degenerate all-zero hash (e.g. an uninitialized/placeholder
+        // value never actually derived from `SHA-256(evidence)`). Reject it
+        // explicitly rather than anchoring a hash that can't correspond to
+        // real uploaded evidence.
+        if evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEvidenceFormat);
+        }
+
         let key = DataKey::DisputeEvidenceHashes(dispute_id.clone());
         let mut hashes: Vec<BytesN<32>> = env
             .storage()
@@ -8288,14 +8299,28 @@ impl PaymentProcessor {
             }
         }
 
-        // Issue #79: Cross-contract validate merchant is verified and active
-        if let Some(registry_address) = env
+        // Issue #1211 (perf): Read `MerchantRegistryAddress` and build the
+        // registry client at most once for this call, instead of re-reading
+        // persistent storage and re-constructing the client in each of the
+        // three registry-related blocks below. Also cache the `Merchant`
+        // fetched here so the KYC-tier-limits block further down can reuse
+        // it instead of issuing a second identical cross-contract
+        // `get_merchant` call. No behavior changes: every block still only
+        // runs when a registry is configured, and `cached_merchant` is only
+        // ever populated with the exact merchant this block already
+        // validated (active/not-suspended/whitelisted), so reusing it later
+        // in the same transaction observes no different state.
+        let registry_address_opt: Option<Address> = env
             .storage()
             .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress);
+        let registry_client_opt = registry_address_opt
+            .as_ref()
+            .map(|addr| crate::merchant_registry::MerchantRegistryClient::new(&env, addr));
+        let mut cached_merchant: Option<crate::merchant_registry::Merchant> = None;
+
+        // Issue #79: Cross-contract validate merchant is verified and active
+        if let Some(ref registry_client) = registry_client_opt {
             match registry_client.try_get_merchant(&args.merchant_id) {
                 Ok(Ok(merchant)) => {
                     // Require merchant to be active and not suspended
@@ -8312,6 +8337,7 @@ impl PaymentProcessor {
                             _ => return Err(Error::PayerNotWhitelisted),
                         }
                     }
+                    cached_merchant = Some(merchant);
                 }
                 _ => {
                     // If registry lookup fails, reject the payment
@@ -8327,13 +8353,7 @@ impl PaymentProcessor {
         Self::enforce_amount_limits(&env, &args.merchant_id, args.amount)?;
 
         // Issue #777: Enforce KYC tier limits (single-payment and monthly volume caps) via MerchantRegistry
-        if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+        if let Some(ref registry_client) = registry_client_opt {
             match registry_client.try_check_kyc_limit(&args.merchant_id, &args.amount) {
                 Ok(Ok(())) => {}
                 // Issue #1014: surface which specific tier limit tripped
@@ -8353,25 +8373,21 @@ impl PaymentProcessor {
             }
         }
 
-        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured
-        if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured.
+        // Reuses `cached_merchant` from the Issue #79 check above instead of
+        // issuing a second `get_merchant` cross-contract call for the same merchant.
+        if let (Some(ref merchant), Some(ref registry_client)) =
+            (cached_merchant.as_ref(), registry_client_opt.as_ref())
         {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            if let Ok(Ok(merchant)) = registry_client.try_get_merchant(&args.merchant_id) {
-                if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
-                    if let Some(min) = limits.min {
-                        if args.amount < min {
-                            return Err(Error::AmountBelowMin);
-                        }
+            if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
+                if let Some(min) = limits.min {
+                    if args.amount < min {
+                        return Err(Error::AmountBelowMin);
                     }
-                    if let Some(max) = limits.max {
-                        if args.amount > max {
-                            return Err(Error::AmountAboveMax);
-                        }
+                }
+                if let Some(max) = limits.max {
+                    if args.amount > max {
+                        return Err(Error::AmountAboveMax);
                     }
                 }
             }
@@ -9356,21 +9372,32 @@ impl PaymentProcessor {
         // The expected total received is the base amount plus any validated tip.
         let expected_total = payment.amount.saturating_add(tip.unwrap_or(0));
 
-        // Get merchant-specific tolerance if available, otherwise use global default
-        let merchant_tolerance = if let Some(registry_address) = env
+        // Issue #1211 (perf): Read `MerchantRegistryAddress` and build the
+        // registry client once for the rest of this call, instead of
+        // re-reading persistent storage and re-constructing the client in
+        // each of the registry-related blocks below. Also cache the
+        // `Merchant` fetched here (deterministic for this transaction, so a
+        // later block observes exactly the same result a fresh
+        // `get_merchant` call would) so it can be reused instead of issuing
+        // a second identical cross-contract call further down.
+        let registry_client_opt = env
             .storage()
             .persistent()
             .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            match registry_client.try_get_merchant(&payment.merchant_id) {
-                Ok(Ok(merchant)) => merchant.payment_tolerance,
-                _ => None,
-            }
-        } else {
-            None
-        };
+            .map(|registry_address| {
+                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address)
+            });
+
+        // Get merchant-specific tolerance if available, otherwise use global default
+        let cached_merchant: Option<crate::merchant_registry::Merchant> = registry_client_opt
+            .as_ref()
+            .and_then(|registry_client| {
+                match registry_client.try_get_merchant(&payment.merchant_id) {
+                    Ok(Ok(merchant)) => Some(merchant),
+                    _ => None,
+                }
+            });
+        let merchant_tolerance = cached_merchant.as_ref().and_then(|m| m.payment_tolerance);
 
         // Scale tolerance by token decimals: 1 unit in the smallest denomination per decimal place.
         // USDC has 7 decimals on Stellar (stroops); other tokens may differ.
@@ -9395,16 +9422,9 @@ impl PaymentProcessor {
         };
 
         // Use merchant tolerance if set, otherwise use global tolerance, otherwise base tolerance
-        let global_tolerance = if let Some(registry_address) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-        {
-            let registry_client =
-                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            registry_client.get_global_payment_tolerance()
-        } else {
-            PAYMENT_TOLERANCE
+        let global_tolerance = match registry_client_opt.as_ref() {
+            Some(registry_client) => registry_client.get_global_payment_tolerance(),
+            None => PAYMENT_TOLERANCE,
         };
 
         let tolerance = merchant_tolerance.unwrap_or(global_tolerance);
@@ -9444,15 +9464,7 @@ impl PaymentProcessor {
         if new_status == PaymentStatus::Overpaid {
             let extra = total_received.saturating_sub(payment.amount);
             if extra > 0 {
-                if let Some(registry_address) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-                {
-                    let registry_client = crate::merchant_registry::MerchantRegistryClient::new(
-                        &env,
-                        &registry_address,
-                    );
+                if let Some(registry_client) = registry_client_opt.as_ref() {
                     match registry_client
                         .try_check_monthly_limit_only(&payment.merchant_id, &extra)
                     {
@@ -9555,21 +9567,13 @@ impl PaymentProcessor {
         }
 
         // Issue #162: Merchant-configurable partial payment policy.
+        // Issue #1211 (perf): reuse `cached_merchant` fetched earlier in this
+        // call instead of a second `get_merchant` cross-contract call.
         if new_status == PaymentStatus::PartiallyPaid && !is_partial_mode {
-            let partial_allowed = if let Some(registry_address) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-            {
-                let registry_client =
-                    crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-                match registry_client.try_get_merchant(&payment.merchant_id) {
-                    Ok(Ok(merchant)) => merchant.partial_payment_allowed,
-                    _ => false,
-                }
-            } else {
-                false
-            };
+            let partial_allowed = cached_merchant
+                .as_ref()
+                .map(|merchant| merchant.partial_payment_allowed)
+                .unwrap_or(false);
 
             if !partial_allowed {
                 new_status = PaymentStatus::Failed;

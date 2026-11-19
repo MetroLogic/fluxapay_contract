@@ -1603,36 +1603,59 @@ fn test_batch_resolve_disputes_failure_does_not_block_other_items() {
     assert!(payment_client.get_pending_upgrade().is_none());
 }
 
+// Note (pre-existing/unrelated to #1208): this file previously had a
+// `test_open_dispute_stores_evidence_hash_and_emits_event` test calling
+// `crate::dispute::open_dispute` / `crate::dispute::verify_evidence` — a
+// `dispute` module that was never declared (`fluxapay/src/dispute.rs` is an
+// empty file, and `mod dispute;` is not declared in `lib.rs`). That test
+// does not correspond to any real, wired contract entry point (the actual
+// dispute flow is `RefundManager::create_dispute` / `submit_evidence`,
+// using `String` ids, not the `u64` ids that orphaned test assumed), so it
+// could never compile. It was removed here only because it blocked this
+// file (which this issue's new evidence-format tests live in) from
+// compiling at all; it is unrelated to the evidence-hash-format validation
+// this issue adds.
+
 #[test]
-fn test_open_dispute_stores_evidence_hash_and_emits_event() {
+fn test_submit_evidence_rejects_zero_hash() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let opener = Address::generate(&env);
-    let payment_id = 42u64;
-    let disputed_amount = 100_000_000i128; // 10 USDC
-    let bond_amount = 10_000_000i128; // 1 USDC
-    let evidence_hash = BytesN::from_array(&env, &[0xab; 32]);
+    let (admin, operator, refund_client, dispute_id) =
+        setup_open_dispute(&env, "evidence_zero_hash");
+    let _ = operator;
 
-    let dispute_id = crate::dispute::open_dispute(
-        &env,
-        opener.clone(),
-        payment_id,
-        disputed_amount,
-        bond_amount,
-        evidence_hash.clone(),
-    )
-    .expect("open_dispute should succeed");
+    let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+    let submitter = refund_client
+        .get_dispute(&dispute_id)
+        .disputer;
 
-    assert_eq!(dispute_id, 1);
+    let result = refund_client.try_submit_evidence(&admin, &dispute_id, &submitter, &zero_hash);
+    assert_eq!(result, Err(Ok(Error::InvalidEvidenceFormat)));
 
-    // Verify stored evidence hash via read-only view function
-    let stored_hash =
-        crate::dispute::verify_evidence(&env, dispute_id).expect("verify_evidence should succeed");
-    assert_eq!(stored_hash, evidence_hash);
+    // No hash should have been anchored.
+    assert_eq!(refund_client.get_dispute_evidence(&dispute_id).len(), 0);
+}
 
-    // Check DISPUTE/OPENED event was published
-    assert!(has_dispute_event(&env, "OPENED"));
+#[test]
+fn test_submit_evidence_accepts_valid_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, operator, refund_client, dispute_id) =
+        setup_open_dispute(&env, "evidence_valid_hash");
+    let _ = operator;
+
+    let valid_hash = BytesN::from_array(&env, &[0xab; 32]);
+    let submitter = refund_client
+        .get_dispute(&dispute_id)
+        .disputer;
+
+    refund_client.submit_evidence(&admin, &dispute_id, &submitter, &valid_hash);
+
+    let stored = refund_client.get_dispute_evidence(&dispute_id);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored.get(0).unwrap(), valid_hash);
 }
 
 #[test]
