@@ -7,6 +7,7 @@ import { createSettlementRouter } from "./routes/settlements";
 import { createInvoicesRouter } from "./routes/invoices";
 import { createPayoutChannelsRouter } from "./routes/payoutChannels";
 import { requireJsonContentType } from "./middleware/requireJsonContentType";
+import { corsMiddleware } from "./middleware/cors";
 
 /**
  * Issue #675: FluxaPay backend — currently exposes the SEP-10 merchant
@@ -40,6 +41,10 @@ import { requireJsonContentType } from "./middleware/requireJsonContentType";
 
 const app = express();
 app.use(express.json());
+// Issue #1156: CORS must be mounted before requireJsonContentType so
+// preflight OPTIONS requests get CORS headers and never hit the content-type
+// guard (which would reject them with 415).
+app.use(corsMiddleware);
 // Issue #838: must run before route handlers so form-posts never reach auth.
 app.use(requireJsonContentType);
 
