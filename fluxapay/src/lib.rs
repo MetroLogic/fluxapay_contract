@@ -12184,6 +12184,34 @@ impl PaymentProcessor {
         args.payer.require_auth();
         Self::require_scope_not_paused(&env, PauseScope::Swap)?;
 
+        // Issue #1171: reject malformed/misrouted addresses at the boundary.
+        utils::validate_address_input(&env, &args.payer, utils::AddressExpectation::Account)?;
+        utils::validate_address_input(
+            &env,
+            &args.deposit_address,
+            utils::AddressExpectation::Account,
+        )?;
+        utils::validate_address_input(
+            &env,
+            &args.dex_router,
+            utils::AddressExpectation::Contract,
+        )?;
+        utils::validate_address_input(
+            &env,
+            &args.token_in,
+            utils::AddressExpectation::ContractOrNativeSentinel,
+        )?;
+        if let Some(oracle) = &args.fx_oracle {
+            utils::validate_address_input(&env, oracle, utils::AddressExpectation::Contract)?;
+        }
+        for token in args.path.iter() {
+            utils::validate_address_input(
+                &env,
+                &token,
+                utils::AddressExpectation::ContractOrNativeSentinel,
+            )?;
+        }
+
         if args.amount <= 0 || args.amount_in <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -12364,6 +12392,33 @@ impl PaymentProcessor {
     ) -> Result<PaymentCharge, Error> {
         args.payer.require_auth();
         Self::require_scope_not_paused(&env, PauseScope::Swap)?;
+
+        // Issue #1171: validate every address supplied to this entrypoint.
+        utils::validate_address_input(&env, &args.payer, utils::AddressExpectation::Account)?;
+        utils::validate_address_input(
+            &env,
+            &args.deposit_address,
+            utils::AddressExpectation::Account,
+        )?;
+        utils::validate_address_input(
+            &env,
+            &args.token_in,
+            utils::AddressExpectation::ContractOrNativeSentinel,
+        )?;
+        for route in routes.iter() {
+            utils::validate_address_input(
+                &env,
+                &route.router,
+                utils::AddressExpectation::Contract,
+            )?;
+            for token in route.path.iter() {
+                utils::validate_address_input(
+                    &env,
+                    &token,
+                    utils::AddressExpectation::ContractOrNativeSentinel,
+                )?;
+            }
+        }
 
         if args.amount <= 0 || routes.is_empty() {
             return Err(Error::InvalidAmount);

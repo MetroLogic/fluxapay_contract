@@ -492,3 +492,51 @@ fn test_execute_swap_rejects_excessive_max_slippage_bps() {
     );
     assert!(result.is_err());
 }
+
+// ── Issue #1171: address validation at public entrypoints ─────────────────────
+
+#[test]
+fn test_swap_and_pay_rejects_malformed_dex_router() {
+    use soroban_sdk::testutils::MuxedAddress as _;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let mock_dex = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &mock_dex, 10_000, false);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
+
+    let mut args = build_swap_args(
+        &env,
+        "swap_bad_router",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        &token_out,
+        &mock_dex,
+        1_000,
+        1_000,
+    );
+
+    // Default/all-zero address is rejected before any token movement.
+    args.dex_router = Address::from_str(&env, ZERO_CONTRACT_STRKEY);
+    assert_eq!(
+        payment_client.try_swap_and_pay(&args),
+        Err(Ok(Error::InvalidAddress))
+    );
+
+    // An account address cannot stand in for a DEX router contract.
+    args.dex_router = soroban_sdk::testutils::MuxedAddress::generate(&env).address();
+    assert_eq!(
+        payment_client.try_swap_and_pay(&args),
+        Err(Ok(Error::InvalidAddress))
+    );
+
+    // Restoring a valid router succeeds, proving only the input was rejected.
+    args.dex_router = mock_dex;
+    assert!(payment_client.try_swap_and_pay(&args).is_ok());
+}
