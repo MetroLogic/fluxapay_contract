@@ -7142,6 +7142,70 @@ fn test_batch_expire_payments_confirmed_payment_not_expired() {
 }
 
 #[test]
+fn test_batch_expire_payments_exactly_50_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+    let mut payment_ids = vec![&env];
+    for i in 0..50 {
+        let id_buf = [b'a', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+    assert_eq!(payment_ids.len(), 50);
+
+    env.ledger().set_timestamp(initial_ts + 2000);
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
+
+    for id in payment_ids.iter() {
+        assert_eq!(
+            client.get_payment(&id).status,
+            PaymentStatus::Expired,
+            "all 50 payments should be expired"
+        );
+    }
+}
+
+#[test]
+fn test_batch_expire_payments_51_is_capped_at_50() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+    let mut payment_ids = vec![&env];
+    for i in 0..51 {
+        let id_buf = [b'b', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+
+    env.ledger().set_timestamp(initial_ts + 2000);
+    // The implementation trims batches to the 50-item cap (no error).
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
+
+    let expired = payment_ids
+        .iter()
+        .filter(|id| client.get_payment(&id).status == PaymentStatus::Expired)
+        .count();
+    assert_eq!(expired, 50, "exactly 50 payments must be expired per call");
+}
+
+#[test]
 fn test_batch_expire_payments_empty_vec() {
     let env = Env::default();
     env.mock_all_auths();

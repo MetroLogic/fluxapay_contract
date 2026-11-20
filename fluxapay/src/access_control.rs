@@ -129,6 +129,11 @@ pub enum AccessControlDataKey {
 /// ~1 day in ledgers (assuming ~5 seconds per ledger on Stellar network: 86,400 / 5 = 17,280 ledgers).
 pub const MIN_TIMELOCK_LEDGERS: u32 = 17_280;
 
+/// Issue #1173: Recovery admin transfers have a stricter 30-day lock-in
+/// (30 * 24 * 60 * 60 seconds, ~518,400 ledgers at ~5s/ledger).
+pub const RECOVERY_LOCK_IN_SECS: u64 = 30 * 24 * 60 * 60;
+pub const RECOVERY_TIMELOCK_LEDGERS: u32 = 518_400;
+
 pub struct AccessControl;
 
 impl AccessControl {
@@ -149,8 +154,8 @@ impl AccessControl {
             .persistent()
             .set(&AccessControlDataKey::NextProposalNonce, &0u64);
 
-        // Set default admin transfer lock-in to 7 days
-        let lock_in = 7 * 24 * 60 * 60; // 7 days in seconds
+        // Set default admin transfer lock-in (30 days)
+        let lock_in = RECOVERY_LOCK_IN_SECS;
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::AdminTransferLockIn, &lock_in);
@@ -794,12 +799,12 @@ impl AccessControl {
         }
 
         let now = env.ledger().timestamp();
-        let earliest_ledger = env.ledger().sequence() + MIN_TIMELOCK_LEDGERS;
+        let earliest_ledger = env.ledger().sequence() + RECOVERY_TIMELOCK_LEDGERS;
         env.storage().persistent().set(
             &AccessControlDataKey::PendingAdminTransfer,
             &(new_admin.clone(), earliest_ledger),
         );
-        let lock_in = 7 * 24 * 60 * 60; // 7 days in seconds
+        let lock_in = RECOVERY_LOCK_IN_SECS;
         env.storage()
             .persistent()
             .set(&AccessControlDataKey::AdminTransferLockIn, &lock_in);
