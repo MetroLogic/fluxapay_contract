@@ -1411,6 +1411,9 @@ pub enum DataKey {
     /// holding it while that payment is `Pending`, so a new `create_payment`
     /// can detect and reject concurrent reuse of the same address.
     DepositAddressPending(Address),
+    /// Issue #1172: independent admin circuit breaker for the simulated DEX
+    /// `swap_and_pay` path. Appended last to preserve existing discriminants.
+    SwapCircuitBreakerPaused,
 }
 
 /// Default initial contract version string.
@@ -7988,6 +7991,67 @@ impl PaymentProcessor {
             })
     }
 
+    /// Issue #1172: independently open/close the DEX circuit breaker for the
+    /// simulated `swap_and_pay` / `swap_and_pay_multi_route` paths.
+    ///
+    /// This toggle is deliberately separate from `set_global_pause`,
+    /// `set_creation_pause` and `pause_scope(Swap)` so operators can disable the
+    /// risky simulated swap path without halting ordinary payments or refunds.
+    /// Emits `DEX/SWAP_PAUSED` or `DEX/SWAP_UNPAUSED`.
+    pub fn set_swap_pause(
+        env: Env,
+        admin: Address,
+        paused: bool,
+        reason: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if reason.len() as usize > MAX_REASON_LEN {
+            return Err(Error::InputTooLong);
+        }
+
+        let state = PauseState {
+            paused,
+            reason: reason.clone(),
+            admin: Some(admin.clone()),
+            timestamp: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::SwapCircuitBreakerPaused, &state);
+
+        let event_name = if paused {
+            Symbol::new(&env, "SWAP_PAUSED")
+        } else {
+            Symbol::new(&env, "SWAP_UNPAUSED")
+        };
+        env.events()
+            .publish((Symbol::new(&env, "DEX"), event_name), (admin, reason));
+        Ok(())
+    }
+
+    /// Issue #1172: current state of the independent DEX circuit breaker.
+    pub fn get_swap_pause_info(env: Env) -> PauseState {
+        env.storage()
+            .persistent()
+            .get::<DataKey, PauseState>(&DataKey::SwapCircuitBreakerPaused)
+            .unwrap_or(PauseState {
+                paused: false,
+                reason: String::from_str(&env, ""),
+                admin: None,
+                timestamp: 0,
+            })
+    }
+
+    fn require_swap_not_paused(env: &Env) -> Result<(), Error> {
+        if Self::get_swap_pause_info(env.clone()).paused {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
     /// Get the current consolidated pause info.
     pub fn get_pause_info(env: Env) -> PauseInfo {
         let empty_reason = String::from_str(&env, "");
@@ -11243,6 +11307,17 @@ impl PaymentProcessor {
         // Read the settlement fee rate in basis points. 0 bps → no fee, no event.
         // Waived: if any fee waiver is active, settlement_fee is forced to 0
         // regardless of global rate.
+        // Issue #1169 (CEI): commit the terminal Settled state before any
+        // external token transfer or cross-contract settlement interaction.
+        // A re-entrant call now sees `Settled` and is rejected by the status
+        // guard above, preventing a second payout.
+        payment.status =
+            payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
+        Self::record_payment_status(&env, &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
+
         let settlement_fee_bps: i128 = env
             .storage()
             .persistent()
@@ -11467,15 +11542,16 @@ impl PaymentProcessor {
                     ),
                 );
 
-                payment.status = payment_state_machine::transition_status(
-                    &payment.status,
-                    PaymentStatus::Settled,
-                )?;
-                Self::record_payment_status(&env, &payment);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Payment(payment_id.clone()), &payment);
-                Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+                // Issue #1169: the Settled status was already committed above
+                // (effects before interactions). Only re-persist it here.
+                if payment.status != PaymentStatus::Settled {
+                    payment.status = payment_state_machine::transition_status(
+                        &payment.status,
+                        PaymentStatus::Settled,
+                    )?;
+                    Self::record_payment_status(&env, &payment);
+                    Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+                }
                 env.events().publish(
                     (
                         Symbol::new(&env, "PAYMENT"),
@@ -11614,9 +11690,8 @@ impl PaymentProcessor {
             Self::record_fee_collection(&env, platform_fee, treasury_share_for_report, 0);
         }
 
-        payment.status =
-            payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
-        Self::record_payment_status(&env, &payment);
+        // Issue #1169: Settled status was persisted before the transfers above;
+        // only the remaining bookkeeping and TTL update happen here.
 
         // Issue #480: Accumulate net merchant amount to pending settlement.
         let net_merchant_amount: i128 = splits
@@ -12183,6 +12258,35 @@ impl PaymentProcessor {
     pub fn swap_and_pay(env: Env, args: SwapAndPayArgs) -> Result<PaymentCharge, Error> {
         args.payer.require_auth();
         Self::require_scope_not_paused(&env, PauseScope::Swap)?;
+        Self::require_swap_not_paused(&env)?; // issue #1172 circuit breaker
+
+        // Issue #1171: reject malformed/misrouted addresses at the boundary.
+        utils::validate_address_input(&env, &args.payer, utils::AddressExpectation::Account)?;
+        utils::validate_address_input(
+            &env,
+            &args.deposit_address,
+            utils::AddressExpectation::Account,
+        )?;
+        utils::validate_address_input(
+            &env,
+            &args.dex_router,
+            utils::AddressExpectation::Contract,
+        )?;
+        utils::validate_address_input(
+            &env,
+            &args.token_in,
+            utils::AddressExpectation::ContractOrNativeSentinel,
+        )?;
+        if let Some(oracle) = &args.fx_oracle {
+            utils::validate_address_input(&env, oracle, utils::AddressExpectation::Contract)?;
+        }
+        for token in args.path.iter() {
+            utils::validate_address_input(
+                &env,
+                &token,
+                utils::AddressExpectation::ContractOrNativeSentinel,
+            )?;
+        }
 
         if args.amount <= 0 || args.amount_in <= 0 {
             return Err(Error::InvalidAmount);
@@ -12364,6 +12468,34 @@ impl PaymentProcessor {
     ) -> Result<PaymentCharge, Error> {
         args.payer.require_auth();
         Self::require_scope_not_paused(&env, PauseScope::Swap)?;
+        Self::require_swap_not_paused(&env)?; // issue #1172 circuit breaker
+
+        // Issue #1171: validate every address supplied to this entrypoint.
+        utils::validate_address_input(&env, &args.payer, utils::AddressExpectation::Account)?;
+        utils::validate_address_input(
+            &env,
+            &args.deposit_address,
+            utils::AddressExpectation::Account,
+        )?;
+        utils::validate_address_input(
+            &env,
+            &args.token_in,
+            utils::AddressExpectation::ContractOrNativeSentinel,
+        )?;
+        for route in routes.iter() {
+            utils::validate_address_input(
+                &env,
+                &route.router,
+                utils::AddressExpectation::Contract,
+            )?;
+            for token in route.path.iter() {
+                utils::validate_address_input(
+                    &env,
+                    &token,
+                    utils::AddressExpectation::ContractOrNativeSentinel,
+                )?;
+            }
+        }
 
         if args.amount <= 0 || routes.is_empty() {
             return Err(Error::InvalidAmount);
