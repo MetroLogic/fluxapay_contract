@@ -1,3 +1,7 @@
+import { PlaceholderPage } from "@/components/placeholder-page";
+
+export default function SettlementsPage() {
+  return <PlaceholderPage title="Settlements" description="Review merchant settlement history and payouts." />;
 "use client";
 
 // Issue #1164: merchant settlement / treasury view. Uses the merchant's
