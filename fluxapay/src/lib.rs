@@ -602,6 +602,8 @@ pub enum Error {
     /// Issue #1209: `settle_payment` was called before the payment's configured
     /// `settle_at` deferred-settlement timestamp has been reached.
     SettlementNotYetDue = 1209,
+    /// Issue #1170: a per-merchant storage index has reached its documented cap.
+    StorageEntryLimitExceeded = 1210,
 }
 
 #[contracttype]
@@ -2283,6 +2285,10 @@ impl RefundManager {
             // Issue #184: Track confirmed payment count per merchant for dispute rate calculation
             let count_key = DataKey::MerchantPaymentCount(merchant_id.clone());
             let count: u64 = env.storage().persistent().get(&count_key).unwrap_or(0u64);
+            // Issue #1170: bound the derived per-merchant count as well.
+            if count >= MAX_PAYMENTS_PER_MERCHANT as u64 {
+                return;
+            }
             env.storage().persistent().set(&count_key, &(count + 1));
             Self::bump_ttl(&env, &count_key, LONG_LIVE_TTL);
         }
@@ -2342,6 +2348,10 @@ impl RefundManager {
 
             let count_key = DataKey::MerchantPaymentCount(merchant_id.clone());
             let count: u64 = env.storage().persistent().get(&count_key).unwrap_or(0u64);
+            // Issue #1170: bound the derived per-merchant count as well.
+            if count >= MAX_PAYMENTS_PER_MERCHANT as u64 {
+                return;
+            }
             env.storage().persistent().set(&count_key, &(count + 1));
             Self::bump_ttl(&env, &count_key, LONG_LIVE_TTL);
         }
@@ -8953,6 +8963,11 @@ impl PaymentProcessor {
         }
 
         let mut merchant_payments = Self::get_merchant_payments_internal(&env, &args.merchant_id);
+        // Issue #1170: bound the per-merchant payment index so storage (and
+        // rent) cannot be exhausted by repeatedly creating payments.
+        if merchant_payments.len() >= MAX_PAYMENTS_PER_MERCHANT {
+            return Err(Error::StorageEntryLimitExceeded);
+        }
         merchant_payments.push_back(args.payment_id.clone());
         let merchant_payments_key = DataKey::MerchantPayments(args.merchant_id.clone());
         env.storage()
@@ -14725,3 +14740,4 @@ mod stream_vesting_test;
 #[cfg(test)] mod batch_settle_test;
 #[cfg(test)] mod require_auth_audit_test;
 #[cfg(test)] mod amount_math_test;
+#[cfg(test)] mod storage_cap_test;
