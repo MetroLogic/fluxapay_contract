@@ -1,7 +1,7 @@
 # FluxaPay External Smart Contract Audit — Scope Document
 
 **Version:** 1.0  
-**Status:** Draft (pending auditor engagement)  
+**Status:** Scoped — pending auditor engagement  
 **Target network:** Stellar Mainnet  
 **Issue tracker:** #381
 
@@ -93,6 +93,14 @@ The auditor should prioritize the following threat categories:
 - Third-party DEX protocol internals (DexRouter interface only)
 - Infrastructure, CI/CD, and deployment scripts (except where they affect on-chain security assumptions)
 - Economic/game-theoretic analysis of fee parameters (unless exploitable on-chain)
+
+## Findings Tracking
+
+External findings are recorded in [`audits/FINDINGS.md`](./FINDINGS.md) with a
+severity, remediation status, and re-check evidence. Critical and High findings
+must reach `re-checked` before mainnet; the machine-readable gate in
+[`external-audit-status.json`](./external-audit-status.json) remains `false` until
+an actual audit and remediation have been completed. No audit firm is engaged yet.
 
 ## Deliverables
 
