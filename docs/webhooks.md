@@ -50,14 +50,15 @@ When a payment (or refund/dispute) transitions state, FluxaPay’s off-chain ind
 
 ## Payload schema
 
-All webhooks share a common envelope:
+All webhooks share a common **v1** envelope (`WebhookEnvelope` in [`indexer/src/webhooks/types.ts`](../indexer/src/webhooks/types.ts)):
 
 ```json
 {
-  "id": "evt_01HXYZ...",
+  "id": "whd_01936a4e-7f2a-7b3c-8d1e-5f6a7b8c9d0e",
+  "event_id": "evt_01936a4e-7f2a-7b3c-8d1e-1a2b3c4d5e6f",
   "type": "payment.confirmed",
-  "created_at": 1710000000,
-  "api_version": "2024-01-01",
+  "createdAt": "2024-03-09T16:00:00.000Z",
+  "livemode": true,
   "data": {
     "payment_id": "pay_abc123",
     "merchant_id": "G...",
@@ -75,11 +76,13 @@ All webhooks share a common envelope:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | string | Unique event delivery id (not the payment id) |
-| `event_id` | string | **Idempotency key** — stable across retries of the same event; use to deduplicate deliveries |
+| `id` | string | Unique delivery id (`whd_<uuid>`) — distinct per delivery attempt |
+| `event_id` | string | **Idempotency key** (`evt_<uuid>`) — stable across retries of the same event; use to deduplicate deliveries |
 | `type` | string | Event name (see tables above) |
-| `created_at` | number | Unix timestamp (seconds) |
-| `api_version` | string | Payload schema version |
+| `createdAt` | string | ISO-8601 UTC timestamp (e.g. `"2024-03-09T16:00:00.000Z"`) |
+| `livemode` | boolean | `true` for live deliveries, `false` for synthetic deliveries from `POST /v1/webhooks/test` |
+| `replayed` | boolean (optional) | Present and `true` only when the event was manually replayed |
+| `data` | object | Event-specific payload |
 | `data.payment_id` | string | **Idempotency / dedup key** for payment events |
 | `data.merchant_id` | string | Merchant Stellar address |
 | `data.amount` | string | Amount in minor units (string to avoid JSON number precision issues) |
@@ -87,14 +90,21 @@ All webhooks share a common envelope:
 | `data.status` | string | Current status snapshot |
 | `data.metadata` | object\|null | Merchant metadata from create |
 
+### Versioning & compatibility notes
+
+- **Canonical v1 contract:** The runtime `WebhookEnvelope` serializes `createdAt` (camelCase) as an ISO-8601 UTC string (`Date.prototype.toISOString()`), alongside `id`, `event_id`, `type`, `livemode`, optional `replayed`, and `data`.
+- **No breaking runtime change:** Keeping `createdAt` as an ISO-8601 UTC string preserves compatibility with existing webhook consumers already parsing the live indexer payload.
+- **Migration note for consumers built against older docs:** Earlier versions of this guide showed `created_at` (numeric Unix seconds) and `api_version` in examples. Those fields are not emitted by the v1 runtime envelope. Consumers should parse `createdAt` as an ISO-8601 timestamp (and use the `X-FluxaPay-Timestamp` header for Unix-second replay-window checks). Any future change to envelope field naming or timestamp encoding will be introduced under a new schema version.
+
 ### Payment expired payload (`payment.expired`)
 
 ```json
 {
-  "id": "evt_01HEXP1234567890",
+  "id": "whd_01936a5b-1234-7b3c-8d1e-5f6a7b8c9d0e",
+  "event_id": "evt_01936a5b-1234-7b3c-8d1e-1a2b3c4d5e6f",
   "type": "payment.expired",
-  "created_at": 1710003600,
-  "api_version": "2024-01-01",
+  "createdAt": "2024-03-09T17:00:00.000Z",
+  "livemode": true,
   "data": {
     "payment_id": "pay_abc123",
     "merchant_id": "GA7NQQNLFQC7OQF6...MERCHANT",
