@@ -11243,6 +11243,17 @@ impl PaymentProcessor {
         // Read the settlement fee rate in basis points. 0 bps → no fee, no event.
         // Waived: if any fee waiver is active, settlement_fee is forced to 0
         // regardless of global rate.
+        // Issue #1169 (CEI): commit the terminal Settled state before any
+        // external token transfer or cross-contract settlement interaction.
+        // A re-entrant call now sees `Settled` and is rejected by the status
+        // guard above, preventing a second payout.
+        payment.status =
+            payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
+        Self::record_payment_status(&env, &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
+
         let settlement_fee_bps: i128 = env
             .storage()
             .persistent()
@@ -11467,15 +11478,16 @@ impl PaymentProcessor {
                     ),
                 );
 
-                payment.status = payment_state_machine::transition_status(
-                    &payment.status,
-                    PaymentStatus::Settled,
-                )?;
-                Self::record_payment_status(&env, &payment);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Payment(payment_id.clone()), &payment);
-                Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+                // Issue #1169: the Settled status was already committed above
+                // (effects before interactions). Only re-persist it here.
+                if payment.status != PaymentStatus::Settled {
+                    payment.status = payment_state_machine::transition_status(
+                        &payment.status,
+                        PaymentStatus::Settled,
+                    )?;
+                    Self::record_payment_status(&env, &payment);
+                    Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+                }
                 env.events().publish(
                     (
                         Symbol::new(&env, "PAYMENT"),
@@ -11614,9 +11626,8 @@ impl PaymentProcessor {
             Self::record_fee_collection(&env, platform_fee, treasury_share_for_report, 0);
         }
 
-        payment.status =
-            payment_state_machine::transition_status(&payment.status, PaymentStatus::Settled)?;
-        Self::record_payment_status(&env, &payment);
+        // Issue #1169: Settled status was persisted before the transfers above;
+        // only the remaining bookkeeping and TTL update happen here.
 
         // Issue #480: Accumulate net merchant amount to pending settlement.
         let net_merchant_amount: i128 = splits
