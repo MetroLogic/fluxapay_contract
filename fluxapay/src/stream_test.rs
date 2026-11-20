@@ -1153,6 +1153,81 @@ fn test_create_multi_stream_rejects_too_many_payees() {
     assert_eq!(err, Err(Ok(StreamError::TooManyPayees)));
 }
 
+/// Issue #1180: share_bps must sum to 10_000 (up to 10 payees), and the final
+/// payee absorbs any rounding dust on withdrawal.
+#[test]
+fn test_multi_stream_share_bps_validation_and_dust_distribution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, _receiver, token) = setup(&env);
+
+    // Valid sum with uneven shares: dust must go to the last payee.
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let payees = vec![
+        &env,
+        PayeeAllocation { address: a.clone(), share_bps: 3_333 },
+        PayeeAllocation { address: b.clone(), share_bps: 3_333 },
+        PayeeAllocation { address: c.clone(), share_bps: 3_334 },
+    ];
+    let stream_id = client.create_multi_stream(&sender, &token, &3_000i128, &30i128, &payees);
+    assert_eq!(client.get_multi_stream(&stream_id).payees.len(), 3);
+
+    env.ledger().with_mut(|li| li.timestamp = 60);
+    client.withdraw_multi_stream(&stream_id);
+    let token_client = token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&a), 599);
+    assert_eq!(token_client.balance(&b), 599);
+    assert_eq!(token_client.balance(&c), 602);
+
+    // Over-sum (11_000 bps) is rejected.
+    let over = vec![
+        &env,
+        PayeeAllocation { address: Address::generate(&env), share_bps: 6_000 },
+        PayeeAllocation { address: Address::generate(&env), share_bps: 5_000 },
+    ];
+    assert_eq!(
+        client.try_create_multi_stream(&sender, &token, &1_000i128, &10i128, &over),
+        Err(Ok(StreamError::InvalidPayeeShares))
+    );
+
+    // Under-sum (8_000 bps) is rejected.
+    let under = vec![
+        &env,
+        PayeeAllocation { address: Address::generate(&env), share_bps: 5_000 },
+        PayeeAllocation { address: Address::generate(&env), share_bps: 3_000 },
+    ];
+    assert_eq!(
+        client.try_create_multi_stream(&sender, &token, &1_000i128, &10i128, &under),
+        Err(Ok(StreamError::InvalidPayeeShares))
+    );
+
+    // A zero share is rejected even if the total is otherwise correct.
+    let zero_share = vec![
+        &env,
+        PayeeAllocation { address: Address::generate(&env), share_bps: 10_000 },
+        PayeeAllocation { address: Address::generate(&env), share_bps: 0 },
+    ];
+    assert_eq!(
+        client.try_create_multi_stream(&sender, &token, &1_000i128, &10i128, &zero_share),
+        Err(Ok(StreamError::InvalidPayeeShares))
+    );
+
+    // More than 10 payees is rejected, even when shares sum to 10_000.
+    let mut too_many = vec![&env];
+    for i in 0..(MAX_MULTI_PAYEES + 1) {
+        too_many.push_back(PayeeAllocation {
+            address: Address::generate(&env),
+            share_bps: if i == MAX_MULTI_PAYEES { 910 } else { 909 },
+        });
+    }
+    assert_eq!(
+        client.try_create_multi_stream(&sender, &token, &1_000i128, &10i128, &too_many),
+        Err(Ok(StreamError::TooManyPayees))
+    );
+}
+
 #[test]
 fn test_single_payee_create_stream_unchanged() {
     let env = Env::default();

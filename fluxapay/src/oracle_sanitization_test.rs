@@ -3,7 +3,10 @@ use crate::{
     merchant_registry::{MerchantRegistry, MerchantRegistryClient},
     DexRouter, DexRouterClient, PaymentProcessor, PaymentProcessorClient, SwapAndPayArgs,
 };
-use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    token, vec, Address, Env, String, Symbol,
+};
 
 use crate::merchant_registry::MaybeFeeConfig;
 fn setup_oracle_swap_env(
@@ -161,6 +164,93 @@ fn test_oracle_sanitization_accepts_aligned_dex_quote() {
 
     let payment = payment_client.swap_and_pay(&args);
     assert_eq!(payment.payment_id, String::from_str(&env, "PAY_ORACLE_02"));
+}
+
+#[test]
+fn test_set_rate_rejects_negative_zero_and_accepts_max_i128() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, _, oracle_client, _, _, _, _) = setup_oracle_swap_env(&env);
+
+    let operator = Address::generate(&env);
+    oracle_client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+    let pair = Symbol::new(&env, "USDC_USD");
+
+    assert_eq!(
+        oracle_client.try_set_rate(&operator, &pair, &-1i128, &4),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+    assert_eq!(
+        oracle_client.try_set_rate(&operator, &pair, &i128::MIN, &4),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+    assert_eq!(
+        oracle_client.try_set_rate(&operator, &pair, &0i128, &4),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+    assert!(oracle_client.try_get_rate(&pair).is_err());
+
+    // Largest valid i128 rate is accepted and readable at the same value.
+    oracle_client.set_rate(&operator, &pair, &i128::MAX, &4);
+    let stored = oracle_client.get_rate(&pair);
+    assert_eq!(stored.rate, i128::MAX);
+    assert_eq!(stored.decimals, 4);
+}
+
+#[test]
+fn test_get_rate_rejects_stale_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, _, oracle_client, _, _, _, _) = setup_oracle_swap_env(&env);
+
+    let operator = Address::generate(&env);
+    oracle_client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+    oracle_client.set_staleness_threshold(&admin, &60);
+    let pair = Symbol::new(&env, "USDC_USD");
+    oracle_client.set_rate(&operator, &pair, &10_000i128, &4);
+
+    let now = env.ledger().timestamp();
+    assert!(!oracle_client.check_rate_staleness(&pair));
+    assert_eq!(oracle_client.get_rate(&pair).rate, 10_000);
+
+    env.ledger().set_timestamp(now + 61);
+    assert_eq!(
+        oracle_client.try_get_rate(&pair),
+        Err(Ok(FXOracleError::RateStale))
+    );
+    assert!(oracle_client.check_rate_staleness(&pair));
+}
+
+#[test]
+fn test_set_rates_batch_sanitizes_invalid_entries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, _, oracle_client, _, _, _, _) = setup_oracle_swap_env(&env);
+
+    let operator = Address::generate(&env);
+    oracle_client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+    let valid_pair = Symbol::new(&env, "USDC_USD");
+    let invalid_pair = Symbol::new(&env, "USDC_EUR");
+
+    let batch = vec![
+        &env,
+        (valid_pair.clone(), 10_000i128, 4u32),
+        (invalid_pair.clone(), -5i128, 4u32),
+    ];
+    assert_eq!(
+        oracle_client.try_set_rates_batch(&operator, &batch),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+    assert!(
+        oracle_client.try_get_rate(&valid_pair).is_err(),
+        "invalid entry must not leave partially applied rates"
+    );
+    assert!(oracle_client.try_get_rate(&invalid_pair).is_err());
+
+    // A sanitized batch of valid entries succeeds.
+    let good_batch = vec![&env, (valid_pair.clone(), 10_000i128, 4u32)];
+    assert_eq!(oracle_client.set_rates_batch(&operator, &good_batch), 1);
+    assert_eq!(oracle_client.get_rate(&valid_pair).rate, 10_000);
 }
 
 #[test]
