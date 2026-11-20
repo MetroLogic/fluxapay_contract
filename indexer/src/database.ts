@@ -1257,6 +1257,9 @@ export class Database implements SettlementStore {
         refund_id: refunds.refundId,
         payment_id: refunds.paymentId,
         amount: refunds.amount,
+        // Fee charged on the original payment; refund events do not carry a
+        // separate fee amount, so the dashboard reports the payment fee.
+        fee_amount: payments.feeAmount,
         status: refunds.status,
         created_at: refunds.createdAt,
       })

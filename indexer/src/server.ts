@@ -575,6 +575,42 @@ export function createServer(
     },
   );
 
+  // Issue #1162: merchant refund view. Authenticated with the merchant's
+  // SEP-10 JWT (the same token the dashboard stores in `fluxapay_jwt`).
+  app.get(
+    "/v1/merchant/refunds",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const status = typeof req.query.status === "string" ? req.query.status : undefined;
+        const limit =
+          typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+        if (!Number.isFinite(limit) || limit < 1 || limit > 500) {
+          res.status(400).json({ error: "Invalid limit (expected 1-500)" });
+          return;
+        }
+        const rows = await database.getRefundsByMerchant(req.auth!.sub, limit);
+        const refunds = rows
+          .map((row: any) => ({
+            refund_id: String(row.refund_id),
+            payment_id: String(row.payment_id),
+            amount_usdc: formatUsdc(row.amount),
+            // Refund events do not carry a fee; the fee shown is the fee on
+            // the original payment, which is the fee withheld on refund.
+            fee_usdc: formatUsdc(row.fee_amount ?? 0),
+            status: String(row.status ?? "unknown"),
+            created_at: row.created_at?.toISOString?.() ?? null,
+          }))
+          .filter((refund) =>
+            status ? refund.status.toLowerCase() === status.toLowerCase() : true,
+          );
+        res.status(200).json({ refunds });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   // All subsequent routes require API-key authentication
   app.use(requireApiKey);
 
