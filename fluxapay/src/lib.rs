@@ -14687,6 +14687,7 @@ mod stream_vesting_test;
 #[cfg(test)] mod partial_overpaid_test;
 #[cfg(test)] mod pause_test;
 #[cfg(test)] mod recovery_test;
+#[cfg(test)] mod swap_and_pay_token_moving_test;
 #[cfg(test)] pub use recovery_test::RecoveryHarnessClient;
 #[cfg(test)] mod payment_link_test;
 #[cfg(test)] mod payment_metadata_test;

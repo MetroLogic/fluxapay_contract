@@ -7153,7 +7153,8 @@ fn test_batch_expire_payments_exactly_50_succeeds() {
     let initial_ts = env.ledger().timestamp();
     let mut payment_ids = vec![&env];
     for i in 0..50 {
-        let payment_id = String::from_str(&env, &format!("expire_50_{}", i));
+        let id_buf = [b'a', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
         let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
         args.expires_at = Some(initial_ts + 1000);
         client.create_payment(&args);
@@ -7162,7 +7163,7 @@ fn test_batch_expire_payments_exactly_50_succeeds() {
     assert_eq!(payment_ids.len(), 50);
 
     env.ledger().set_timestamp(initial_ts + 2000);
-    assert_eq!(client.batch_expire_payments(&payment_ids).unwrap(), 50);
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
 
     for id in payment_ids.iter() {
         assert_eq!(
@@ -7185,7 +7186,8 @@ fn test_batch_expire_payments_51_is_capped_at_50() {
     let initial_ts = env.ledger().timestamp();
     let mut payment_ids = vec![&env];
     for i in 0..51 {
-        let payment_id = String::from_str(&env, &format!("expire_51_{}", i));
+        let id_buf = [b'b', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
         let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
         args.expires_at = Some(initial_ts + 1000);
         client.create_payment(&args);
@@ -7194,7 +7196,7 @@ fn test_batch_expire_payments_51_is_capped_at_50() {
 
     env.ledger().set_timestamp(initial_ts + 2000);
     // The implementation trims batches to the 50-item cap (no error).
-    assert_eq!(client.batch_expire_payments(&payment_ids).unwrap(), 50);
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
 
     let expired = payment_ids
         .iter()

@@ -5,7 +5,11 @@ use crate::access_control::{
     AccessControl, AccessControlDataKey, AccessControlError, RECOVERY_LOCK_IN_SECS,
     RECOVERY_TIMELOCK_LEDGERS,
 };
-use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env};
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::{Address as _, Ledger as _},
+    Address, Env,
+};
 
 #[contract]
 pub struct RecoveryHarness;
