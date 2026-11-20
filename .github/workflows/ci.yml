@@ -292,6 +292,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
+      # Issue #1269: Validate WASM contract feature selection guard.
+      # Verifies valid single-feature build passes, while multi-feature, zero-feature,
+      # and --all-features WASM builds fail with clear diagnostics.
+      - name: Verify WASM contract feature selection guard
+        run: bash scripts/verify-wasm-feature-guard.sh
+
       - name: Build contract
         working-directory: fluxapay
         run: stellar contract build
