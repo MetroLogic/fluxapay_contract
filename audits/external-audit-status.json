@@ -4,6 +4,7 @@
     "auditor": null,
     "engagement_signed": false,
     "scope_document": "audits/SCOPE.md",
+    "findings_register": "audits/FINDINGS.md",
     "audit_start_date": null,
     "audit_complete": false,
     "report_published": false,
@@ -12,6 +13,7 @@
     "high_findings_resolved": false,
     "bug_bounty_launched": false,
     "bug_bounty_url": null,
-    "notes": "Update this file when engagement is signed and again when the audit completes. Mainnet CD is blocked until audit_complete, critical_findings_resolved, and high_findings_resolved are all true."
+    "mainnet_deployment_allowed": false,
+    "notes": "Scope and findings register are prepared (issues #381, #1166). No external audit firm is engaged and no findings have been remediated; mainnet remains blocked until audit_complete, critical_findings_resolved, and high_findings_resolved are all true. Update this file when engagement is signed and again when the audit completes."
   }
 }

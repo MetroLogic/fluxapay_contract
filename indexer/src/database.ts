@@ -1235,6 +1235,24 @@ export class Database implements SettlementStore {
     return rows[0] ?? null;
   }
 
+  /** Issue #1164: settlement history and treasury view for one merchant. */
+  async getSettlementsByMerchant(merchantId: string, limit = 100): Promise<unknown[]> {
+    return this.db
+      .select({
+        payment_id: settlements.paymentId,
+        amount: settlements.amount,
+        status: settlements.status,
+        fiat_amount: settlements.fiatAmount,
+        fiat_currency: settlements.fiatCurrency,
+        created_at: settlements.createdAt,
+        settled_at: settlements.settledAt,
+      })
+      .from(settlements)
+      .where(eq(settlements.merchantId, merchantId))
+      .orderBy(desc(settlements.createdAt))
+      .limit(limit);
+  }
+
   async getRefundById(refundId: string): Promise<unknown | null> {
     const rows = await this.db
       .select({
@@ -1257,6 +1275,9 @@ export class Database implements SettlementStore {
         refund_id: refunds.refundId,
         payment_id: refunds.paymentId,
         amount: refunds.amount,
+        // Fee charged on the original payment; refund events do not carry a
+        // separate fee amount, so the dashboard reports the payment fee.
+        fee_amount: payments.feeAmount,
         status: refunds.status,
         created_at: refunds.createdAt,
       })

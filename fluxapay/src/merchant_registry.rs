@@ -1292,6 +1292,11 @@ impl MerchantRegistry {
         merchant.suspension_reason = None;
         merchant.suspended_at = None;
         merchant.suspension_expires_at = None;
+        // Reset dispute-related counters on reinstatement so prior lost disputes
+        // do not immediately re-trigger auto-suspension.
+        merchant.dispute_count = 0;
+        merchant.lost_disputes_count = 0;
+        merchant.resolved_against_count = 0;
 
         env.storage()
             .persistent()

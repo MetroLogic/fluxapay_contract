@@ -152,13 +152,14 @@ Current audit status is tracked in machine-readable form at [`audits/external-au
 | Audit | Auditor | Scope | Status | Report |
 | ----- | ------- | ----- | ------ | ------ |
 | Internal (2026-03-27) | Internal team | All contracts | ✅ Completed | Internal only |
-| External | TBD | Mainnet release scope | 🔄 Pending engagement | [Placeholder] |
+| External | TBD | Mainnet release scope | 🔄 Pending engagement | [Findings register](audits/FINDINGS.md) — no report published yet |
 
 Key milestones for the external audit (full scope in [`audits/SCOPE.md`](audits/SCOPE.md)):
 
 | Milestone | Status |
 | --------- | ------ |
-| Audit scope document | ✅ Draft complete |
+| Audit scope document | ✅ Scoped (see `audits/SCOPE.md`) |
+| Findings register with severity/status | ✅ Ready (see `audits/FINDINGS.md`) — no findings yet, no audit performed |
 | Audit firm selection | 🔄 In progress (OtterSec, Trail of Bits, Halborn, CertiK under evaluation) |
 | Engagement letter signed | ⏳ Pending |
 | Audit execution | ⏳ Not started |

@@ -16,6 +16,7 @@ import {
   createPaymentSchema,
 } from "./middleware/validateBody";
 import { buildMerchantIdResolver } from "./lib/merchantRegistry";
+import { corsMiddleware } from "./middleware/cors";
 
 /**
  * FluxaPay backend API.
@@ -51,6 +52,10 @@ const app = express();
 // Issue #1155: reject oversized payloads before parsing.
 app.use(payloadSizeGuard());
 app.use(express.json());
+// Issue #1156: CORS must be mounted before requireJsonContentType so
+// preflight OPTIONS requests get CORS headers and never hit the content-type
+// guard (which would reject them with 415).
+app.use(corsMiddleware);
 // Issue #838: must run before route handlers so form-posts never reach auth.
 app.use(requireJsonContentType);
 // Issue #1155: sanitize all string inputs after JSON parsing.

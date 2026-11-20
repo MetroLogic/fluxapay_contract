@@ -5374,6 +5374,60 @@ fn test_idempotency_still_blocks_during_active_window() {
     assert_eq!(result, Err(Ok(Error::DuplicateIdempotencyKey)));
 }
 
+/// Issue #1184: the client_token -> payment_id key is payment-scoped, has a
+/// TTL, blocks active-window reuse with a different id, and is freed on cancel
+/// so the token can be reused.
+#[test]
+fn test_idempotency_ttl_and_token_reuse_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token = String::from_str(&env, "tok_ttl_lifecycle");
+    let payment_id = String::from_str(&env, "pay_ttl_lifecycle");
+    let mut args = create_payment_args(&env, &payment_id, &merchant_id, 1000);
+    args.client_token = Some(token.clone());
+    client.create_payment(&args);
+
+    let key = DataKey::IdempotencyKey(crate::data_keys::idempotency_key_to_key(&env, &token));
+    let ttl_at_creation = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&key).unwrap()
+    });
+    assert!(ttl_at_creation > 0, "idempotency key must carry a TTL");
+
+    // Active-window retry with the same token AND payment_id returns the same
+    // payment and must not shorten the key's lifetime.
+    let retry = client.create_payment(&args);
+    assert_eq!(retry.payment_id, payment_id);
+    let ttl_after_retry = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&key).unwrap()
+    });
+    assert!(ttl_after_retry >= ttl_at_creation);
+
+    // A different payment_id with the same live token is blocked.
+    let mut conflicting = args.clone();
+    conflicting.payment_id = String::from_str(&env, "pay_ttl_conflict");
+    assert_eq!(
+        client.try_create_payment(&conflicting),
+        Err(Ok(Error::DuplicateIdempotencyKey))
+    );
+
+    // Cancelling releases the reverse map and the forward key.
+    client.cancel_payment(&merchant_id, &payment_id);
+    let stored = env.as_contract(&client.address, || {
+        env.storage().persistent().get::<DataKey, String>(&key)
+    });
+    assert!(stored.is_none(), "cancelled payment must free its client_token");
+
+    let reused_id = String::from_str(&env, "pay_ttl_reused");
+    let mut reused_args = create_payment_args(&env, &reused_id, &merchant_id, 1000);
+    reused_args.client_token = Some(token.clone());
+    assert_eq!(client.create_payment(&reused_args).payment_id, reused_id);
+}
+
 // =============================================================================
 // Multi-sig admin proposal tests
 // =============================================================================
@@ -7139,6 +7193,70 @@ fn test_batch_expire_payments_confirmed_payment_not_expired() {
 
     let count = client.batch_expire_payments(&batch_ids).unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn test_batch_expire_payments_exactly_50_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+    let mut payment_ids = vec![&env];
+    for i in 0..50 {
+        let id_buf = [b'a', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+    assert_eq!(payment_ids.len(), 50);
+
+    env.ledger().set_timestamp(initial_ts + 2000);
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
+
+    for id in payment_ids.iter() {
+        assert_eq!(
+            client.get_payment(&id).status,
+            PaymentStatus::Expired,
+            "all 50 payments should be expired"
+        );
+    }
+}
+
+#[test]
+fn test_batch_expire_payments_51_is_capped_at_50() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+    let mut payment_ids = vec![&env];
+    for i in 0..51 {
+        let id_buf = [b'b', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+
+    env.ledger().set_timestamp(initial_ts + 2000);
+    // The implementation trims batches to the 50-item cap (no error).
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
+
+    let expired = payment_ids
+        .iter()
+        .filter(|id| client.get_payment(&id).status == PaymentStatus::Expired)
+        .count();
+    assert_eq!(expired, 50, "exactly 50 payments must be expired per call");
 }
 
 #[test]

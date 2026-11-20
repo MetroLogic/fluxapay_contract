@@ -2045,3 +2045,134 @@ fn test_multi_use_link_allows_multiple_uses() {
     let r2 = client.try_use_link(&payer, &link_id, &100i128, &None);
     assert!(r2.is_ok(), "Second use of multi-use link should succeed");
 }
+
+// ── Issue #1175: payment-link max_uses update (raise cap) path ────────────────
+
+#[test]
+fn test_update_link_max_uses_raises_cap_above_current_use_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+    let link_id = String::from_str(&env, "raise_cap_link");
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Raise cap"),
+        &None,
+        &Some(1),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Exhaust the original cap.
+    client.use_link(&payer, &link_id, &100i128, &None);
+    assert_eq!(
+        client.try_use_link(&payer, &link_id, &100i128, &None),
+        Err(Ok(crate::Error::LinkMaxUsesReached))
+    );
+    assert_eq!(client.get_link(&link_id).use_count, 1);
+
+    // Raise the cap above the current use_count.
+    client.update_link_max_uses(&merchant, &link_id, &3);
+    let link = client.get_link(&link_id);
+    assert_eq!(link.max_uses, Some(3));
+    assert_eq!(link.use_count, 1);
+
+    // Two further redemptions are allowed, then the new cap bites.
+    assert!(client.try_use_link(&payer, &link_id, &100i128, &None).is_ok());
+    assert!(client.try_use_link(&payer, &link_id, &100i128, &None).is_ok());
+    assert_eq!(
+        client.try_use_link(&payer, &link_id, &100i128, &None),
+        Err(Ok(crate::Error::LinkMaxUsesReached))
+    );
+    assert_eq!(client.get_link(&link_id).use_count, 3);
+}
+
+#[test]
+fn test_update_link_max_uses_rejects_unauthorized_and_lowering_below_use_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+    let intruder = Address::generate(&env);
+    let link_id = String::from_str(&env, "guarded_cap_link");
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Guarded cap"),
+        &None,
+        &Some(2),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+    client.use_link(&payer, &link_id, &100i128, &None);
+
+    // A non-merchant, non-admin caller cannot change the cap.
+    assert_eq!(
+        client.try_update_link_max_uses(&intruder, &link_id, &5),
+        Err(Ok(crate::Error::Unauthorized))
+    );
+    assert_eq!(client.get_link(&link_id).max_uses, Some(2));
+
+    // Neither lowering below the recorded use_count nor lowering an existing
+    // cap is permitted.
+    assert_eq!(
+        client.try_update_link_max_uses(&merchant, &link_id, &0),
+        Err(Ok(crate::Error::InvalidAmount))
+    );
+    assert_eq!(
+        client.try_update_link_max_uses(&merchant, &link_id, &1),
+        Err(Ok(crate::Error::InvalidAmount))
+    );
+
+    // A valid raise still works after the rejected attempts.
+    assert!(client.try_update_link_max_uses(&merchant, &link_id, &4).is_ok());
+    assert_eq!(client.get_link(&link_id).max_uses, Some(4));
+}
+
+#[test]
+fn test_link_use_count_increments_once_per_redemption() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer_a = Address::generate(&env);
+    let payer_b = Address::generate(&env);
+    let link_id = String::from_str(&env, "atomic_count_link");
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Counted"),
+        &None,
+        &Some(3),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Back-to-back redemptions in the same ledger: each successful call must
+    // commit exactly one increment (no lost updates / no double counting).
+    for amount in [10i128, 20, 30] {
+        assert!(client.try_use_link(&payer_a, &link_id, &amount, &None).is_ok());
+    }
+    assert_eq!(client.get_link(&link_id).use_count, 3);
+    assert_eq!(
+        client.try_use_link(&payer_b, &link_id, &10i128, &None),
+        Err(Ok(crate::Error::LinkMaxUsesReached))
+    );
+    assert_eq!(client.get_link(&link_id).use_count, 3);
+}
