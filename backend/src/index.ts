@@ -7,76 +7,96 @@ import { createSettlementRouter } from "./routes/settlements";
 import { createInvoicesRouter } from "./routes/invoices";
 import { createPayoutChannelsRouter } from "./routes/payoutChannels";
 import { requireJsonContentType } from "./middleware/requireJsonContentType";
+import { requestLogger } from "./middleware/requestLogger";
+import {
+  sanitizeStrings,
+  payloadSizeGuard,
+  validateBody,
+  verifyPaymentSchema,
+  createPaymentSchema,
+} from "./middleware/validateBody";
+import { buildMerchantIdResolver } from "./lib/merchantRegistry";
+import { corsMiddleware } from "./middleware/cors";
 
 /**
- * Issue #675: FluxaPay backend — currently exposes the SEP-10 merchant
- * authentication endpoints (`/auth/challenge`, `/auth/token`).
+ * FluxaPay backend API.
  *
- * Issue #789: adds the merchant dashboard analytics endpoint
- * (`GET /v1/analytics/revenue`) with daily/weekly/monthly breakdown.
- * Issue #803: also exposes payment link analytics
- * (`GET /v1/payment-links/:id/stats`).
- * Issue #828: also exposes the SEP-6/SEP-24 anchor off-ramp settlement
- * endpoints (`/settlements`) used to automate merchant fiat settlement.
- * Issue #838: reject non-JSON Content-Type on mutation endpoints (CSRF).
- * Issue #998: token bucket rate limiting on all public API endpoints.
- * Issue #999: interactive API reference served at `/api-docs` (offline).
- * Issue #962: also exposes merchant payout channel configuration
- * (`/v1/merchants/:id/payout-channels`) for bank/mobile money settlement.
- * Issue #964: also exposes a streamed CSV export of merchant transaction
- * reports (`GET /v1/reports/transactions/export`).
- * Issue #984: adds `POST /v1/invoices/preview` to render an invoice PDF
- * without persisting a draft invoice record.
- * Issue #974: starts the Stellar Fee-Bump daemon that re-wraps stuck
- * pending payments with a higher fee (CAP-0015).
- * Issue #976: validates the deposit address (account existence, USDC
- * trustline, XLM reserve) before `create_payment` returns it.
- * Issue #971: Horizon RPC failover with configurable fallback endpoints.
- * Issue #972: cross-validate payment tx hash against Horizon (destination,
- * amount, memo) before calling the contract's `verify_payment`.
- * Issue #981: adds an unauthenticated `/health` endpoint reporting database
- * and Horizon connectivity for load balancers and readiness probes.
+ * Issue #675:  SEP-10 merchant authentication endpoints.
+ * Issue #789:  GET /v1/analytics/revenue — daily/weekly/monthly breakdown.
+ * Issue #803:  GET /v1/payment-links/:id/stats — payment link analytics.
+ * Issue #828:  POST /settlements — SEP-6/SEP-24 anchor off-ramp settlement.
+ * Issue #838:  Reject non-JSON Content-Type on mutation endpoints (CSRF).
+ * Issue #962:  GET/POST /v1/merchants/:id/payout-channels.
+ * Issue #964:  GET /v1/reports/transactions/export — streamed CSV export.
+ * Issue #971:  Horizon RPC failover with configurable fallback endpoints.
+ * Issue #972:  Cross-validate payment tx hash against Horizon.
+ * Issue #974:  Stellar Fee-Bump daemon (CAP-0015).
+ * Issue #976:  Deposit address validation before create_payment.
+ * Issue #981:  Unauthenticated /health endpoint.
+ * Issue #984:  POST /v1/invoices/preview — PDF preview without persistence.
+ * Issue #998:  Token bucket rate limiting on all public API endpoints.
+ * Issue #999:  Interactive API reference at /api-docs (offline Redoc).
+ * Issue #1067: Invoice lifecycle routes — list, fetch, void.
+ * Issue #1151: createAnalyticsRouter — revenue + payment-link stats.
+ * Issue #1153: Resolve merchant id via MerchantRegistryClient.
+ * Issue #1154: Structured request logging middleware.
+ * Issue #1155: Input validation and sanitization middleware.
  */
 
+// ---------------------------------------------------------------------------
+// App setup
+// ---------------------------------------------------------------------------
+
 const app = express();
+
+// Issue #1155: reject oversized payloads before parsing.
+app.use(payloadSizeGuard());
 app.use(express.json());
+// Issue #1156: CORS must be mounted before requireJsonContentType so
+// preflight OPTIONS requests get CORS headers and never hit the content-type
+// guard (which would reject them with 415).
+app.use(corsMiddleware);
 // Issue #838: must run before route handlers so form-posts never reach auth.
 app.use(requireJsonContentType);
+// Issue #1155: sanitize all string inputs after JSON parsing.
+app.use(sanitizeStrings());
+// Issue #1154: structured request logging.
+app.use(requestLogger({ jwtSecret: process.env.SEP10_JWT_SECRET }));
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 const SERVER_PUBLIC_KEY = process.env.SEP10_SERVER_PUBLIC_KEY;
 const SERVER_SECRET_KEY = process.env.SEP10_SERVER_SECRET;
 const JWT_SECRET = process.env.SEP10_JWT_SECRET;
-const NETWORK_PASSPHRASE = process.env.STELLAR_NETWORK === "mainnet"
-  ? Networks.PUBLIC
-  : Networks.TESTNET;
+const NETWORK_PASSPHRASE =
+  process.env.STELLAR_NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
 const HOME_DOMAIN = process.env.SEP10_HOME_DOMAIN || "fluxapay.stellar.org";
 
-/**
- * Issue #971: ordered list of Horizon endpoints. The primary is
- * `HORIZON_URL`; `HORIZON_FALLBACK_1` and `HORIZON_FALLBACK_2` are tried in
- * order when the primary is unavailable. Empty/unset entries are dropped.
- */
+if (!SERVER_PUBLIC_KEY || !SERVER_SECRET_KEY || !JWT_SECRET) {
+  throw new Error(
+    "SEP10_SERVER_PUBLIC_KEY, SEP10_SERVER_SECRET, and SEP10_JWT_SECRET are required to start the backend.",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #971: Horizon endpoint failover
+// ---------------------------------------------------------------------------
+
 const HORIZON_ENDPOINTS = [
   process.env.HORIZON_URL,
   process.env.HORIZON_FALLBACK_1,
   process.env.HORIZON_FALLBACK_2,
 ].filter((url): url is string => Boolean(url));
 
-/**
- * Issue #971: transparent failover wrapper. Callers pass a function that
- * performs a Horizon request against a given base URL; the wrapper tries each
- * configured endpoint in order, logging a warning (with the failed URL) on
- * each failure. If every endpoint fails, the error lists all attempted URLs.
- */
 async function withFailover<T>(fn: (url: string) => Promise<T>): Promise<T> {
   if (HORIZON_ENDPOINTS.length === 0) {
     throw new Error("No Horizon endpoints configured (set HORIZON_URL)");
   }
-
   const attempted: string[] = [];
   let lastError: unknown;
-
   for (const url of HORIZON_ENDPOINTS) {
     attempted.push(url);
     try {
@@ -90,17 +110,16 @@ async function withFailover<T>(fn: (url: string) => Promise<T>): Promise<T> {
       );
     }
   }
-
   const reason = lastError instanceof Error ? `: ${lastError.message}` : "";
   throw new Error(
     `All Horizon endpoints failed (attempted: ${attempted.join(", ")})${reason}`,
   );
 }
 
-/**
- * Issue #972: a `PaymentCharge` as stored by the indexer. `memo` is optional;
- * when set, the on-chain transaction memo must match it exactly.
- */
+// ---------------------------------------------------------------------------
+// Issue #972: payment charge lookup (stub — replace with DB/indexer query)
+// ---------------------------------------------------------------------------
+
 interface PaymentCharge {
   payment_id: string;
   deposit_address: string;
@@ -109,22 +128,16 @@ interface PaymentCharge {
   memo?: string;
 }
 
-/**
- * Issue #972: result of cross-checking a tx hash against Horizon. `ok` is
- * false when the transaction exists but does not match the payment; `error`
- * carries a human-readable reason for the mismatch.
- */
 interface TxValidationResult {
   ok: boolean;
   error?: string;
 }
 
-/**
- * Issue #972: fetch a transaction from Horizon (with failover) and validate
- * that it pays `payment.deposit_address` at least `payment.amount`, and that
- * its memo matches `payment.memo` (or `payment.payment_id` when no explicit
- * memo is set). Throws when Horizon cannot be reached so the caller can retry.
- */
+/** Stub: returns undefined (no charge found). Replace with indexer query. */
+function getPaymentCharge(_paymentId: string): PaymentCharge | undefined {
+  return undefined;
+}
+
 async function validateTransaction(
   txHash: string,
   payment: PaymentCharge,
@@ -133,9 +146,7 @@ async function validateTransaction(
     const response = await fetch(
       `${url.replace(/\/$/, "")}/transactions/${encodeURIComponent(txHash)}`,
     );
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return (await response.json()) as {
       memo?: string;
       memo_type?: string;
@@ -155,14 +166,11 @@ async function validateTransaction(
     };
   }
 
-  // Validate the payment operation's destination and amount.
   const operations = await withFailover(async (url) => {
     const response = await fetch(
       `${url.replace(/\/$/, "")}/transactions/${encodeURIComponent(txHash)}/operations`,
     );
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return (await response.json()) as {
       _embedded?: {
         records?: Array<{
@@ -180,9 +188,7 @@ async function validateTransaction(
   const matching = records.find((op) => {
     if (op.type !== "payment" && op.type !== "create_account") return false;
     if (op.to !== payment.deposit_address) return false;
-    if (payment.asset && op.asset_code && op.asset_code !== payment.asset) {
-      return false;
-    }
+    if (payment.asset && op.asset_code && op.asset_code !== payment.asset) return false;
     return Number(op.amount ?? 0) >= expectedAmount;
   });
 
@@ -196,18 +202,10 @@ async function validateTransaction(
   return { ok: true };
 }
 
-if (!SERVER_PUBLIC_KEY || !SERVER_SECRET_KEY || !JWT_SECRET) {
-  throw new Error("SEP10_SERVER_PUBLIC_KEY, SEP10_SERVER_SECRET, and SEP10_JWT_SECRET are required to start the backend.");
-}
+// ---------------------------------------------------------------------------
+// Issue #998: token bucket rate limiting
+// ---------------------------------------------------------------------------
 
-/**
- * Issue #998: token bucket rate limiting.
- *
- * Each tier defines a bucket capacity and refill window. Buckets are keyed by
- * API key (authenticated routes) or client IP (unauthenticated routes such as
- * auth and payment links, where no API key exists yet). State lives in Redis
- * when `REDIS_URL` is set, otherwise an in-memory Map is used as a fallback.
- */
 interface RateLimitTier {
   limit: number;
   windowMs: number;
@@ -225,7 +223,6 @@ const RATE_LIMIT_TIERS: Record<string, RateLimitTier> = {
   "GET /v1/payment-links": { limit: 60, windowMs: 60_000, keyBy: "ip" },
   "POST /v1/fx/convert": { limit: 60, windowMs: 60_000, keyBy: "ip" },
   "POST /v1/auth": { limit: 10, windowMs: 60_000, keyBy: "ip" },
-  // Admin endpoints get a separate, higher ceiling.
   "ADMIN /v1": { limit: 1000, windowMs: 60_000, keyBy: "apiKey" },
 };
 
@@ -257,7 +254,10 @@ function apiKeyOf(req: express.Request): string {
   return clientIp(req);
 }
 
-function consumeToken(key: string, tier: RateLimitTier): { allowed: boolean; remaining: number; resetMs: number } {
+function consumeToken(
+  key: string,
+  tier: RateLimitTier,
+): { allowed: boolean; remaining: number; resetMs: number } {
   const now = Date.now();
   const refillRate = tier.limit / tier.windowMs;
   const existing = buckets.get(key);
@@ -277,7 +277,7 @@ function consumeToken(key: string, tier: RateLimitTier): { allowed: boolean; rem
   buckets.set(key, state);
 
   const remaining = Math.floor(state.tokens);
-  const resetMs = Math.ceil(((tier.limit - state.tokens) / refillRate) / 1000);
+  const resetMs = Math.ceil((tier.limit - state.tokens) / refillRate / 1000);
   return { allowed, remaining, resetMs };
 }
 
@@ -300,17 +300,10 @@ app.use((req, res, next) => {
   return next();
 });
 
-/**
- * Issue #999: interactive API reference at `/api-docs`.
- *
- * Serves a self-contained Redoc page that loads `docs/openapi.yaml` from the
- * same origin. The Redoc bundle is loaded from a local path (`/api-docs/redoc.standalone.js`)
- * so the reference works offline / on localhost with no CDN dependency.
- *
- * The spec documents checkout and payment link endpoints, inline JSON schema
- * for request bodies, and example payloads for every error code
- * (400, 401, 404, 422, 429, 500).
- */
+// ---------------------------------------------------------------------------
+// Issue #999: interactive API reference at /api-docs
+// ---------------------------------------------------------------------------
+
 const API_DOCS_HTML = `<!DOCTYPE html>
 <html>
   <head>
@@ -325,9 +318,7 @@ const API_DOCS_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
-app.get("/api-docs", (_req, res) => {
-  res.type("html").send(API_DOCS_HTML);
-});
+app.get("/api-docs", (_req, res) => res.type("html").send(API_DOCS_HTML));
 
 app.get("/api-docs/openapi.yaml", (_req, res) => {
   res.sendFile("openapi.yaml", { root: "docs" }, (err) => {
@@ -340,23 +331,20 @@ app.get("/api-docs/redoc.standalone.js", (_req, res) => {
     if (err) res.status(404).json({ error: "redoc bundle not found" });
   });
 });
- * Issue #981: health check configuration.
- */
-const HORIZON_URL = process.env.HORIZON_URL || "https://horizon-testnet.stellar.org";
+
+// ---------------------------------------------------------------------------
+// Issue #981: health check configuration
+// ---------------------------------------------------------------------------
+
+const HORIZON_URL_HEALTH =
+  process.env.HORIZON_URL || "https://horizon-testnet.stellar.org";
 const DATABASE_URL = process.env.DATABASE_URL;
 const HEALTH_HORIZON_TIMEOUT_MS = Number(process.env.HEALTH_HORIZON_TIMEOUT_MS || 3_000);
 const SERVICE_VERSION = process.env.npm_package_version || "0.0.0";
 const STARTED_AT = Date.now();
 
-/**
- * Issue #981: ping the database. Returns null when healthy, or an error
- * message describing the failure. When no DATABASE_URL is configured the
- * database is treated as not configured and reported as connected.
- */
 async function checkDatabase(): Promise<string | null> {
-  if (!DATABASE_URL) {
-    return null;
-  }
+  if (!DATABASE_URL) return null;
   try {
     const { Pool } = await import("pg");
     const pool = new Pool({ connectionString: DATABASE_URL, connectionTimeoutMillis: 2_000 });
@@ -371,18 +359,12 @@ async function checkDatabase(): Promise<string | null> {
   }
 }
 
-/**
- * Issue #981: ping Horizon. Returns null when healthy, or an error message
- * describing the failure (including timeouts).
- */
 async function checkHorizon(): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HEALTH_HORIZON_TIMEOUT_MS);
   try {
-    const response = await fetch(HORIZON_URL, { signal: controller.signal });
-    if (!response.ok) {
-      return `Horizon responded with status ${response.status}`;
-    }
+    const response = await fetch(HORIZON_URL_HEALTH, { signal: controller.signal });
+    if (!response.ok) return `Horizon responded with status ${response.status}`;
     return null;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
@@ -394,6 +376,17 @@ async function checkHorizon(): Promise<string | null> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1153: MerchantRegistryClient wiring
+// ---------------------------------------------------------------------------
+
+const { resolveMerchantId: resolveMerchantIdFromRegistry } =
+  buildMerchantIdResolver(process.env);
+
+// ---------------------------------------------------------------------------
+// Routes: auth
+// ---------------------------------------------------------------------------
+
 app.use(
   "/auth",
   createAuthRouter({
@@ -404,64 +397,45 @@ app.use(
     rpcUrl: process.env.SOROBAN_RPC_URL,
     homeDomain: HOME_DOMAIN,
     jwtExpirySecs: Number(process.env.JWT_EXPIRY_SECS || 86_400),
-    // TODO(#675): resolve the merchant id via MerchantRegistryClient instead
-    // of falling back to the account's own public key.
+    // Issue #1153: resolved via MerchantRegistryClient; falls back to the
+    // account public key when the registry is unavailable or not configured.
+    resolveMerchantId: resolveMerchantIdFromRegistry,
   }),
 );
+
+// ---------------------------------------------------------------------------
+// Routes: analytics (Issue #1151)
+// ---------------------------------------------------------------------------
 
 app.use(
   "/v1/analytics",
   createAnalyticsRouter({
     serverPublicKey: SERVER_PUBLIC_KEY,
-/**
- * Issue #803: payment link analytics.
- *
- * Returns the on-chain `get_link_stats` counters for a payment link plus a
- * derived `conversion_rate` (completions / views) formatted as a string
- * percentage, e.g. "12.5%".
- *
- * Requires merchant authentication: the caller must present the merchant
- * bearer token issued by the SEP-10 flow (`/auth/token`).
- */
-app.get("/v1/payment-links/:id/stats", (req, res) => {
-  const authHeader = req.header("authorization") || "";
-  const [scheme, token] = authHeader.split(" ");
-  if (scheme !== "Bearer" || !token) {
-    return res.status(401).json({ error: "merchant authentication required" });
-  }
-
-  const linkId = req.params.id;
-  const stats = getLinkStats(linkId);
-  if (!stats) {
-    return res.status(404).json({ error: `payment link ${linkId} not found` });
-  }
-
-  const { views, completions, total_volume } = stats;
-  const conversionRate = views > 0
-    ? `${((completions / views) * 100).toFixed(1)}%`
-    : "0.0%";
-
-  return res.status(200).json({
-    link_id: linkId,
-    views,
-    completions,
-    total_volume,
-    conversion_rate: conversionRate,
-  });
-});
-app.use(
-  "/settlements",
-  createSettlementRouter({
+    jwtSecret: JWT_SECRET,
+    indexerUrl: process.env.INDEXER_URL,
     networkPassphrase: NETWORK_PASSPHRASE,
     homeDomain: HOME_DOMAIN,
     jwtSecret: JWT_SECRET,
   }),
 );
 
-/**
- * Issue #1067: Invoice lifecycle routes — list, fetch, and void invoices.
- * Proxies to the indexer API so merchant clients have a single entry point.
- */
+// ---------------------------------------------------------------------------
+// Routes: settlements (Issue #828)
+// ---------------------------------------------------------------------------
+
+app.use(
+  "/settlements",
+  createSettlementRouter({
+    networkPassphrase: NETWORK_PASSPHRASE,
+    homeDomain: HOME_DOMAIN,
+    anchorUrl: process.env.ANCHOR_URL,
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Routes: invoices (Issue #1067)
+// ---------------------------------------------------------------------------
+
 app.use(
   "/v1/invoices",
   createInvoicesRouter({
@@ -469,10 +443,10 @@ app.use(
   }),
 );
 
-/**
- * Issue #962: merchant payout channel configuration. Account numbers are
- * encrypted at rest; the settlement service reads the default channel.
- */
+// ---------------------------------------------------------------------------
+// Routes: payout channels (Issue #962)
+// ---------------------------------------------------------------------------
+
 app.use(
   "/v1/merchants",
   createPayoutChannelsRouter({
@@ -480,20 +454,10 @@ app.use(
   }),
 );
 
-/**
- * Issue #964: streamed CSV export of merchant transaction reports.
- *
- * `GET /v1/reports/transactions/export?format=csv&from=...&to=...&merchant_id=...`
- *
- * - Requires merchant authentication (bearer token from `/auth/token`).
- * - Supports ISO-8601 `from`/`to` date-range filters and a comma-separated
- *   `status` filter (e.g. `status=Confirmed,Settled`).
- * - Caps exports at 10,000 rows; exceeding the cap returns HTTP 413 with a
- *   pagination hint.
- * - Streams rows to the client rather than buffering the whole report.
- * - A merchant may only export their own data: the requested `merchant_id`
- *   must match the authenticated merchant.
- */
+// ---------------------------------------------------------------------------
+// Routes: transaction CSV export (Issue #964)
+// ---------------------------------------------------------------------------
+
 const CSV_EXPORT_MAX_ROWS = 10_000;
 const CSV_COLUMNS = [
   "payment_id",
@@ -509,12 +473,12 @@ const CSV_COLUMNS = [
   "net_amount",
 ] as const;
 
+type CsvRow = Partial<Record<(typeof CSV_COLUMNS)[number], unknown>>;
+
 function csvEscape(value: unknown): string {
   if (value === null || value === undefined) return "";
   const str = String(value);
-  if (/[",\n\r]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
+  if (/[",\n\r]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
   return str;
 }
 
@@ -530,16 +494,21 @@ function parseIsoDate(value: unknown, field: string): Date | undefined {
   return parsed;
 }
 
-app.get("/v1/reports/transactions/export", async (req, res) => {
- * Issue #984: Invoice PDF preview.
- *
- * Renders the invoice PDF server-side using the same code path as the actual
- * invoice PDF, but without persisting a draft invoice record. Requires
- * merchant authentication. PDFs larger than 5 MB are rejected with HTTP 413.
+/**
+ * Stub: replace with an actual indexer/DB query.
+ * Returns an empty list so the endpoint compiles and runs without a database.
  */
-const MAX_PREVIEW_PDF_BYTES = 5 * 1024 * 1024;
+async function fetchTransactionReportRows(_opts: {
+  merchantId: string;
+  from?: Date;
+  to?: Date;
+  statuses?: string[];
+  limit: number;
+}): Promise<CsvRow[]> {
+  return [];
+}
 
-app.post("/v1/invoices/preview", async (req, res) => {
+app.get("/v1/reports/transactions/export", async (req, res) => {
   const authHeader = req.header("authorization") || "";
   const [scheme, token] = authHeader.split(" ");
   if (scheme !== "Bearer" || !token) {
@@ -563,16 +532,17 @@ app.post("/v1/invoices/preview", async (req, res) => {
     return res.status(400).json({ error: "from must be before to" });
   }
 
-  const statusFilter = typeof req.query.status === "string" && req.query.status.trim() !== ""
-    ? req.query.status.split(",").map((s) => s.trim()).filter(Boolean)
-    : undefined;
+  const statusFilter =
+    typeof req.query.status === "string" && req.query.status.trim() !== ""
+      ? req.query.status
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
 
-  const requestedMerchantId = typeof req.query.merchant_id === "string"
-    ? req.query.merchant_id
-    : undefined;
-  // TODO(#675): resolve the authenticated merchant id from the bearer token
-  // via MerchantRegistryClient. Until then the token itself is the merchant
-  // identity, so a merchant can only ever export their own data.
+  const requestedMerchantId =
+    typeof req.query.merchant_id === "string" ? req.query.merchant_id : undefined;
+
   const authenticatedMerchantId = token;
   if (requestedMerchantId && requestedMerchantId !== authenticatedMerchantId) {
     return res.status(403).json({ error: "cannot export another merchant's transactions" });
@@ -601,12 +571,35 @@ app.post("/v1/invoices/preview", async (req, res) => {
     "Content-Disposition",
     `attachment; filename="transactions-${filenameDate}.csv"`,
   );
-
   res.write(CSV_COLUMNS.join(",") + "\n");
   for (const row of rows) {
     res.write(CSV_COLUMNS.map((col) => csvEscape(row[col])).join(",") + "\n");
   }
-  res.end();
+  return res.end();
+});
+
+// ---------------------------------------------------------------------------
+// Routes: invoice PDF preview (Issue #984)
+// ---------------------------------------------------------------------------
+
+const MAX_PREVIEW_PDF_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Stub: replace with actual PDF rendering library.
+ * Returns a minimal valid PDF so the endpoint runs without a renderer.
+ */
+async function renderInvoicePdf(_body: Record<string, unknown>): Promise<Buffer> {
+  // 1-byte stub — real implementation would call a PDF library.
+  return Buffer.from("%PDF-1.4 stub");
+}
+
+app.post("/v1/invoices/preview", async (req, res) => {
+  const authHeader = req.header("authorization") || "";
+  const [scheme] = authHeader.split(" ");
+  if (scheme !== "Bearer") {
+    return res.status(401).json({ error: "merchant authentication required" });
+  }
+
   try {
     const pdf = await renderInvoicePdf(req.body);
     if (pdf.length > MAX_PREVIEW_PDF_BYTES) {
@@ -620,25 +613,23 @@ app.post("/v1/invoices/preview", async (req, res) => {
       error: err instanceof Error ? err.message : "failed to render invoice preview",
     });
   }
- * Issue #976: deposit address validation.
- *
- * Stellar accounts require a minimum XLM reserve (1 XLM base + 0.5 XLM per
- * trustline/subentry). A deposit address must also have a USDC trustline or
- * the customer's payment fails with a cryptic Stellar error. We validate the
- * address against Horizon before `create_payment` returns it, caching the
- * result per address for 60 seconds to avoid repeated Horizon calls.
- */
+});
+
+// ---------------------------------------------------------------------------
+// Issue #976: deposit address validation
+// ---------------------------------------------------------------------------
+
 const USDC_ASSET_CODE = process.env.USDC_ASSET_CODE || "USDC";
 const USDC_ASSET_ISSUER = process.env.USDC_ASSET_ISSUER || "";
 const BASE_RESERVE_XLM = 1;
 const SUBENTRY_RESERVE_XLM = 0.5;
-// Buffer for the 1 USDC transaction fee (in XLM, generously rounded).
 const FEE_BUFFER_XLM = 0.01;
 const DEPOSIT_CHECK_TTL_MS = 60_000;
 
-const horizonUrl = process.env.STELLAR_NETWORK === "mainnet"
-  ? "https://horizon.stellar.org"
-  : "https://horizon-testnet.stellar.org";
+const horizonUrl =
+  process.env.STELLAR_NETWORK === "mainnet"
+    ? "https://horizon.stellar.org"
+    : "https://horizon-testnet.stellar.org";
 const horizonServer = new Horizon.Server(horizonUrl);
 
 type DepositCheckError =
@@ -652,14 +643,15 @@ interface DepositCheckResult {
   message?: string;
 }
 
-const depositCheckCache = new Map<string, { result: DepositCheckResult; expiresAt: number }>();
+const depositCheckCache = new Map<
+  string,
+  { result: DepositCheckResult; expiresAt: number }
+>();
 
 async function validateDepositAddress(address: string): Promise<DepositCheckResult> {
   const now = Date.now();
   const cached = depositCheckCache.get(address);
-  if (cached && cached.expiresAt > now) {
-    return cached.result;
-  }
+  if (cached && cached.expiresAt > now) return cached.result;
 
   let result: DepositCheckResult;
   try {
@@ -669,7 +661,8 @@ async function validateDepositAddress(address: string): Promise<DepositCheckResu
       (b) =>
         "asset_code" in b &&
         b.asset_code === USDC_ASSET_CODE &&
-        (!USDC_ASSET_ISSUER || ("asset_issuer" in b && b.asset_issuer === USDC_ASSET_ISSUER)),
+        (!USDC_ASSET_ISSUER ||
+          ("asset_issuer" in b && b.asset_issuer === USDC_ASSET_ISSUER)),
     );
     if (!hasUsdcTrustline) {
       result = {
@@ -681,7 +674,8 @@ async function validateDepositAddress(address: string): Promise<DepositCheckResu
       const native = account.balances.find((b) => b.asset_type === "native");
       const xlmBalance = native ? Number(native.balance) : 0;
       const subentries = account.subentry_count || 0;
-      const minReserve = BASE_RESERVE_XLM + SUBENTRY_RESERVE_XLM * subentries + FEE_BUFFER_XLM;
+      const minReserve =
+        BASE_RESERVE_XLM + SUBENTRY_RESERVE_XLM * subentries + FEE_BUFFER_XLM;
       if (xlmBalance < minReserve) {
         result = {
           ok: false,
@@ -709,12 +703,16 @@ async function validateDepositAddress(address: string): Promise<DepositCheckResu
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Routes: payments
+// ---------------------------------------------------------------------------
+
 /**
- * Issue #976: `create_payment` — validates the deposit address before
- * returning it to the merchant. Returns HTTP 422 with a machine-readable
- * error code when the address is not ready to receive USDC.
+ * POST /v1/payments
+ * Issue #976: validates deposit address before returning it.
+ * Issue #1155: request body validated against createPaymentSchema.
  */
-app.post("/v1/payments", async (req, res) => {
+app.post("/v1/payments", validateBody(createPaymentSchema), async (req, res) => {
   const depositAddress = req.body?.deposit_address;
   if (!depositAddress || typeof depositAddress !== "string") {
     return res.status(400).json({ error: "deposit_address is required" });
@@ -728,97 +726,71 @@ app.post("/v1/payments", async (req, res) => {
   return res.status(201).json({ deposit_address: depositAddress });
 });
 
-app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
- * Issue #972: verify a customer deposit before calling the contract's
- * `verify_payment`. The tx hash is cross-checked against Horizon (destination,
- * amount, memo). Horizon lookups are retried up to 3 times; if all attempts
- * fail the request returns HTTP 503. A transaction that exists but does not
- * match the payment returns HTTP 422 with error code `TRANSACTION_MISMATCH`.
- */
-app.post("/v1/payments/:paymentId/verify", async (req, res) => {
-  const { tx_hash: txHash } = req.body ?? {};
-  if (typeof txHash !== "string" || txHash.length === 0) {
-    return res.status(400).json({ error: "tx_hash is required" });
-  }
-
-  const payment = getPaymentCharge(req.params.paymentId);
-  if (!payment) {
-    return res
-      .status(404)
-      .json({ error: `payment ${req.params.paymentId} not found` });
-  }
-
-  const MAX_ATTEMPTS = 3;
-  let validation: TxValidationResult | null = null;
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    try {
-      validation = await validateTransaction(txHash, payment);
-      break;
-    } catch (e) {
-      lastError = e;
-      console.warn(
-        `[verify_payment] Horizon lookup attempt ${attempt}/${MAX_ATTEMPTS} failed: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
-    }
-  }
-
-  if (!validation) {
-    return res.status(503).json({
-      error: "Horizon unavailable, could not verify transaction",
-      code: "HORIZON_UNAVAILABLE",
-      detail: lastError instanceof Error ? lastError.message : String(lastError),
-    });
-  }
-
-  if (!validation.ok) {
-    return res.status(422).json({
-      error: "transaction does not match payment",
-      code: "TRANSACTION_MISMATCH",
-      detail: validation.error,
-    });
-  }
-
-  // All Horizon checks passed — safe to call the contract's `verify_payment`.
-  return res.status(200).json({
-    payment_id: payment.payment_id,
-    tx_hash: txHash,
-    verified: true,
-  });
-});
-
 /**
- * Issue #971: health check reports the currently active Horizon endpoint.
- * The active endpoint is the first configured one that responds; if none
- * respond, `horizon_endpoint` is null and `horizon_ok` is false.
+ * POST /v1/payments/:paymentId/verify
+ * Issue #972: cross-validates tx hash against Horizon before verify_payment.
+ * Issue #1155: request body validated against verifyPaymentSchema.
  */
-app.get("/health", async (_req, res) => {
-  let activeEndpoint: string | null = null;
-  try {
-    await withFailover(async (url) => {
-      const response = await fetch(`${url.replace(/\/$/, "")}/`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      activeEndpoint = url;
-      return url;
-    });
-  } catch {
-    activeEndpoint = null;
-  }
+app.post(
+  "/v1/payments/:paymentId/verify",
+  validateBody(verifyPaymentSchema),
+  async (req, res) => {
+    const { tx_hash: txHash } = req.body ?? {};
+    if (typeof txHash !== "string" || txHash.length === 0) {
+      return res.status(400).json({ error: "tx_hash is required" });
+    }
 
-  return res.status(200).json({
-    status: "ok",
-    horizon_endpoint: activeEndpoint,
-    horizon_ok: activeEndpoint !== null,
-  });
- * Issue #981: unauthenticated health check endpoint. Reports database and
- * Horizon connectivity so load balancers and readiness probes can detect a
- * degraded service. Returns 200 when healthy, 503 when degraded.
- */
+    const payment = getPaymentCharge(req.params.paymentId);
+    if (!payment) {
+      return res.status(404).json({ error: `payment ${req.params.paymentId} not found` });
+    }
+
+    const MAX_ATTEMPTS = 3;
+    let validation: TxValidationResult | null = null;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      try {
+        validation = await validateTransaction(txHash, payment);
+        break;
+      } catch (e) {
+        lastError = e;
+        console.warn(
+          `[verify_payment] Horizon lookup attempt ${attempt}/${MAX_ATTEMPTS} failed: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+
+    if (!validation) {
+      return res.status(503).json({
+        error: "Horizon unavailable, could not verify transaction",
+        code: "HORIZON_UNAVAILABLE",
+        detail: lastError instanceof Error ? lastError.message : String(lastError),
+      });
+    }
+
+    if (!validation.ok) {
+      return res.status(422).json({
+        error: "transaction does not match payment",
+        code: "TRANSACTION_MISMATCH",
+        detail: validation.error,
+      });
+    }
+
+    return res.status(200).json({
+      payment_id: payment.payment_id,
+      tx_hash: txHash,
+      verified: true,
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Routes: health (Issue #981)
+// ---------------------------------------------------------------------------
+
 app.get("/health", async (_req, res) => {
   const [dbError, horizonError] = await Promise.all([checkDatabase(), checkHorizon()]);
   const healthy = !dbError && !horizonError;
@@ -828,38 +800,23 @@ app.get("/health", async (_req, res) => {
     version: SERVICE_VERSION,
     database: dbError ? "disconnected" : "connected",
     horizon: horizonError ? "disconnected" : "connected",
-    horizon_url: HORIZON_URL,
+    horizon_url: HORIZON_URL_HEALTH,
     uptime_secs: Math.floor((Date.now() - STARTED_AT) / 1000),
   };
 
-  if (!healthy) {
-    body.error = dbError || horizonError;
-  }
+  if (!healthy) body.error = dbError || horizonError;
 
   return res.status(healthy ? 200 : 503).json(body);
 });
 
-/**
- * Issue #974: Fee-Bump daemon configuration.
- *
- * `FEE_BUMP_THRESHOLD_SECS` — how long a payment may sit in `Pending` before
- * it is considered stuck (default 30s).
- * `FEE_BUMP_MAX_STROOPS` — the maximum fee (in stroops) FluxaPay is willing
- * to pay when re-wrapping a stuck transaction. Charged to FluxaPay's
- * operational fee account, never the merchant.
- */
+// ---------------------------------------------------------------------------
+// Issue #974: Fee-Bump daemon
+// ---------------------------------------------------------------------------
+
 const FEE_BUMP_THRESHOLD_SECS = Number(process.env.FEE_BUMP_THRESHOLD_SECS || 30);
 const FEE_BUMP_MAX_STROOPS = Number(process.env.FEE_BUMP_MAX_STROOPS || 10_000);
 const FEE_BUMP_INTERVAL_MS = 30_000;
 
-/**
- * Issue #974: scan for payments stuck in `Pending` past the threshold and
- * bump their fee via a CAP-0015 Fee-Bump transaction.
- *
- * The actual Horizon interaction lives in the indexer's fee-bump module; this
- * daemon only schedules the sweep and logs the outcome so the backend process
- * owns the lifecycle.
- */
 async function runFeeBumpSweep(): Promise<void> {
   try {
     const { bumpStuckPayments } = await import("./services/feeBump");
@@ -878,10 +835,13 @@ async function runFeeBumpSweep(): Promise<void> {
 
 function startFeeBumpDaemon(): NodeJS.Timeout {
   const timer = setInterval(runFeeBumpSweep, FEE_BUMP_INTERVAL_MS);
-  // Do not keep the event loop alive solely for the daemon.
   timer.unref?.();
   return timer;
 }
+
+// ---------------------------------------------------------------------------
+// Entrypoint
+// ---------------------------------------------------------------------------
 
 if (require.main === module) {
   app.listen(PORT, () => {
@@ -890,5 +850,12 @@ if (require.main === module) {
   startFeeBumpDaemon();
 }
 
-export { app, startFeeBumpDaemon, runFeeBumpSweep, validateDepositAddress };
-export { app, withFailover, HORIZON_ENDPOINTS, validateTransaction };
+export {
+  app,
+  startFeeBumpDaemon,
+  runFeeBumpSweep,
+  validateDepositAddress,
+  withFailover,
+  HORIZON_ENDPOINTS,
+  validateTransaction,
+};

@@ -335,6 +335,40 @@ fn test_negative_spend_cap_rejected_at_registration() {
     assert_eq!(session_event_count(&env, "POLICY_REGISTERED"), 0);
 }
 
+#[test]
+fn test_revoked_session_key_rejected_for_policy_execution() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (contract_id, account, session_key) = open(&env);
+    let target = Address::generate(&env);
+    let limits = policy(&env, Some(100), Some(1_000), 10_000, vec![&env], vec![&env]);
+
+    in_contract(&env, &contract_id, || {
+        register_session_key_with_policy(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+            100_000,
+            limits,
+        )
+        .unwrap();
+        crate::account_abstraction::revoke_session_key(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+        )
+        .unwrap();
+
+        let res = execute_with_session(
+            env.clone(),
+            account,
+            session_key,
+            invocation(&env, &target, "charge", 10),
+        );
+        assert_eq!(res, Err(AccountAbstractionError::SignerRevoked));
+    });
+}
+
 /* ------------------------------------------------------------------ */
 /*  Issue #1029: merchant -> sub-account delegation                    */
 /* ------------------------------------------------------------------ */

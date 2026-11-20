@@ -48,6 +48,9 @@ export const payments = pgTable(
     amount: bigint("amount", { mode: "bigint" }).notNull(),
     currency: varchar("currency", { length: 50 }),
     status: varchar("status", { length: 50 }),
+    // Fee charged on the payment (stroops). Refund records do not carry a
+    // separate fee, so refund views report the fee of the source payment.
+    feeAmount: bigint("fee_amount", { mode: "bigint" }),
     paymentLinkId: varchar("payment_link_id", { length: 255 }),
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at").defaultNow(),

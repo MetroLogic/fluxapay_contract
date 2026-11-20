@@ -150,6 +150,12 @@ pub const MAX_TREASURY_SIGNERS: u32 = 10;
 /// keeping the ledger-read budget bounded regardless of the caller's `limit`.
 pub const TOP_MERCHANTS_MAX_LIMIT: u32 = 100;
 
+/// Issue #1170: maximum number of payment ids retained in the per-merchant
+/// `MerchantPayments` index. Payment entries themselves are TTL-bumped on
+/// creation (`bump_payment_ttl`), while this index is capped so a single
+/// merchant cannot grow persistent storage without bound.
+pub const MAX_PAYMENTS_PER_MERCHANT: u32 = 10_000;
+
 /// Maximum number of fee-collection records retained in `FeeCollectionHistory`.
 /// Kept larger than `TREASURY_WITHDRAWAL_HISTORY_CAP` since fee reporting is
 /// meant to cover longer look-back windows (e.g. a full reporting month).

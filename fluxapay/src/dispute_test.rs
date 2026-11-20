@@ -7,6 +7,20 @@ use soroban_sdk::{
     token, vec, Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
 
+fn bond_event_count(env: &Env, name: &str) -> usize {
+    env.events()
+        .all()
+        .iter()
+        .filter(|e| {
+            e.0.len() >= 2
+                && e.0.get(0).and_then(|t| t.try_into_val::<Symbol>(env).ok())
+                    == Some(Symbol::new(env, "DISPUTE"))
+                && e.0.get(1).and_then(|t| t.try_into_val::<Symbol>(env).ok())
+                    == Some(Symbol::new(env, name))
+        })
+        .count()
+}
+
 fn setup_contracts(env: &Env) -> (Address, PaymentProcessorClient<'_>, RefundManagerClient<'_>) {
     let payment_processor = env.register(PaymentProcessor, ());
     let refund_manager = env.register(RefundManager, ());
@@ -271,6 +285,88 @@ fn test_cannot_set_deadline_on_resolved_dispute() {
     );
 
     assert_eq!(result, Err(Ok(crate::Error::DisputeAlreadyResolved)));
+}
+
+/// Issue #1181: both parties stake a bond on dispute creation; resolution
+/// returns them (and emits BOND_RETURNED), rejection forfeits the disputer's
+/// bond to the collector, and a second resolution cannot return bonds twice.
+#[test]
+fn test_dispute_bond_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // --- merchant-favour resolution ---
+    let (admin, operator, refund_client, dispute_id) = setup_open_dispute(&env, "bond_resolve");
+    let dispute = refund_client.get_dispute(&dispute_id);
+    let token_address = env.as_contract(&refund_client.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken)
+            .unwrap()
+    });
+    let token = token::Client::new(&env, &token_address);
+    let bond = refund_client.get_dispute_bond_amount();
+    let contract_before = token.balance(&refund_client.address);
+    let admin_before = token.balance(&admin);
+    let disputer_before = token.balance(&dispute.disputer);
+    let returned_before = bond_event_count(&env, "BOND_RETURNED");
+
+    // Both bonds are staked on create_dispute (each party had 100_000 minted).
+    assert_eq!(token.balance(&dispute.disputer), 0);
+    assert_eq!(token.balance(&dispute.merchant_id), 0);
+    assert!(contract_before >= bond * 2);
+
+    refund_client.resolve_dispute_with_refund(
+        &operator,
+        &dispute_id,
+        &String::from_str(&env, "Refund approved"),
+        &String::from_str(&env, "sig-resolve"),
+    );
+    assert_eq!(token.balance(&admin) - admin_before, bond);
+    assert!(token.balance(&dispute.disputer) > disputer_before);
+    assert_eq!(bond_event_count(&env, "BOND_RETURNED"), returned_before + 1);
+
+    // Re-resolving fails and must not release the bonds a second time.
+    let second = refund_client.try_resolve_dispute_with_refund(
+        &operator,
+        &dispute_id,
+        &String::from_str(&env, "Again"),
+        &String::from_str(&env, "sig-again"),
+    );
+    assert!(second.is_err());
+    assert_eq!(token.balance(&admin) - admin_before, bond);
+    assert_eq!(bond_event_count(&env, "BOND_RETURNED"), returned_before + 1);
+
+    // --- payer-favour rejection ---
+    let (admin2, operator2, rc2, dispute_id2) = setup_open_dispute(&env, "bond_reject");
+    let d2 = rc2.get_dispute(&dispute_id2);
+    let token_address2 = env.as_contract(&rc2.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken)
+            .unwrap()
+    });
+    let token2 = token::Client::new(&env, &token_address2);
+    let bond2 = rc2.get_dispute_bond_amount();
+    let contract_before2 = token2.balance(&rc2.address);
+    let admin_before2 = token2.balance(&admin2);
+    let returned_before2 = bond_event_count(&env, "BOND_RETURNED");
+    let forfeited_before2 = bond_event_count(&env, "BOND_FORFEITED");
+    assert_eq!(token2.balance(&d2.disputer), 0);
+    assert_eq!(token2.balance(&d2.merchant_id), 0);
+
+    rc2.reject_dispute(
+        &operator2,
+        &dispute_id2,
+        &String::from_str(&env, "Claim rejected"),
+        &String::from_str(&env, "sig-reject"),
+    );
+    assert_eq!(token2.balance(&d2.merchant_id), bond2);
+    assert_eq!(token2.balance(&d2.disputer), 0);
+    assert_eq!(token2.balance(&admin2) - admin_before2, bond2);
+    assert_eq!(contract_before2 - token2.balance(&rc2.address), bond2 * 2);
+    assert_eq!(bond_event_count(&env, "BOND_RETURNED"), returned_before2 + 1);
+    assert_eq!(bond_event_count(&env, "BOND_FORFEITED"), forfeited_before2 + 1);
 }
 
 #[test]
