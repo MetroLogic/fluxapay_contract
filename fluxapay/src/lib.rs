@@ -14686,6 +14686,8 @@ mod stream_vesting_test;
 #[cfg(test)] mod oracle_sanitization_test;
 #[cfg(test)] mod partial_overpaid_test;
 #[cfg(test)] mod pause_test;
+#[cfg(test)] mod recovery_test;
+#[cfg(test)] pub use recovery_test::RecoveryHarnessClient;
 #[cfg(test)] mod payment_link_test;
 #[cfg(test)] mod payment_metadata_test;
 #[cfg(test)] mod payment_retry_test;
