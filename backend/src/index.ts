@@ -415,6 +415,7 @@ app.use(
     indexerUrl: process.env.INDEXER_URL,
     networkPassphrase: NETWORK_PASSPHRASE,
     homeDomain: HOME_DOMAIN,
+    jwtSecret: JWT_SECRET,
   }),
 );
 

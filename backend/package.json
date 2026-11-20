@@ -9,6 +9,8 @@
     "build": "tsc",
     "test:content-type": "ts-node --transpile-only test/content-type.test.ts",
     "test:fee-bump": "ts-node --transpile-only test/fee-bump.test.ts",
+    "test:settlements": "ts-node --transpile-only test/settlements.test.ts",
+    "test": "npm run test:content-type && npm run test:settlements"
     "test:validation": "ts-node --transpile-only test/validation.test.ts",
     "test:request-logger": "ts-node --transpile-only test/request-logger.test.ts",
     "test:merchant-registry": "ts-node --transpile-only test/merchant-registry.test.ts",
