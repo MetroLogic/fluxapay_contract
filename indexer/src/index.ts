@@ -12,9 +12,11 @@ import { startServer } from "./server";
 import { sseManager } from "./sse";
 import {
   buildEnvelope,
+  computeBackoffDelayMs,
   deliverOnce,
   WebhookStore as PgWebhookStore,
   type FetchLike,
+  type WebhookEnvelope,
   type WebhookEventType,
   type WebhookStore,
 } from "./webhooks";
@@ -34,10 +36,25 @@ export interface EventSubscriptionConfig {
 }
 
 export type ReplayWebhookDispatcher = (event: AnyEvent) => Promise<void>;
+export type LiveWebhookDispatcher = (event: AnyEvent) => Promise<void>;
+
+export type LiveWebhookStore = Pick<
+  WebhookStore,
+  "listEnabledEndpointsForEvent" | "recordAttempt"
+> & {
+  enqueueFailedDelivery?: (
+    endpointId: string,
+    envelope: WebhookEnvelope,
+    error: string,
+    retryDelayMs?: number,
+  ) => Promise<void>;
+};
 
 export interface EventSubscriberDependencies {
   eventSource?: Pick<rpc.Server, "getEvents">;
   replayWebhookDispatcher?: ReplayWebhookDispatcher;
+  liveWebhookDispatcher?: LiveWebhookDispatcher;
+  webhookStore?: LiveWebhookStore;
   webhookFetch?: FetchLike;
 }
 
@@ -101,6 +118,57 @@ async function resolveMerchantIdForEvent(
     | { merchant_id?: unknown }
     | null;
   return payment && typeof payment.merchant_id === "string" ? payment.merchant_id : null;
+}
+
+export function createLiveWebhookDispatcher(
+  database: Database,
+  store: LiveWebhookStore,
+  fetch: FetchLike = globalThis.fetch as unknown as FetchLike,
+): LiveWebhookDispatcher {
+  return async (event) => {
+    const eventType = getWebhookEventType(event);
+    if (!eventType) return;
+
+    const value = event.value as Record<string, unknown>;
+    const merchantId = await resolveMerchantIdForEvent(database, value);
+    if (!merchantId) {
+      console.warn(`Cannot dispatch live webhook for event ${event.id}: merchant not found`);
+      return;
+    }
+
+    const endpoints = await store.listEnabledEndpointsForEvent(merchantId, eventType);
+    if (endpoints.length === 0) return;
+
+    const envelope = buildEnvelope(eventType, value, true, Date.now, {
+      eventId: event.id,
+    });
+    const retryDelayMs = computeBackoffDelayMs(1) ?? 60_000;
+
+    for (const endpoint of endpoints) {
+      try {
+        const { attempt } = await deliverOnce(endpoint, envelope, 1, { fetch });
+        await store.recordAttempt(attempt);
+        if (!attempt.success) {
+          const errorMsg =
+            attempt.responseBody ?? `HTTP ${attempt.httpStatus ?? "no-response"}`;
+          if (typeof store.enqueueFailedDelivery === "function") {
+            await store.enqueueFailedDelivery(endpoint.id, envelope, errorMsg, retryDelayMs);
+          } else {
+            await database.storeDeadLetterEvent(
+              `webhook:${event.id}:${endpoint.id}`,
+              { ...envelope, endpoint_id: endpoint.id },
+              errorMsg,
+            );
+          }
+        }
+      } catch (error) {
+        console.error(
+          `Error delivering live webhook for event ${event.id} to endpoint ${endpoint.id}:`,
+          error,
+        );
+      }
+    }
+  };
 }
 
 export function createReplayWebhookDispatcher(
@@ -205,6 +273,7 @@ export class EventSubscriber {
   private pollTimer: NodeJS.Timeout | null = null;
   private dlqRetryTimer: NodeJS.Timeout | null = null;
   private replayWebhookDispatcher?: ReplayWebhookDispatcher;
+  private liveWebhookDispatcher?: LiveWebhookDispatcher;
 
   constructor(
     config: EventSubscriptionConfig,
@@ -224,12 +293,28 @@ export class EventSubscriber {
         }`
       );
     });
+    const defaultWebhookStore =
+      dependencies.webhookStore ??
+      (typeof this.database.getPool === "function"
+        ? new PgWebhookStore(this.database.getPool())
+        : undefined);
+
     if (dependencies.replayWebhookDispatcher) {
       this.replayWebhookDispatcher = dependencies.replayWebhookDispatcher;
-    } else if (typeof this.database.getPool === "function") {
+    } else if (defaultWebhookStore) {
       this.replayWebhookDispatcher = createReplayWebhookDispatcher(
         this.database,
-        new PgWebhookStore(this.database.getPool()),
+        defaultWebhookStore as WebhookStore,
+        dependencies.webhookFetch,
+      );
+    }
+
+    if (dependencies.liveWebhookDispatcher) {
+      this.liveWebhookDispatcher = dependencies.liveWebhookDispatcher;
+    } else if (defaultWebhookStore) {
+      this.liveWebhookDispatcher = createLiveWebhookDispatcher(
+        this.database,
+        defaultWebhookStore,
         dependencies.webhookFetch,
       );
     }
@@ -321,6 +406,7 @@ export class EventSubscriber {
             stored++;
             console.log(`✓ Stored event ${parsedEvent.id} from contract ${parsedEvent.contractId}`);
             await this.dispatchLiveSSE(parsedEvent);
+            await this.dispatchLiveWebhook(parsedEvent);
           }
         }
 
@@ -366,6 +452,20 @@ export class EventSubscriber {
       sseManager.broadcast(merchantId, eventType, value);
     } catch (error) {
       console.error(`Error broadcasting SSE for event ${event.id}:`, error);
+    }
+  }
+
+  /**
+   * Dispatch a newly stored, supported contract event to the owning
+   * merchant's enabled webhook endpoints. Failures are recorded and enqueued
+   * for the webhook retry worker without blocking or failing unrelated event
+   * processing.
+   */
+  private async dispatchLiveWebhook(event: AnyEvent): Promise<void> {
+    try {
+      await this.liveWebhookDispatcher?.(event);
+    } catch (error) {
+      console.error(`Error dispatching live webhook for event ${event.id}:`, error);
     }
   }
 

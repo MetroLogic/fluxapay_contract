@@ -20,6 +20,13 @@ import { createServer } from "../src/server";
 import { Database } from "../src/database";
 import { sseManager } from "../src/sse";
 import {
+  DELIVERY_ID_HEADER,
+  EVENT_TYPE_HEADER,
+  SIGNATURE_HEADER,
+  startWebhookRetryDaemon,
+  verifySignature,
+} from "../src/webhooks";
+import {
   clearRegisteredApiKeys,
   extractApiKey,
   registerApiKey,
@@ -1924,5 +1931,240 @@ describe("ISSUE #1039 — SSE broadcast for dispute status changes", () => {
     } finally {
       spy.restore();
     }
+  });
+});
+
+describe("Live webhook dispatch (EventSubscriber.processBatch)", () => {
+  const config = {
+    rpcUrl: "http://localhost:8000",
+    contractIds: ["C_PAYMENT"],
+    dbConnectionString: "postgres://localhost:5432/test",
+    pollInterval: 1000,
+    startLedger: 1,
+    dlqRetryIntervalMs: 60000,
+    dlqMinAgeSeconds: 60,
+    apiPort: 3001,
+  };
+
+  it("dispatches a signed webhook for a newly stored contract event, records the attempt, and avoids redispatching duplicates", async () => {
+    const mockDb = createMockDatabase();
+    const signingSecret = "whsec_live_integration_secret";
+    const endpoint = {
+      id: "ep_live_1",
+      merchantId: "merch_live_1",
+      url: "https://merchant.example/webhooks",
+      signingSecret,
+      eventTypes: ["payment.created"],
+      enabled: true,
+    };
+
+    const requests: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+    const attempts: any[] = [];
+    const webhookStore = {
+      async listEnabledEndpointsForEvent(merchantId: string, eventType: string) {
+        if (merchantId === endpoint.merchantId && endpoint.eventTypes.includes(eventType)) {
+          return [endpoint];
+        }
+        return [];
+      },
+      async recordAttempt(attempt: any) {
+        attempts.push(attempt);
+        return `att_${attempts.length}`;
+      },
+      async enqueueFailedDelivery() {
+        throw new Error("should not enqueue on 200 OK");
+      },
+    };
+
+    const subscriber = new EventSubscriber(config, mockDb as any, {
+      webhookStore: webhookStore as any,
+      webhookFetch: async (url, init) => {
+        requests.push({ url, headers: init.headers, body: init.body });
+        return { status: 200, text: async () => "received" };
+      },
+    });
+
+    const mockEvent = {
+      id: "evt_live_001",
+      ledger: 500,
+      txHash: "tx_live_abc",
+      contractId: "C_PAYMENT",
+      topic: ["PAYMENT", "CREATED"],
+      value: {
+        payment_id: "pay_live_1",
+        merchant_id: "merch_live_1",
+        amount: "2500000",
+        metadata: "order-42",
+      },
+    };
+
+    // First processing: stores event and dispatches signed webhook
+    const first = await subscriber.processBatch([mockEvent]);
+    assert.deepStrictEqual(first, { processed: 1, stored: 1, errors: 0 });
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(attempts.length, 1);
+
+    const req = requests[0];
+    assert.strictEqual(req.url, endpoint.url);
+    assert.strictEqual(req.headers[EVENT_TYPE_HEADER], "payment.created");
+    assert.ok(
+      verifySignature(signingSecret, req.headers[SIGNATURE_HEADER], req.body),
+      "webhook signature must verify against the endpoint signing secret",
+    );
+
+    const payload = JSON.parse(req.body);
+    assert.strictEqual(payload.type, "payment.created");
+    assert.strictEqual(payload.livemode, true);
+    assert.strictEqual(payload.event_id, "500-tx_live_abc-evt_live_001");
+    assert.strictEqual(payload.data.payment_id, "pay_live_1");
+    assert.strictEqual(req.headers[DELIVERY_ID_HEADER], payload.id);
+    assert.strictEqual(req.headers["x-webhook-event-id"], payload.id);
+
+    assert.strictEqual(attempts[0].endpointId, endpoint.id);
+    assert.strictEqual(attempts[0].eventType, "payment.created");
+    assert.strictEqual(attempts[0].paymentId, "pay_live_1");
+    assert.strictEqual(attempts[0].attemptNumber, 1);
+    assert.strictEqual(attempts[0].httpStatus, 200);
+    assert.strictEqual(attempts[0].success, true);
+    assert.strictEqual(attempts[0].livemode, true);
+
+    // Second processing of the exact same chain event: skipped as duplicate, no redispatch
+    const second = await subscriber.processBatch([mockEvent]);
+    assert.deepStrictEqual(second, { processed: 1, stored: 0, errors: 0 });
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(attempts.length, 1);
+  });
+
+  it("enqueues failed deliveries for retry preserving event identity without blocking unrelated events", async () => {
+    const mockDb = createMockDatabase();
+    const endpoint1 = {
+      id: "ep_fail_1",
+      merchantId: "merch_fail_1",
+      url: "https://failing.example/webhook",
+      signingSecret: "whsec_fail_secret",
+      eventTypes: ["payment.created"],
+      enabled: true,
+    };
+    const endpoint2 = {
+      id: "ep_ok_2",
+      merchantId: "merch_ok_2",
+      url: "https://healthy.example/webhook",
+      signingSecret: "whsec_ok_secret",
+      eventTypes: ["payment.created"],
+      enabled: true,
+    };
+
+    const attempts: any[] = [];
+    const dlqRows: any[] = [];
+    const deliveredBodies: Array<{ url: string; body: any }> = [];
+
+    const webhookStore = {
+      async getEndpoint(id: string) {
+        if (id === endpoint1.id) return endpoint1;
+        if (id === endpoint2.id) return endpoint2;
+        return null;
+      },
+      async listEnabledEndpointsForEvent(merchantId: string) {
+        if (merchantId === endpoint1.merchantId) return [endpoint1];
+        if (merchantId === endpoint2.merchantId) return [endpoint2];
+        return [];
+      },
+      async recordAttempt(attempt: any) {
+        attempts.push(attempt);
+        return `att_${attempts.length}`;
+      },
+      async enqueueFailedDelivery(endpointId: string, envelope: any, error: string) {
+        dlqRows.push({
+          id: dlqRows.length + 1,
+          event_id: `webhook:${envelope.event_id}:${endpointId}`,
+          endpoint_id: endpointId,
+          raw_data: { ...envelope, endpoint_id: endpointId },
+          error,
+          retry_count: 1,
+        });
+      },
+    };
+
+    let shouldFailEndpoint1 = true;
+    const mockFetch = async (url: string, init: { body: string }) => {
+      deliveredBodies.push({ url, body: JSON.parse(init.body) });
+      if (url === endpoint1.url && shouldFailEndpoint1) {
+        return { status: 500, text: async () => "upstream error" };
+      }
+      return { status: 200, text: async () => "ok" };
+    };
+
+    const subscriber = new EventSubscriber(config, mockDb as any, {
+      webhookStore: webhookStore as any,
+      webhookFetch: mockFetch as any,
+    });
+
+    const result = await subscriber.processBatch([
+      {
+        id: "evt_fail_1",
+        ledger: 600,
+        txHash: "tx_fail_1",
+        contractId: "C_PAYMENT",
+        topic: ["PAYMENT", "CREATED"],
+        value: { payment_id: "pay_fail_1", merchant_id: "merch_fail_1", amount: "100" },
+      },
+      {
+        id: "evt_ok_2",
+        ledger: 600,
+        txHash: "tx_ok_2",
+        contractId: "C_PAYMENT",
+        topic: ["PAYMENT", "CREATED"],
+        value: { payment_id: "pay_ok_2", merchant_id: "merch_ok_2", amount: "200" },
+      },
+    ]);
+
+    // Both events stored with zero batch errors
+    assert.deepStrictEqual(result, { processed: 2, stored: 2, errors: 0 });
+    assert.strictEqual(attempts.length, 2);
+    assert.strictEqual(attempts[0].success, false);
+    assert.strictEqual(attempts[0].httpStatus, 500);
+    assert.strictEqual(attempts[0].attemptNumber, 1);
+    assert.strictEqual(attempts[1].success, true);
+    assert.strictEqual(attempts[1].httpStatus, 200);
+
+    // Failed delivery was enqueued for the retry worker
+    assert.strictEqual(dlqRows.length, 1);
+    const originalBody = deliveredBodies[0].body;
+    assert.strictEqual(dlqRows[0].raw_data.event_id, originalBody.event_id);
+    assert.strictEqual(dlqRows[0].raw_data.id, originalBody.id);
+
+    // Now run the existing retry daemon once and verify identity is preserved
+    shouldFailEndpoint1 = false;
+    const mockPool = {
+      async query(sql: string, params?: any[]) {
+        if (sql.includes("SELECT id, event_id")) {
+          return { rows: dlqRows };
+        }
+        if (sql.includes("DELETE FROM dead_letter_events")) {
+          const idx = dlqRows.findIndex((r) => r.id === params?.[0]);
+          if (idx >= 0) dlqRows.splice(idx, 1);
+          return { rows: [] };
+        }
+        return { rows: [] };
+      },
+    };
+    const retryDaemon = startWebhookRetryDaemon(mockPool as any, webhookStore as any, {
+      intervalMs: 60_000,
+      fetch: mockFetch as any,
+    });
+    try {
+      await retryDaemon.runOnce();
+    } finally {
+      retryDaemon.stop();
+    }
+
+    assert.strictEqual(dlqRows.length, 0, "successful retry should remove row from DLQ");
+    assert.strictEqual(attempts.length, 3);
+    assert.strictEqual(attempts[2].attemptNumber, 2);
+    assert.strictEqual(attempts[2].success, true);
+
+    const retriedBody = deliveredBodies[2].body;
+    assert.strictEqual(retriedBody.event_id, originalBody.event_id);
+    assert.strictEqual(retriedBody.id, originalBody.id);
   });
 });
