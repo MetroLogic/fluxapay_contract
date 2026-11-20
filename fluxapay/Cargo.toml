@@ -9,7 +9,17 @@ crate-type = ["lib", "cdylib"]
 doctest = false
 
 [features]
-# Build only one contract at a time to keep each WASM under 30 KB.
+# WASM Contract Selection Rule (Issue #1269):
+# When compiling for WASM targets (`wasm32`), exactly ONE deployable `contract-*`
+# feature must be selected per build artifact.
+# - Zero contract features: rejected by build.rs with a diagnostic listing available options.
+# - Multiple contract features: rejected by build.rs with a diagnostic listing conflicting features.
+# Accidental multi-contract WASM artifacts risk symbol collisions and size limit violations.
+#
+# Non-WASM / native targets (tests, clippy, doc tests on host) intentionally allow
+# multiple features (including `--all-features`) so full cross-contract test and
+# lint suites continue to run without restriction.
+#
 # Default builds PaymentProcessor (the primary contract).
 default = ["contract-payment-processor"]
 contract-payment-processor = []
