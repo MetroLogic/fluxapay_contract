@@ -1535,6 +1535,14 @@ pub struct ContractInfo {
     /// Multi-sig signer set (see `get_multisig_config`).
     pub multisig_signers: Vec<Address>,
 }
+/// Issue #1168: calculate `amount * bps / 10_000` without wrapping.
+///
+/// Returns `None` when the intermediate multiplication overflows i128 so that
+/// callers can reject the operation (or saturate in read-only reporting paths).
+fn checked_amount_bps(amount: i128, bps: i128) -> Option<i128> {
+    amount.checked_mul(bps).and_then(|v| v.checked_div(10_000))
+}
+
 #[cfg_attr(
     any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
     contractimpl
@@ -2921,8 +2929,8 @@ impl RefundManager {
             default_fee_bps
         };
 
-        let fee = refund.amount * fee_bps / 10_000;
-        let net_amount = refund.amount - fee;
+        let fee = checked_amount_bps(refund.amount, fee_bps).ok_or(Error::InvalidAmount)?;
+        let net_amount = refund.amount.checked_sub(fee).ok_or(Error::InvalidAmount)?;
 
         // Issue #173: Multi-token swap refund router
         let (refund_token, _refund_amount_final) = if let (Some(original_token), Some(swap_path)) =
@@ -3305,8 +3313,8 @@ impl RefundManager {
             crate::merchant_registry::KycTier::Basic => REFUND_FEE_BPS_BASIC,
             crate::merchant_registry::KycTier::Unverified => Self::get_refund_fee_bps_internal(&env),
         };
-        let fee = refund_amount * fee_bps / 10_000;
-        let net_amount = refund_amount - fee;
+        let fee = checked_amount_bps(refund_amount, fee_bps).ok_or(Error::InvalidAmount)?;
+        let net_amount = refund_amount.checked_sub(fee).ok_or(Error::InvalidAmount)?;
 
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
         refund.status = RefundStatus::Completed;
@@ -4975,7 +4983,7 @@ impl RefundManager {
                 token_client.transfer(&env.current_contract_address(), &arb, &stake);
             } else {
                 // Slash 10%, return remainder
-                let slash = stake * slash_bps / 10_000;
+                let slash = checked_amount_bps(stake, slash_bps).ok_or(Error::InvalidAmount)?;
                 let remainder = stake.saturating_sub(slash);
                 if remainder > 0 {
                     token_client.transfer(&env.current_contract_address(), &arb, &remainder);
@@ -6604,7 +6612,7 @@ impl RefundManager {
         }
 
         // Override the subscription amount with the metered charge for this cycle.
-        let metered_amount = units_used.saturating_mul(unit_price);
+        let metered_amount = units_used.checked_mul(unit_price).ok_or(Error::InvalidAmount)?;
         subscription.amount = metered_amount;
         env.storage().persistent().set(
             &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
@@ -10764,7 +10772,7 @@ impl PaymentProcessor {
                     }
 
                     let fee = if refund_amount > 0 {
-                        refund_amount * merchant_fee_bps / 10_000
+                        checked_amount_bps(refund_amount, merchant_fee_bps).unwrap_or(i128::MAX)
                     } else {
                         0
                     };
@@ -10781,7 +10789,9 @@ impl PaymentProcessor {
                     };
 
                     payments_in_period.push_back(summary.clone());
-                    total_gross += payment.amount.saturating_add(tip);
+                    total_gross = total_gross
+                        .saturating_add(payment.amount)
+                        .saturating_add(tip);
                     total_fees += fee;
                     total_refunds += refund_amount;
                 }
@@ -11257,7 +11267,7 @@ impl PaymentProcessor {
         let settlement_fee: i128 = if fee_waiver_reason.is_some() {
             0
         } else if settlement_fee_bps > 0 {
-            payment.amount * settlement_fee_bps / 10_000
+            checked_amount_bps(payment.amount, settlement_fee_bps).ok_or(Error::InvalidAmount)?
         } else {
             0
         };
@@ -11271,7 +11281,11 @@ impl PaymentProcessor {
                 // Split the fee between treasury and developer.
                 // dev_amount = fee * developer_bps / 10000; treasury gets the remainder
                 // (including any rounding dust) so no tokens are lost.
-                let dev_amount: i128 = settlement_fee * fsc.developer_bps as i128 / 10_000;
+                let dev_amount: i128 = checked_amount_bps(
+                    settlement_fee,
+                    fsc.developer_bps as i128,
+                )
+                .ok_or(Error::InvalidAmount)?;
 
                 // Rounding dust goes to treasury.
                 let treasury_total = settlement_fee.saturating_sub(dev_amount);
@@ -11383,8 +11397,11 @@ impl PaymentProcessor {
             let merchant = registry_client.get_merchant(&payment.merchant_id);
             if let Some(fee_config) = merchant.fee_config.as_option() {
                 // Calculate fee using merchant's FeeConfig
-                let fee_bps_amount =
-                    (net_after_settlement_fee * (fee_config.platform_fee_bps as i128)) / 10_000;
+                let fee_bps_amount = checked_amount_bps(
+                    net_after_settlement_fee,
+                    fee_config.platform_fee_bps as i128,
+                )
+                .ok_or(Error::InvalidAmount)?;
                 let fixed_fee = fee_config.fixed_fee;
                 let total_merchant_fee = fee_bps_amount.saturating_add(fixed_fee);
 
@@ -14707,3 +14724,4 @@ mod stream_vesting_test;
 #[cfg(test)] mod merchant_refunds_test;
 #[cfg(test)] mod batch_settle_test;
 #[cfg(test)] mod require_auth_audit_test;
+#[cfg(test)] mod amount_math_test;
