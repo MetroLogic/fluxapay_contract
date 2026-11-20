@@ -1,5 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import * as dotenv from "dotenv";
 import { z } from "zod";
 import { Database } from "./database";
@@ -22,6 +22,36 @@ import { anchorEvidenceHash, parseEvidenceMultipart, pinEvidence } from "./evide
 import { requireSEP10Auth } from "./auth/middleware";
 
 dotenv.config();
+
+// Issue #1163: per-merchant settings held by the running server. These are
+// process-local until a durable merchant settings table is added; the dashboard
+// endpoints below are authenticated with the merchant's SEP-10 JWT.
+interface MerchantApiKeyRecord {
+  id: string;
+  label: string;
+  masked_key: string;
+  lifetime_days: number;
+  created_at: string;
+  expires_at: string;
+}
+interface MerchantSettings {
+  webhook_signing_key: string;
+  fee_recipient: string | null;
+  api_keys: MerchantApiKeyRecord[];
+}
+const merchantSettings = new Map<string, MerchantSettings>();
+function settingsFor(merchantId: string): MerchantSettings {
+  let settings = merchantSettings.get(merchantId);
+  if (!settings) {
+    settings = {
+      webhook_signing_key: randomBytes(32).toString("base64url"),
+      fee_recipient: null,
+      api_keys: [],
+    };
+    merchantSettings.set(merchantId, settings);
+  }
+  return settings;
+}
 
 export type ReplayDLQHandler = () => Promise<{ attempted: number; succeeded: number; failed: number }>;
 
@@ -645,6 +675,89 @@ export function createServer(
       } catch (error) {
         next(error);
       }
+    },
+  );
+
+  // Issue #1163: merchant settings, webhook key rotation, fee recipient, and
+  // API key lifecycle. All routes use the merchant's SEP-10 JWT.
+  app.get(
+    "/v1/merchant/settings",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const settings = settingsFor(req.auth!.sub);
+      res.status(200).json({
+        webhook_signing_key: settings.webhook_signing_key,
+        fee_recipient: settings.fee_recipient,
+        api_keys: settings.api_keys,
+      });
+    },
+  );
+
+  app.post(
+    "/v1/merchant/settings/webhook-key/rotate",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const settings = settingsFor(req.auth!.sub);
+      settings.webhook_signing_key = randomBytes(32).toString("base64url");
+      // The new key is also consumed by META_TX_FUNCTIONS.rotateWebhookKey
+      // relayers; see docs/sponsored-meta-transactions.md.
+      res.status(200).json({ webhook_signing_key: settings.webhook_signing_key });
+    },
+  );
+
+  app.put(
+    "/v1/merchant/settings/fee-recipient",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const feeRecipient = req.body?.fee_recipient;
+      if (typeof feeRecipient !== "string" || feeRecipient.trim().length === 0) {
+        res.status(400).json({ error: "fee_recipient is required" });
+        return;
+      }
+      const settings = settingsFor(req.auth!.sub);
+      settings.fee_recipient = feeRecipient.trim();
+      res.status(200).json({ fee_recipient: settings.fee_recipient });
+    },
+  );
+
+  app.post(
+    "/v1/merchant/api-keys",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
+      const lifetimeDays = Number(req.body?.lifetime_days ?? 30);
+      if (!label || !Number.isInteger(lifetimeDays) || lifetimeDays < 1 || lifetimeDays > 365) {
+        res.status(400).json({ error: "label and lifetime_days (1-365) are required" });
+        return;
+      }
+      const settings = settingsFor(req.auth!.sub);
+      const value = randomBytes(32).toString("base64url");
+      const record: MerchantApiKeyRecord = {
+        id: randomBytes(8).toString("hex"),
+        label,
+        masked_key: `${value.slice(0, 6)}…${value.slice(-4)}`,
+        lifetime_days: lifetimeDays,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + lifetimeDays * 86_400_000).toISOString(),
+      };
+      settings.api_keys.push(record);
+      // The full key is returned only once, on creation.
+      res.status(201).json({ ...record, api_key: value });
+    },
+  );
+
+  app.delete(
+    "/v1/merchant/api-keys/:id",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const settings = settingsFor(req.auth!.sub);
+      const index = settings.api_keys.findIndex((key) => key.id === req.params.id);
+      if (index < 0) {
+        res.status(404).json({ error: "API key not found" });
+        return;
+      }
+      const [revoked] = settings.api_keys.splice(index, 1);
+      res.status(200).json({ revoked: revoked.id });
     },
   );
 
