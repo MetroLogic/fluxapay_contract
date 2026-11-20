@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { DeliveryAttempt, DeliveryLogRow, WebhookEndpoint } from "./types";
+import type { DeliveryAttempt, DeliveryLogRow, WebhookEndpoint, WebhookEnvelope } from "./types";
 
 /**
  * Persistence for webhook endpoints and the delivery log (Issues #808, #810).
@@ -165,6 +165,31 @@ export class WebhookStore {
       [endpointId],
     );
     return rows[0]?.count ?? 0;
+  }
+
+  /**
+   * Enqueue a failed webhook delivery into `dead_letter_events` for the
+   * webhook retry daemon (`startWebhookRetryDaemon`). Preserves the exact
+   * `WebhookEnvelope` (including `id` and `event_id`) and attaches
+   * `endpoint_id` so the retry worker routes it to the same endpoint.
+   */
+  async enqueueFailedDelivery(
+    endpointId: string,
+    envelope: WebhookEnvelope,
+    error: string,
+    retryDelayMs: number = 60_000,
+  ): Promise<void> {
+    const dlqEventId = `webhook:${envelope.event_id}:${endpointId}`;
+    const rawData = { ...envelope, endpoint_id: endpointId };
+    await this.pool.query(
+      `INSERT INTO dead_letter_events (event_id, raw_data, error, retry_count, next_retry_at)
+       VALUES ($1, $2, $3, 1, NOW() + ($4 || ' milliseconds')::interval)
+       ON CONFLICT (event_id) DO UPDATE
+         SET raw_data = EXCLUDED.raw_data,
+             error = EXCLUDED.error,
+             next_retry_at = EXCLUDED.next_retry_at`,
+      [dlqEventId, JSON.stringify(rawData), error, String(retryDelayMs)],
+    );
   }
 
   /** Delete log rows past the retention window. Returns rows removed. */
