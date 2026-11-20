@@ -611,6 +611,43 @@ export function createServer(
     },
   );
 
+  // Issue #1164: settlement history, treasury balance, and fiat payout status.
+  app.get(
+    "/v1/merchant/settlements",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const rows = await database.getSettlementsByMerchant(req.auth!.sub);
+        let treasuryStroops = 0n;
+        const settlements = rows.map((row: any) => {
+          const stroops = BigInt(row.amount ?? 0);
+          const status = String(row.status ?? "unknown");
+          // Pending/failed payouts represent value still held in treasury.
+          if (status === "pending" || status === "failed") treasuryStroops += stroops;
+          return {
+            payment_id: String(row.payment_id),
+            amount_usdc: formatUsdc(stroops),
+            status,
+            fiat_amount: row.fiat_amount == null ? null : String(row.fiat_amount),
+            fiat_currency: row.fiat_currency == null ? null : String(row.fiat_currency),
+            created_at: row.created_at?.toISOString?.() ?? null,
+            settled_at: row.settled_at?.toISOString?.() ?? null,
+          };
+        });
+        res.status(200).json({
+          treasury_balance_usdc: formatUsdc(treasuryStroops),
+          payout_status:
+            settlements.find((item) => item.status === "failed")?.status ??
+            settlements.find((item) => item.status === "pending")?.status ??
+            (settlements.length > 0 ? "fiat_sent" : "no_settlements"),
+          settlements,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   // All subsequent routes require API-key authentication
   app.use(requireApiKey);
 
