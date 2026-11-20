@@ -2228,6 +2228,9 @@ impl RefundManager {
         amount: i128,
         currency: Symbol,
     ) {
+        // Issue #1167: this mutates persistent state and must authenticate the
+        // merchant whose payment record is being registered.
+        merchant_id.require_auth();
         if !env
             .storage()
             .persistent()
@@ -2286,6 +2289,8 @@ impl RefundManager {
         amount: i128,
         currency: Symbol,
     ) {
+        // Issue #1167: mutates persistent state; authenticate the merchant.
+        merchant_id.require_auth();
         if !env
             .storage()
             .persistent()
@@ -14701,3 +14706,4 @@ mod stream_vesting_test;
 #[cfg(test)] mod treasury_single_admin_threshold_test;
 #[cfg(test)] mod merchant_refunds_test;
 #[cfg(test)] mod batch_settle_test;
+#[cfg(test)] mod require_auth_audit_test;
