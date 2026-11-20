@@ -9,8 +9,8 @@ import {
   startWebhookRetryDaemon,
   WebhookStore,
 } from "./webhooks";
-import { getCachedRate } from "./fx-rate-cache";
 import { createRateLimitMiddleware } from "./rate-limit";
+import { sseManager } from "./sse";
 import { anchorEvidenceHash, parseEvidenceMultipart, pinEvidence } from "./evidence";
 import {
   extractApiKey,
@@ -45,6 +45,11 @@ interface MerchantSettings {
   api_keys: MerchantApiKeyRecord[];
 }
 const merchantSettings = new Map<string, MerchantSettings>();
+
+// Issue #858: maximum ledger span a single POST /admin/replay may cover.
+export const MAX_REPLAY_LEDGER_RANGE = 10000;
+
+// Stellar payment amounts are integers with 7 decimal places (stroops).
 function settingsFor(merchantId: string): MerchantSettings {
   let settings = merchantSettings.get(merchantId);
   if (!settings) {
@@ -215,6 +220,10 @@ const subscriptionMetricsCache = new Map<
  * Decode an opaque pagination cursor of the form base64url(created_at|id).
  * Returns null when the cursor is malformed so the caller can reject it.
  */
+function encodePaymentsCursor(createdAt: string, id: string): string {
+  return Buffer.from(`${createdAt}|${id}`, "utf8").toString("base64url");
+}
+
 function decodePaymentsCursor(cursor: string): { createdAt: string; id: string } | null {
   try {
     const decoded = Buffer.from(cursor, "base64url").toString("utf8");
@@ -227,103 +236,6 @@ function decodePaymentsCursor(cursor: string): { createdAt: string; id: string }
   } catch {
     return null;
   }
-
-  const missingFxPayments: string[] = [];
-  const payments = data.payments.map((payment) => {
-    const currency = String(payment.currency || "").toUpperCase();
-    const amount = asInteger(payment.amount);
-    const equivalents: Record<string, string> = {};
-    let foundRate = false;
-
-    for (const [pair, rate] of rates) {
-      const [base, quote] = pair.split("_");
-      if (base === currency && quote) {
-        equivalents[quote] = convertAmount(amount, rate.rate, rate.decimals);
-        foundRate = true;
-      } else if (quote === currency && base) {
-        equivalents[base] = convertAmount(amount, rate.rate, rate.decimals, true);
-        foundRate = true;
-      }
-    }
-
-    const requestedFiat = String(payment.fiat_currency || "").toUpperCase();
-    if (!foundRate || (requestedFiat && equivalents[requestedFiat] === undefined)) {
-      missingFxPayments.push(String(payment.payment_id));
-    }
-
-    return {
-      ...payment,
-      amount: formatTokenAmount(amount),
-      fee_amount: formatTokenAmount(asInteger(payment.fee_amount)),
-      fiat_amount: payment.fiat_amount == null ? null : String(payment.fiat_amount),
-      fiat_equivalent: equivalents,
-    };
-  });
-
-  const settledUsdc = data.settlements.filter(
-    (settlement) => String(settlement.currency || "").toUpperCase() === "USDC"
-  );
-  const usdcRefunds = data.refunds.filter(
-    (refund) => String(refund.currency || "").toUpperCase() === "USDC"
-  );
-  const usdcDisputeAdjustments = data.disputeAdjustments.filter(
-    (adjustment) => String(adjustment.currency || "").toUpperCase() === "USDC"
-  );
-  const gross = settledUsdc.reduce((sum, item) => sum + asInteger(item.amount), 0n);
-  const fees = settledUsdc.reduce((sum, item) => sum + asInteger(item.fee_amount), 0n);
-  const refunds = usdcRefunds.reduce((sum, item) => sum + asInteger(item.amount), 0n);
-  const net = gross - fees - refunds;
-  const disputeAdjustments = usdcDisputeAdjustments.reduce(
-    (sum, item) => sum + asInteger(item.amount),
-    0n
-  );
-  const netFiatEquivalent: Record<string, string> = {};
-  for (const [pair, rate] of rates) {
-    const [base, quote] = pair.split("_");
-    if (base === "USDC" && quote) {
-      netFiatEquivalent[quote] = convertAmount(net, rate.rate, rate.decimals);
-    }
-  }
-  for (const [pair, rate] of rates) {
-    const [base, quote] = pair.split("_");
-    if (quote === "USDC" && base && netFiatEquivalent[base] === undefined) {
-      netFiatEquivalent[base] = convertAmount(net, rate.rate, rate.decimals, true);
-    }
-  }
-
-  const report = {
-    period: { from, to },
-    summary: {
-      total_gross_usdc: formatTokenAmount(gross),
-      total_fees_usdc: formatTokenAmount(fees),
-      total_refunds_usdc: formatTokenAmount(refunds),
-      total_net_settled_usdc: formatTokenAmount(net),
-      fiat_equivalent: netFiatEquivalent,
-      dispute_adjustments: formatTokenAmount(disputeAdjustments),
-      fx_conversion_unavailable_payment_ids: missingFxPayments,
-    },
-    payments,
-    settlements: data.settlements.map((settlement) => {
-      const amount = asInteger(settlement.amount);
-      const fee = asInteger(settlement.fee_amount);
-      return {
-        ...settlement,
-        amount: formatTokenAmount(amount),
-        fee_amount: formatTokenAmount(fee),
-        net_amount: formatTokenAmount(amount - fee),
-      };
-    }),
-    refunds: data.refunds.map((refund) => ({
-      ...refund,
-      amount: formatTokenAmount(asInteger(refund.amount)),
-    })),
-    dispute_adjustments: data.disputeAdjustments.map((adjustment) => ({
-      ...adjustment,
-      amount: formatTokenAmount(asInteger(adjustment.amount)),
-    })),
-  };
-
-  return report;
 }
 
 function makeOnboardingStep(
@@ -364,7 +276,7 @@ export function createServer(
 
   app.post(
     "/v1/disputes/:id/evidence",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     express.raw({ type: "multipart/form-data", limit: "50mb" }),
     async (req: Request, res: Response) => {
       try {
@@ -454,7 +366,7 @@ export function createServer(
 
   app.get(
     "/v1/disputes/:id/evidence",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response) => {
       const context = await database.getDisputeEvidenceContext(req.params.id);
       if (!context) {
@@ -522,23 +434,6 @@ export function createServer(
     }
   );
 
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const rateAgeSecs = Math.max(0, nowSecs - cached.updatedAt);
-    const stale = rateAgeSecs > DEFAULT_FX_STALENESS_SECS;
-
-    const amountUsdc = Number(amountStroops) / 10 ** USDC_DECIMALS;
-    const amountFiat = amountUsdc * cached.rate;
-
-    res.status(200).json({
-      from,
-      to,
-      amount_usdc: formatFixed(amountUsdc, 2),
-      amount_fiat: formatFixed(amountFiat, 2),
-      rate: formatFixed(cached.rate, 2),
-      rate_age_secs: rateAgeSecs,
-      stale,
-    });
-  });
 
   // Issue #817: auth endpoints (stricter 10 req/min per-IP via rate limiter above)
   app.post("/v1/auth/login", (req: Request, res: Response) => {
@@ -555,12 +450,6 @@ export function createServer(
       expires_in: 3600,
     });
   });
-
-        const merchantId = req.merchantId;
-        if (!merchantId) {
-          res.status(401).json({ error: "Merchant API key authentication required" });
-          return;
-        }
 
   // Issue #855: Real-time event streaming via Server-Sent Events (SSE)
   const sseHandler = async (req: Request, res: Response): Promise<void> => {
@@ -597,8 +486,8 @@ export function createServer(
     });
   };
 
-  app.get("/v1/events/stream", requireSEP10Auth(sep10Config), sseHandler);
-  app.get("/events/stream", requireSEP10Auth(sep10Config), sseHandler);
+  app.get("/v1/events/stream", requireSEP10Auth(sep10AuthConfig), sseHandler);
+  app.get("/events/stream", requireSEP10Auth(sep10AuthConfig), sseHandler);
 
   // GET /webhooks/public-key (Issue #775): Unauthenticated public key endpoint for webhook verification
   const publicKeyHandler = (_req: Request, res: Response) => {
@@ -627,7 +516,7 @@ export function createServer(
 
   app.get(
     "/v1/payment-links",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const links = await database.getPaymentLinksForMerchant(req.auth!.sub);
@@ -654,7 +543,7 @@ export function createServer(
 
   app.get(
     "/v1/payment-links/:id/analytics",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const analytics = await database.getPaymentLinkAnalytics(req.params.id, req.auth!.sub);
@@ -684,7 +573,7 @@ export function createServer(
   // SEP-10 JWT (the same token the dashboard stores in `fluxapay_jwt`).
   app.get(
     "/v1/merchant/refunds",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const status = typeof req.query.status === "string" ? req.query.status : undefined;
@@ -719,7 +608,7 @@ export function createServer(
   // Issue #1164: settlement history, treasury balance, and fiat payout status.
   app.get(
     "/v1/merchant/settlements",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const rows = await database.getSettlementsByMerchant(req.auth!.sub);
@@ -764,7 +653,7 @@ export function createServer(
   // API key lifecycle. All routes use the merchant's SEP-10 JWT.
   app.get(
     "/v1/merchant/settings",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     (req: Request, res: Response) => {
       const settings = settingsFor(req.auth!.sub);
       res.status(200).json({
@@ -777,7 +666,7 @@ export function createServer(
 
   app.post(
     "/v1/merchant/settings/webhook-key/rotate",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     (req: Request, res: Response) => {
       const settings = settingsFor(req.auth!.sub);
       settings.webhook_signing_key = randomBytes(32).toString("base64url");
@@ -789,7 +678,7 @@ export function createServer(
 
   app.put(
     "/v1/merchant/settings/fee-recipient",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     (req: Request, res: Response) => {
       const feeRecipient = req.body?.fee_recipient;
       if (typeof feeRecipient !== "string" || feeRecipient.trim().length === 0) {
@@ -804,7 +693,7 @@ export function createServer(
 
   app.post(
     "/v1/merchant/api-keys",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     (req: Request, res: Response) => {
       const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
       const lifetimeDays = Number(req.body?.lifetime_days ?? 30);
@@ -830,7 +719,7 @@ export function createServer(
 
   app.delete(
     "/v1/merchant/api-keys/:id",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     (req: Request, res: Response) => {
       const settings = settingsFor(req.auth!.sub);
       const index = settings.api_keys.findIndex((key) => key.id === req.params.id);
@@ -936,7 +825,7 @@ export function createServer(
         res.status(401).json({ error: "Missing authenticated subject" });
         return;
       }
-      if (subject !== merchant_id && !sep10Config.adminAccounts.has(subject)) {
+      if (subject !== merchant_id && !sep10AuthConfig.adminAccounts.has(subject)) {
         res.status(403).json({ error: "Token is not authorized for this merchant" });
         return;
       }
@@ -1055,7 +944,7 @@ export function createServer(
   // SEP-10 JWT authenticated (merchant subject = merchant_id).
   app.get(
     "/v1/reports/reconciliation",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     reconciliationHandler,
   );
 
@@ -1144,7 +1033,7 @@ export function createServer(
 
   app.get(
     "/v1/subscriptions/:id/invoices",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const invoices = await database.getInvoicesBySubscription(req.params.id);
@@ -1163,7 +1052,7 @@ export function createServer(
 
   app.get(
     "/v1/invoices/:id/pdf",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response) => {
       const invoice = await database.getInvoiceById(req.params.id);
       if (!invoice) {
@@ -1244,7 +1133,7 @@ export function createServer(
    */
   app.delete(
     "/v1/invoices/:id",
-    requireSEP10Auth(sep10Config),
+    requireSEP10Auth(sep10AuthConfig),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const invoiceId = req.params.id;
@@ -1417,10 +1306,14 @@ export async function startServer(
     rpcReadinessCheck,
   );
   // Issue #961: automatic webhook delivery retry with exponential backoff.
-  startWebhookRetryDaemon(database.getPool(), new WebhookStore(database.getPool()));
+  const webhookRetryDaemon = startWebhookRetryDaemon(database.getPool(), new WebhookStore(database.getPool()));
   const server = app.listen(port, () => {
     console.log(`Indexer REST API listening on port ${port}`);
   });
+  // Issue #1264: the retry daemon is part of the API server's lifecycle.
+  // Stop its sweep when the listener closes so a graceful shutdown never
+  // fires retries against a closing or closed database pool.
+  server.on("close", () => webhookRetryDaemon.stop());
   return server;
 }
 

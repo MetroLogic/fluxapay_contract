@@ -16,6 +16,8 @@ import {
   createReplayWebhookDispatcher,
   loadConfigFromEnv,
   EventSubscriber,
+  type ClosableApiServer,
+  type EventSubscriberDependencies,
 } from "../src/index";
 import { createServer } from "../src/server";
 import { Database } from "../src/database";
@@ -413,8 +415,7 @@ function createSEP10Token(merchantId: string): string {
     exp: Math.floor(Date.now() / 1000) + 60,
   })).toString("base64url");
   const message = `${header}.${payload}`;
-  const signature = crypto
-    .createHmac("sha256", onboardingAuthConfig.jwtSecret)
+  const signature = createHmac("sha256", onboardingAuthConfig.jwtSecret)
     .update(message)
     .digest("base64url");
   return `${message}.${signature}`;
@@ -1269,10 +1270,13 @@ describe("ISSUE #616 — Indexer REST API Server", () => {
   it("records payment-link views and enforces owner-only analytics", async () => {
     const previousHomeDomain = process.env.SEP10_HOME_DOMAIN;
     const previousServerKey = process.env.STELLAR_SERVER_PUBLIC_KEY;
+    const previousJwtSecret = process.env.SEP10_JWT_SECRET;
     const secret = "payment-link-analytics-test-key";
     const homeDomain = "fluxapay-test.example";
     process.env.SEP10_HOME_DOMAIN = homeDomain;
     process.env.STELLAR_SERVER_PUBLIC_KEY = Buffer.from(secret).toString("base64");
+    // Issue #802: the middleware verifies SEP-10 tokens with this secret.
+    process.env.SEP10_JWT_SECRET = secret;
 
     const mockDb = createMockDatabase();
     mockDb.state.paymentLinks.set("link_abc123", {
@@ -1351,6 +1355,8 @@ describe("ISSUE #616 — Indexer REST API Server", () => {
       else process.env.SEP10_HOME_DOMAIN = previousHomeDomain;
       if (previousServerKey === undefined) delete process.env.STELLAR_SERVER_PUBLIC_KEY;
       else process.env.STELLAR_SERVER_PUBLIC_KEY = previousServerKey;
+      if (previousJwtSecret === undefined) delete process.env.SEP10_JWT_SECRET;
+      else process.env.SEP10_JWT_SECRET = previousJwtSecret;
     }
   });
 
@@ -2054,6 +2060,222 @@ describe("ISSUE #1039 — SSE broadcast for dispute status changes", () => {
       assert.strictEqual(spy.calls.length, 0);
     } finally {
       spy.restore();
+    }
+  });
+});
+
+describe("ISSUE #1264 — Graceful shutdown on SIGTERM", () => {
+  const shutdownConfig = {
+    rpcUrl: "http://localhost:8000/soroban/rpc",
+    contractIds: ["CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"],
+    dbConnectionString: "postgres://postgres:password@localhost:5432/fluxapay",
+    pollInterval: 60_000,
+    startLedger: 1,
+    dlqRetryIntervalMs: 60_000,
+    dlqMinAgeSeconds: 60,
+    apiPort: 3001,
+  };
+
+  // Stub event source: answers every poll with zero events so `pollEvents()`
+  // never reaches the database. `onPoll` lets a test count poll attempts.
+  function stubEventSource(onPoll?: () => void) {
+    return {
+      getEvents: async () => {
+        onPoll?.();
+        return { events: [], latestLedger: 1 };
+      },
+    } as unknown as EventSubscriberDependencies["eventSource"];
+  }
+
+  // Minimal stand-in for Database: the subscriber only touches
+  // `initialize()` / `close()` on the shutdown path, and the stubbed event
+  // source keeps polling from ever reaching the store.
+  function createShutdownHarness() {
+    const order: string[] = [];
+    let dbCloseCalls = 0;
+    let serverCloseCalls = 0;
+    const mockDb = {
+      async initialize() {},
+      async close() {
+        dbCloseCalls++;
+        order.push("db");
+      },
+    };
+    const fakeServer: ClosableApiServer = {
+      close(cb?: (err?: Error) => void) {
+        serverCloseCalls++;
+        order.push("server");
+        cb?.();
+      },
+    };
+    const subscriber = new EventSubscriber(
+      shutdownConfig,
+      mockDb as unknown as Database,
+      { eventSource: stubEventSource() },
+    );
+    subscriber.setApiServer(fakeServer);
+    return {
+      subscriber,
+      order,
+      get dbCloseCalls() {
+        return dbCloseCalls;
+      },
+      get serverCloseCalls() {
+        return serverCloseCalls;
+      },
+    };
+  }
+
+  // The subscriber registers process-level signal handlers; remove exactly
+  // the ones it added so later tests are unaffected.
+  function removeAddedSignalListeners(before: {
+    sigint: unknown[];
+    sigterm: unknown[];
+  }) {
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      const key = signal === "SIGINT" ? "sigint" : "sigterm";
+      for (const listener of process.listeners(signal)) {
+        if (!before[key].includes(listener)) {
+          process.removeListener(signal, listener);
+        }
+      }
+    }
+  }
+
+  it("registers SIGINT and SIGTERM handlers exactly once when start() is called twice", async () => {
+    const { subscriber } = createShutdownHarness();
+    const before = {
+      sigint: [...process.listeners("SIGINT")],
+      sigterm: [...process.listeners("SIGTERM")],
+    };
+    try {
+      await subscriber.start();
+      await subscriber.start();
+      assert.strictEqual(
+        process.listeners("SIGINT").length - before.sigint.length,
+        1,
+        "expected exactly one SIGINT handler",
+      );
+      assert.strictEqual(
+        process.listeners("SIGTERM").length - before.sigterm.length,
+        1,
+        "expected exactly one SIGTERM handler",
+      );
+    } finally {
+      await subscriber.shutdown();
+      removeAddedSignalListeners(before);
+    }
+  });
+
+  it("shutdown is idempotent and closes the API server before the database", async () => {
+    // NOTE: read the counters off the harness object, not via destructuring
+    // (destructuring would snapshot the getter values at 0).
+    const harness = createShutdownHarness();
+    const { subscriber, order } = harness;
+    const before = {
+      sigint: [...process.listeners("SIGINT")],
+      sigterm: [...process.listeners("SIGTERM")],
+    };
+    try {
+      await subscriber.start();
+      await Promise.all([
+        subscriber.shutdown(),
+        subscriber.shutdown(),
+        subscriber.shutdown(),
+      ]);
+      assert.strictEqual(harness.serverCloseCalls, 1, "API server must close once");
+      assert.strictEqual(harness.dbCloseCalls, 1, "database must close once");
+      assert.deepStrictEqual(order, ["server", "db"]);
+    } finally {
+      removeAddedSignalListeners(before);
+    }
+  });
+
+  it("SIGTERM triggers the same shutdown path as SIGINT", async () => {
+    const harness = createShutdownHarness();
+    const { subscriber } = harness;
+    const before = {
+      sigint: [...process.listeners("SIGINT")],
+      sigterm: [...process.listeners("SIGTERM")],
+    };
+    try {
+      await subscriber.start();
+      process.emit("SIGTERM");
+      // shutdown() returns the in-flight promise when a shutdown is
+      // already running, so awaiting it waits for the signal-triggered
+      // shutdown to finish.
+      await subscriber.shutdown();
+      assert.strictEqual(harness.serverCloseCalls, 1, "SIGTERM must close the API server");
+      assert.strictEqual(harness.dbCloseCalls, 1, "SIGTERM must close the database");
+      // A further explicit shutdown stays a no-op.
+      await subscriber.shutdown();
+      assert.strictEqual(harness.serverCloseCalls, 1);
+      assert.strictEqual(harness.dbCloseCalls, 1);
+    } finally {
+      removeAddedSignalListeners(before);
+    }
+  });
+
+  it("shutdown without an attached API server still closes the database exactly once", async () => {
+    const order: string[] = [];
+    let dbCloseCalls = 0;
+    const mockDb = {
+      async initialize() {},
+      async close() {
+        dbCloseCalls++;
+        order.push("db");
+      },
+    };
+    const subscriber = new EventSubscriber(
+      shutdownConfig,
+      mockDb as unknown as Database,
+      { eventSource: stubEventSource() },
+    );
+    const before = {
+      sigint: [...process.listeners("SIGINT")],
+      sigterm: [...process.listeners("SIGTERM")],
+    };
+    try {
+      await subscriber.start();
+      await subscriber.shutdown();
+      await subscriber.shutdown();
+      assert.strictEqual(dbCloseCalls, 1, "database must close once");
+      assert.deepStrictEqual(order, ["db"]);
+    } finally {
+      removeAddedSignalListeners(before);
+    }
+  });
+
+  it("stops polling after shutdown (negative control)", async () => {
+    let pollCalls = 0;
+    const mockDb = {
+      async initialize() {},
+      async close() {},
+    };
+    const subscriber = new EventSubscriber(
+      { ...shutdownConfig, pollInterval: 20, dlqRetryIntervalMs: 60_000 },
+      mockDb as unknown as Database,
+      { eventSource: stubEventSource(() => pollCalls++) },
+    );
+    const before = {
+      sigint: [...process.listeners("SIGINT")],
+      sigterm: [...process.listeners("SIGTERM")],
+    };
+    try {
+      await subscriber.start();
+      // Let a few polls run first, proving the loop was alive.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.ok(pollCalls > 0, "expected at least one poll before shutdown");
+      await subscriber.shutdown();
+      const callsAfterShutdown = pollCalls;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      assert.strictEqual(
+        pollCalls,
+        callsAfterShutdown,
+        "no new polls may start after shutdown",
+      );
+    } finally {
+      removeAddedSignalListeners(before);
     }
   });
 });
