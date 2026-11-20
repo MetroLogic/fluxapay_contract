@@ -217,7 +217,6 @@ export class Database implements SettlementStore {
             },
           });
         break;
-      }
 
       case "payment_links": {
         const [eventType, eventSubtype] = event.topic;
@@ -1158,6 +1157,26 @@ export class Database implements SettlementStore {
       .limit(opts.limit);
 
     return { payments: rows as Array<Record<string, unknown>>, total: Number(total) || 0 };
+  }
+
+  async getMerchantOnboardingState(merchantId: string): Promise<MerchantOnboardingState | null> {
+    const { rows } = await this.pool.query(
+      `SELECT m.created_at AS "registeredAt",
+              COALESCE(
+                (
+                  SELECT MIN(e.timestamp)
+                  FROM contract_events e
+                  WHERE e.event_type = 'MERCHANT'
+                    AND e.data->>'merchant_id' = m.merchant_id
+                    AND UPPER(e.data->>'status') = 'VERIFIED'
+                ),
+                CASE WHEN UPPER(m.status) = 'VERIFIED' THEN m.last_update END
+              ) AS "kycSubmittedAt"
+       FROM merchants m
+       WHERE m.merchant_id = $1`,
+      [merchantId]
+    );
+    return rows.length > 0 ? rows[0] : null;
   }
 
   async getDisputesByMerchant(merchantId: string, status?: string): Promise<unknown[]> {
