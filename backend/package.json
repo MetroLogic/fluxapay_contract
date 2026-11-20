@@ -8,7 +8,9 @@
     "dev": "ts-node src/index.ts",
     "build": "tsc",
     "test:content-type": "ts-node --transpile-only test/content-type.test.ts",
-    "test:fee-bump": "ts-node --transpile-only test/fee-bump.test.ts"
+    "test:fee-bump": "ts-node --transpile-only test/fee-bump.test.ts",
+    "test:settlements": "ts-node --transpile-only test/settlements.test.ts",
+    "test": "npm run test:content-type && npm run test:settlements"
   },
   "keywords": [
     "fluxapay",

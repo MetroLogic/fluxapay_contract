@@ -454,6 +454,7 @@ app.use(
   createSettlementRouter({
     networkPassphrase: NETWORK_PASSPHRASE,
     homeDomain: HOME_DOMAIN,
+    jwtSecret: JWT_SECRET,
   }),
 );
 
