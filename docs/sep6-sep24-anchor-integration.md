@@ -7,32 +7,36 @@ FluxaPay integrates with the **Stellar Anchor Protocol** (SEP-6 and SEP-24) to p
 - **SEP-6 (Transfer Server API)** — programmatic deposit and withdrawal requests (server-to-server, no interactive UI required when KYC is already on file).
 - **SEP-24 (Interactive Anchor API)** — interactive withdrawal/deposit flows for merchants that still need to complete KYC or supply bank account details through the anchor's hosted UI.
 
-The on-chain contracts do **not** call the anchor API directly. Instead, `PaymentProcessor::settle_payment` emits an on-chain event that an off-chain **Settlement Service** listens to. The service performs the SEP-6 withdrawal request, tracks anchor status, and calls back via a webhook when the fiat payout succeeds or fails.
+The on-chain contracts do **not** call the anchor API directly. Instead, `PaymentProcessor::settle_payment` emits an on-chain event that an off-chain **Settlement Service** listens to. The service performs the SEP-6/SEP-24 withdrawal flow and tracks anchor status; it emits settlement events for any configured listeners.
 
 ---
 
 ## Implementation Status
 
-The off-ramp flow described in this document is now implemented end-to-end. The sections below document the concrete implementation steps, the `settlements` table, and the extended `payment.settled` webhook payload.
+The indexer implements SEP-6 withdrawal, SEP-24 interactive handoff, and persisted status polling. The separate backend webhook behavior described later in this guide is not wired into the indexer settlement service.
 
 ### Implementation Steps
 
-1. **Settlement trigger.** After a payment is confirmed and the settlement window passes, the backend `SettlementService` initiates the off-ramp. It reads the merchant's `AnchorConfig` (anchor domain, SEP-6/SEP-24 endpoints, supported currencies) and the merchant's bank account configured at onboarding.
-2. **Anchor selection.** If the merchant's KYC is already verified with the anchor, the service calls SEP-6 `POST {sep6_endpoint}/transactions/withdraw`. If KYC is not yet on file (first settlement), it falls back to the SEP-24 interactive flow via `POST {sep24_endpoint}/transactions/withdraw/interactive` and returns the interactive URL to the merchant.
-3. **KYC on first settlement.** The first settlement for a merchant triggers the anchor KYC flow (SEP-24 interactive). Once the anchor reports KYC as verified, subsequent settlements are direct SEP-6 withdrawals with no KYC re-flow.
-4. **Status tracking.** Every off-ramp attempt is persisted in the indexer DB `settlements` table (see schema below). The service polls the anchor transaction status and updates the row until it reaches a terminal state (`completed` or `error`).
-5. **Webhook.** On terminal status, the backend emits the `payment.settled` webhook with the fiat settlement details (`fiat_amount`, `fiat_currency`, `anchor`, `bank_reference`).
+1. **Settlement trigger.** The indexer consumes each `PAYMENT/ANCHOR_WITHDRAW` event and initiates the off-ramp using the anchor endpoints carried by that event.
+2. **Anchor selection.** When SEP-6 is configured, the service starts a SEP-6 withdrawal and polls its transaction. An authoritative `incomplete` status triggers SEP-24. When SEP-6 is not configured, it starts SEP-24 directly.
+3. **Interactive handoff.** The SEP-24 response's transaction ID, endpoint, and validated HTTPS interactive URL are persisted. The settlement remains `awaiting_user` until the user completes or cancels the anchor UI.
+4. **Status tracking.** The merchant polls the authenticated status endpoint after the anchor UI returns control. Each poll fetches the transaction from the anchor; only an authoritative `completed` status becomes `fiat_sent`, and authoritative cancellation/error statuses become `failed`.
+5. **Notifications.** The indexer emits `SETTLEMENT/FIAT_SENT` or `SETTLEMENT/FIAT_FAILED` to registered listeners. A payment-settled webhook is not currently connected to these events.
 
 ### `settlements` Table (indexer DB)
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | UUID (PK) | Internal settlement record ID |
-| `payment_id` | TEXT | FluxaPay payment ID |
-| `merchant_id` | TEXT | Merchant identifier |
-| `anchor` | TEXT | Anchor domain used for the off-ramp |
-| `anchor_txn_id` | TEXT | Anchor-side transaction ID |
-| `status` | TEXT | `pending`, `pending_anchor`, `pending_external`, `completed`, `error` |
+| `id` | SERIAL (PK) | Internal settlement record ID |
+| `payment_id` | VARCHAR | FluxaPay payment ID |
+| `merchant_id` | VARCHAR | Merchant identifier |
+| `anchor_domain` | VARCHAR | Anchor domain used for the off-ramp |
+| `anchor_txn_id` | VARCHAR | Anchor-side transaction ID |
+| `sep24_endpoint` | TEXT | Private anchor endpoint used to resume SEP-24 status polling |
+| `interactive_url` | TEXT | Validated hosted URL returned to the merchant |
+| `amount` | BIGINT | Settlement amount in token base units |
+| `currency` | VARCHAR | Settlement currency code |
+| `status` | TEXT | `pending`, `awaiting_user`, `fiat_sent`, `failed` |
 | `fiat_amount` | NUMERIC | Fiat amount disbursed to the merchant |
 | `fiat_currency` | TEXT | Fiat currency code (e.g. `USD`, `EUR`) |
 | `bank_reference` | TEXT | Bank transfer reference returned by the anchor |
@@ -185,16 +189,46 @@ The settlement service maps anchor transaction status to internal state:
 
 ## SEP-24 Interactive Flow (Fallback KYC)
 
-If the anchor responds `incomplete` to SEP-6 (merchant has not completed anchor KYC or bank setup), the settlement service falls back to SEP-24:
+When the merchant's KYC or bank details are missing, the service calls
+`POST {sep24_endpoint}/transactions/withdraw/interactive` with the asset,
+amount, and payout account. It requires the anchor response to contain an
+`id` and an absolute HTTPS `url` without embedded credentials. The merchant
+retrieves that URL and session ID from
+`GET /v1/merchant/settlements/{payment_id}`:
 
-1. Call `GET {sep24_endpoint}/withdraw?asset_code=USDC` to obtain the anchor's interactive URL and an `id` token.
-2. Email/SMS the hosted URL to the merchant.
-3. Merchant completes the interactive form on the anchor's domain (KYC, bank details, consent).
-4. Anchor redirects merchant back to FluxaPay with `?transaction_id={anchor_txn_id}`.
-5. Settlement service resumes SEP-6 status polling for that `anchor_txn_id`.
-6. When SEP-6 reports `completed`, the next FluxaPay settlement auto-uses SEP-6 without further UI.
+```json
+{
+  "payment_id": "pay_123",
+  "status": "awaiting_user",
+  "anchor_transaction_id": "anchor-txn-456",
+  "interactive_url": "https://anchor.example/withdraw/session",
+  "amount": 15000,
+  "currency": "USD"
+}
+```
 
-Merchants never need to re-do the interactive flow for the same anchor + bank combination.
+The merchant sends the user to the returned URL to complete KYC/bank details.
+There is no anchor-to-indexer push callback: when the anchor UI returns the
+user to the merchant application, that application resumes polling the same
+status endpoint (SEP-10 bearer JWT required). Each request
+polls SEP-24 `GET {sep24_endpoint}/transaction?id={anchor_transaction_id}`
+and returns the latest status. The URL is included only while status is
+`awaiting_user`; the configured endpoint is never returned. An anchor
+`completed` status becomes `fiat_sent`; `cancelled`, `expired`, `refunded`,
+`error`, `no_market`, `too_small`, or `too_large` becomes `failed`. A timeout
+or unavailable anchor does not mark the settlement failed.
+
+### Operator recovery
+
+For `awaiting_user`, verify the persisted anchor transaction ID with the
+anchor and have the merchant resume polling after the user returns from the
+hosted UI. For `pending`, inspect the merchant status endpoint and reconcile
+the transaction directly with the anchor before any retry; do not create a
+second withdrawal while an anchor transaction ID exists. A `failed` record
+reflects an anchor-reported terminal status: reconcile with the anchor and
+merchant, then follow the existing on-chain refund/manual payout procedure.
+Never mark a settlement successful by editing the database; only an
+authoritative anchor `completed` response can do that.
 
 ---
 
@@ -403,24 +437,28 @@ subscription loop in `indexer/src/index.ts`:
 
 - `index.ts` decodes every `PAYMENT/ANCHOR_WITHDRAW` event with
   `stellar-sdk`'s `scValToNative` and calls `SettlementService.settle(...)`.
-- `settle()` POSTs the SEP-6 `/transactions/withdrawal` request (falling
-  back to `sep24_endpoint` when a merchant has no `sep6_endpoint`
-  configured), then polls `/transaction?id=...` up to 10 times, 30 seconds
-  apart.
-- Progress is persisted in the `settlements` table
-  (`indexer/migrations/001_initial_schema.sql`) keyed by `payment_id`, so a
-  re-delivered event (e.g. after an RPC reorg) is a no-op once a terminal
-  status (`fiat_sent` / `failed`) has been reached.
+- `settle()` starts SEP-6 when configured and falls back to SEP-24 on an
+  explicit SEP-6 `incomplete` status. It starts SEP-24 directly when SEP-6
+  is not configured.
+- The SEP-24 transaction ID, endpoint, and interactive URL are persisted in
+  `settlements` by `payment_id`. The merchant retrieves the handoff and
+  resumes anchor polling with `GET /v1/merchant/settlements/{payment_id}`.
+  Apply `indexer/migrations/014_sep24_interactive_sessions.sql` before deploying
+  the updated indexer.
+- Only authoritative terminal anchor statuses transition the record to
+  `fiat_sent` or `failed`; network failures and polling timeouts leave it
+  non-terminal. Re-delivered events do not start a second SEP-24 withdrawal
+  when a session has already been persisted.
 - `SETTLEMENT/FIAT_SENT` and `SETTLEMENT/FIAT_FAILED` are emitted to
   listeners registered via `onSettlementEvent` (the indexer currently logs
   them; a future callback-webhook notifier can subscribe the same way).
 
-This does not yet include the SEP-10 JWT auth step or the SEP-24 interactive
-fallback UI hand-off described above — those remain follow-up work. The
-dead-letter queue and ops dashboard described under "Security
-Considerations" and "Failure Handling" are also not yet implemented; today
-a failed settlement is simply recorded with `status = 'failed'` in the
-`settlements` table for manual follow-up.
+The SEP-10 JWT auth and hosted UI are supplied by the existing authentication
+service and the anchor. The indexer status endpoint requires a SEP-10 bearer
+JWT. The dead-letter queue and ops dashboard described under "Security
+Considerations" and "Failure Handling" are not connected to settlement
+notifications; failed settlement recovery remains a manual anchor/merchant
+reconciliation.
 
 ---
 
