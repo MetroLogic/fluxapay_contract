@@ -41,7 +41,7 @@ export interface EventSubscriberDependencies {
   webhookFetch?: FetchLike;
 }
 
-function getWebhookEventType(event: AnyEvent): WebhookEventType | null {
+export function getWebhookEventType(event: { topic: string[] }): WebhookEventType | null {
   const [type, subtype] = event.topic;
   const eventTypes: Record<string, WebhookEventType> = {
     "PAYMENT/CREATED": "payment.created",
@@ -52,11 +52,12 @@ function getWebhookEventType(event: AnyEvent): WebhookEventType | null {
     // alongside "PAYMENT/CONFIRMED" above in case any emitter path uses that
     // literal topic instead.
     "PAYMENT/VERIFIED": "payment.confirmed",
-    "PAYMENT/SETTLED": "payment.confirmed",
+    "PAYMENT/SETTLED": "payment.settled",
     "PAYMENT/PARTIALLY_PAID": "payment.partially_paid",
     "PAYMENT/OVERPAID": "payment.overpaid",
     "PAYMENT/FAILED": "payment.failed",
     "PAYMENT/CANCELLED": "payment.cancelled",
+    "PAYMENT/EXPIRED": "payment.expired",
     "REFUND/CREATED": "refund.created",
     "REFUND/COMPLETED": "refund.completed",
     // Issue #1039: all 6 dispute lifecycle events, broadcast over SSE (and
