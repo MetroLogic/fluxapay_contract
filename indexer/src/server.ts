@@ -830,12 +830,13 @@ export function createServer(
 
   // Webhook test delivery and delivery history (Issues #808, #810, #854).
   app.use("/webhooks", requireScope("manage:webhooks"));
+  app.use("/v1/webhooks", requireScope("manage:webhooks"));
   registerWebhookRoutes(app, {
     store: new WebhookStore(database.getPool()),
-    merchantIdFromRequest: (req) =>
-      typeof req.header("x-merchant-id") === "string"
-        ? (req.header("x-merchant-id") as string)
-        : null,
+    merchantIdFromRequest: (req) => {
+      const apiKey = extractApiKey(req);
+      return apiKey ? getKeyMerchantId(apiKey) : null;
+    },
   });
 
   // Issue #785: GET /v1/payments

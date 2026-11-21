@@ -2,6 +2,62 @@
 
 This guide explains how merchants consume **off-chain webhook** notifications for payment lifecycle events. On-chain event catalogs live in [`docs/events.md`](events.md) and [`fluxapay/EVENTS.md`](../fluxapay/EVENTS.md). Webhooks are the REST-facing projection of those events for merchant backends.
 
+## Endpoint management API
+
+Webhook endpoints are merchant-scoped. Authenticate with a merchant API key that
+has the `manage:webhooks` scope.
+
+### Create
+
+```http
+POST /v1/webhooks
+Content-Type: application/json
+
+{
+  "url": "https://merchant.example.com/webhooks",
+  "event_types": ["payment.confirmed", "refund.completed"],
+  "signing_algorithm": "hmac_sha256"
+}
+```
+
+`event_types` may be omitted or set to `[]` to receive all supported event
+types. The response includes `signing_secret` once, when FluxaPay generates it.
+Never store or return the secret as part of later list or update responses.
+
+### List and update
+
+```http
+GET /v1/webhooks
+PATCH /v1/webhooks/{endpointId}
+{
+  "url": "https://merchant.example.com/new-webhooks",
+  "event_types": ["payment.confirmed"],
+  "enabled": true
+}
+```
+
+List and normal update responses redact signing secrets. `PUT` is also accepted
+as an alias for `PATCH`.
+
+### Disable and delete
+
+```http
+POST /v1/webhooks/{endpointId}/disable
+DELETE /v1/webhooks/{endpointId}
+```
+
+Disable may also be performed by setting `"enabled": false` in an update.
+
+### Rotate the signing secret
+
+```http
+POST /v1/webhooks/{endpointId}/rotate-secret
+```
+
+The replacement secret is returned only in this rotation response. `/rotate`
+is supported as a shorter alias. After rotating, update the merchant's secret
+store before processing deliveries signed with the previous secret.
+
 ---
 
 ## Overview
