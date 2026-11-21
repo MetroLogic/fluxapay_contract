@@ -1,4 +1,5 @@
 import nock from "nock";
+import { Account, Keypair, Networks, TransactionBuilder } from "stellar-sdk";
 import {
   AnchorWithdrawPayload,
   SettlementRecord,
@@ -20,6 +21,26 @@ class FakeSettlementStore implements SettlementStore {
 }
 
 const ANCHOR_BASE = "https://anchor.example.com/sep6";
+
+function makeChallenge(account: string): string {
+  return new TransactionBuilder(new Account(account, "0"), {
+    fee: "100",
+    networkPassphrase: Networks.TESTNET,
+  })
+    .addOperation({
+      type: "manageData",
+      name: "anchor.example.com auth",
+      value: Buffer.from("nonce"),
+    })
+    .setTimeout(300)
+    .build()
+    .toXDR();
+}
+
+function jwtWithExpiry(exp: number): string {
+  const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+  return `header.${payload}.signature`;
+}
 
 function makePayload(overrides: Partial<AnchorWithdrawPayload> = {}): AnchorWithdrawPayload {
   return {
@@ -126,6 +147,133 @@ describe("SettlementService", () => {
 
     const record = await store.getSettlement("pay_done");
     expect(record?.anchorTxnId).toBe("anchor_txn_old");
+  });
+
+  it("authenticates with SEP-10 and sends the bearer token to withdrawal and status requests", async () => {
+    const settlementKeypair = Keypair.random();
+    const challenge = makeChallenge(settlementKeypair.publicKey());
+
+    nock("https://anchor.example.com")
+      .get("/auth")
+      .query({ account: settlementKeypair.publicKey(), home_domain: "anchor.example.com" })
+      .reply(200, { transaction: challenge, network_passphrase: Networks.TESTNET });
+    nock("https://anchor.example.com")
+      .post("/auth", (body) => typeof body.transaction === "string")
+      .reply(200, { token: jwtWithExpiry(2_000_000_000) });
+    nock("https://anchor.example.com", {
+      reqheaders: { authorization: `Bearer ${jwtWithExpiry(2_000_000_000)}` },
+    })
+      .post("/sep6/transactions/withdrawal", (body) => body.jwt === jwtWithExpiry(2_000_000_000))
+      .reply(200, { id: "anchor_auth_txn" });
+    nock("https://anchor.example.com", {
+      reqheaders: { authorization: `Bearer ${jwtWithExpiry(2_000_000_000)}` },
+    })
+      .get("/sep6/transaction")
+      .query({ id: "anchor_auth_txn" })
+      .reply(200, { transaction: { status: "completed" } });
+
+    const store = new FakeSettlementStore();
+    const service = new SettlementService(store, {
+      pollIntervalMs: 1,
+      maxRetries: 3,
+      sep10: {
+        secretKey: settlementKeypair.secret(),
+        webAuthEndpoint: "https://anchor.example.com/auth",
+        networkPassphrase: Networks.TESTNET,
+      },
+      nowSeconds: () => 1_700_000_000,
+    });
+
+    await service.settle(makePayload({ paymentId: "pay_auth" }));
+
+    expect((await store.getSettlement("pay_auth"))?.status).toBe("fiat_sent");
+  });
+
+  it("refreshes a rejected or expired anchor token", async () => {
+    const settlementKeypair = Keypair.random();
+    const challenge = makeChallenge(settlementKeypair.publicKey());
+    const expiredToken = jwtWithExpiry(1_700_000_000);
+    const refreshedToken = jwtWithExpiry(1_700_060_000);
+
+    nock("https://anchor.example.com")
+      .get("/auth")
+      .query(true)
+      .reply(200, { transaction: challenge, network_passphrase: Networks.TESTNET });
+    nock("https://anchor.example.com")
+      .post("/auth")
+      .reply(200, { token: expiredToken });
+    nock("https://anchor.example.com")
+      .post("/sep6/transactions/withdrawal")
+      .matchHeader("Authorization", `Bearer ${expiredToken}`)
+      .reply(401, { error: "expired" });
+
+    nock("https://anchor.example.com")
+      .get("/auth")
+      .query(true)
+      .reply(200, { transaction: challenge, network_passphrase: Networks.TESTNET });
+    nock("https://anchor.example.com")
+      .post("/auth")
+      .reply(200, { token: refreshedToken });
+    nock("https://anchor.example.com")
+      .post("/sep6/transactions/withdrawal")
+      .matchHeader("Authorization", `Bearer ${refreshedToken}`)
+      .reply(200, { id: "anchor_refreshed" });
+    nock("https://anchor.example.com")
+      .get("/sep6/transaction")
+      .query({ id: "anchor_refreshed" })
+      .matchHeader("Authorization", `Bearer ${refreshedToken}`)
+      .reply(200, { transaction: { status: "completed" } });
+
+    const service = new SettlementService(new FakeSettlementStore(), {
+      pollIntervalMs: 1,
+      maxRetries: 3,
+      sep10: {
+        secretKey: settlementKeypair.secret(),
+        webAuthEndpoint: "https://anchor.example.com/auth",
+        networkPassphrase: Networks.TESTNET,
+      },
+      nowSeconds: () => 1_700_000_000,
+    });
+
+    await service.settle(makePayload({ paymentId: "pay_refresh" }));
+    expect(nock.isDone()).toBe(true);
+  });
+
+  it("does not reuse tokens across anchors and rejects bad credentials without logging secrets", async () => {
+    const settlementKeypair = Keypair.random();
+    const anchorAChallenge = makeChallenge(settlementKeypair.publicKey());
+
+    nock("https://anchor-a.example.com")
+      .get("/auth")
+      .query(true)
+      .reply(200, { transaction: anchorAChallenge, network_passphrase: Networks.TESTNET });
+    nock("https://anchor-a.example.com")
+      .post("/auth")
+      .reply(403, { error: "invalid credentials" });
+
+    const store = new FakeSettlementStore();
+    const secret = settlementKeypair.secret();
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+    const service = new SettlementService(store, {
+      pollIntervalMs: 1,
+      maxRetries: 3,
+      sep10: {
+        secretKey: secret,
+        webAuthEndpoint: "https://anchor-a.example.com/auth",
+        networkPassphrase: Networks.TESTNET,
+      },
+    });
+
+    await service.settle(makePayload({
+      paymentId: "pay_rejected",
+      anchorDomain: "anchor-a.example.com",
+      sep6Endpoint: "https://anchor-a.example.com/sep6",
+    }));
+
+    expect((await store.getSettlement("pay_rejected"))?.status).toBe("failed");
+    const logged = errorSpy.mock.calls.flat().join(" ");
+    expect(logged).not.toContain(secret);
+    errorSpy.mockRestore();
   });
 
   it("falls back to the SEP-24 endpoint when sep6Endpoint is not set", async () => {

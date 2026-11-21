@@ -23,6 +23,22 @@ The off-ramp flow described in this document is now implemented end-to-end. The 
 4. **Status tracking.** Every off-ramp attempt is persisted in the indexer DB `settlements` table (see schema below). The service polls the anchor transaction status and updates the row until it reaches a terminal state (`completed` or `error`).
 5. **Webhook.** On terminal status, the backend emits the `payment.settled` webhook with the fiat settlement details (`fiat_amount`, `fiat_currency`, `anchor`, `bank_reference`).
 
+### Settlement SEP-10 Credentials
+
+Configure `ANCHOR_SEP10_SECRET_KEY` and optionally `ANCHOR_SEP10_WEB_AUTH_ENDPOINT` for one settlement account shared by anchors. For per-anchor accounts or auth servers, set `ANCHOR_SEP10_CREDENTIALS` to a JSON object keyed by anchor domain, for example:
+
+```json
+{
+  "anchor.example.com": {
+    "secretKey": "S...",
+    "webAuthEndpoint": "https://anchor.example.com/auth",
+    "networkPassphrase": "Test SDF Network ; September 2015"
+  }
+}
+```
+
+The settlement service fetches, signs, submits, caches, and refreshes SEP-10 tokens per normalized anchor domain. Tokens are sent as bearer credentials and are never reused across domains. Keep secret keys in deployment secrets or a restricted environment file; do not add them to code or logs.
+
 ### `settlements` Table (indexer DB)
 
 | Column | Type | Description |
@@ -415,9 +431,10 @@ subscription loop in `indexer/src/index.ts`:
   listeners registered via `onSettlementEvent` (the indexer currently logs
   them; a future callback-webhook notifier can subscribe the same way).
 
-This does not yet include the SEP-10 JWT auth step or the SEP-24 interactive
-fallback UI hand-off described above — those remain follow-up work. The
-dead-letter queue and ops dashboard described under "Security
+SEP-10 authentication is implemented by the off-chain settlement service with
+per-anchor credential configuration and token caching. The SEP-24 interactive
+fallback UI hand-off described above remains follow-up work. The dead-letter
+queue and ops dashboard described under "Security
 Considerations" and "Failure Handling" are also not yet implemented; today
 a failed settlement is simply recorded with `status = 'failed'` in the
 `settlements` table for manual follow-up.
