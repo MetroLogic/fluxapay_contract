@@ -22,6 +22,11 @@ tags:
   - name: Webhooks
   - name: Merchants
   - name: Subscriptions
+  - name: Events
+  - name: Treasury
+  - name: Reports
+  - name: Admin
+  - name: Auth
   - name: Health
 paths:
   /health:
@@ -95,6 +100,9 @@ paths:
     get:
       tags: [Payments]
       summary: Retrieve a payment
+      description: |
+        The indexer also serves this operation at the unversioned
+        `/payments/{paymentId}` path, which older clients still use.
       responses:
         '200':
           description: The payment
@@ -455,15 +463,1004 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  # -------------------------------------------------------------------------
+  # Routes registered by the indexer (indexer/src) that were undocumented.
+  # scripts/check-openapi-route-coverage.js keeps this document in sync with
+  # the Express registrations; see docs/openapi-coverage.md.
+  # -------------------------------------------------------------------------
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Wrap a merchant API key in a bearer token
+      operationId: loginWithApiKey
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key]
+              properties:
+                api_key:
+                  type: string
+      responses:
+        '200':
+          description: Bearer token for the supplied API key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  token_type:
+                    type: string
+                    example: api_key
+                  expires_in:
+                    type: integer
+                    example: 3600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/merchants/me/onboarding:
+    get:
+      tags: [Merchants]
+      summary: Onboarding checklist for the authenticated merchant
+      operationId: getMerchantOnboarding
+      responses:
+        '200':
+          description: Completion percentage and checklist steps
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  completion_pct:
+                    type: integer
+                    minimum: 0
+                    maximum: 100
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                          example: merchant_registered
+                        completed:
+                          type: boolean
+                        completed_at:
+                          type: [string, 'null']
+                          format: date-time
+                        action_url:
+                          type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/disputes/{id}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Disputes]
+      summary: List the evidence attached to a dispute
+      operationId: listDisputeEvidence
+      description: Only a party to the dispute (merchant or disputer) may read its evidence.
+      responses:
+        '200':
+          description: Evidence items pinned for the dispute
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  evidence:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DisputeEvidence'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Disputes]
+      summary: Attach evidence to a dispute
+      operationId: uploadDisputeEvidence
+      description: |
+        Accepts one `multipart/form-data` file (50 MB limit). The file is pinned
+        to IPFS and its SHA-256 digest is anchored on-chain before the evidence
+        item is stored.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Evidence stored and anchored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisputeEvidence'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/events/stream:
+    get:
+      tags: [Events]
+      summary: Server-Sent Events stream of indexed events
+      operationId: streamEvents
+      description: |
+        Long-lived `text/event-stream` response. The unversioned
+        `/events/stream` path is served by the same handler and kept for older
+        clients.
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          description: Defaults to the subject of the SEP-10 token.
+          schema:
+            type: string
+        - name: event_types
+          in: query
+          description: Comma-separated event types to forward.
+          schema:
+            type: string
+        - name: payment_id
+          in: query
+          description: Restrict the stream to one payment.
+          schema:
+            type: string
+        - name: dispute_id
+          in: query
+          description: Restrict the stream to one dispute.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One SSE `data:` frame per matching event
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/webhooks/public-key:
+    get:
+      tags: [Webhooks]
+      summary: Ed25519 key used to sign webhook deliveries
+      operationId: getWebhookPublicKey
+      description: |
+        Unauthenticated. The unversioned `/webhooks/public-key` path serves the
+        same key for older clients.
+      security: []
+      responses:
+        '200':
+          description: The active signing key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  algorithm:
+                    type: string
+                    example: ed25519
+                  public_key:
+                    type: string
+                  publicKey:
+                    type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/payment-links/{id}/view:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Payment Links]
+      summary: Record a view on a payment link
+      operationId: recordPaymentLinkView
+      description: Unauthenticated; called by hosted payment-link pages.
+      security: []
+      responses:
+        '202':
+          description: View recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recorded:
+                    type: boolean
+                    example: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/payment-links/{id}/analytics:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Payment Links]
+      summary: Conversion analytics for one payment link
+      operationId: getPaymentLinkAnalytics
+      responses:
+        '200':
+          description: Views, attempts, conversions, and revenue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  link_id:
+                    type: string
+                  views:
+                    type: integer
+                  attempts:
+                    type: integer
+                  conversions:
+                    type: integer
+                  conversion_rate:
+                    type: [number, 'null']
+                  total_revenue_usdc:
+                    type: string
+                  last_used_at:
+                    type: [string, 'null']
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/merchant/refunds:
+    get:
+      tags: [Refunds]
+      summary: Refunds for the authenticated merchant
+      operationId: listMerchantRefunds
+      parameters:
+        - name: status
+          in: query
+          description: Filter by refund status (case-insensitive).
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Refunds, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  refunds:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        refund_id:
+                          type: string
+                        payment_id:
+                          type: string
+                        amount_usdc:
+                          type: string
+                        fee_usdc:
+                          type: string
+                        status:
+                          type: string
+                        created_at:
+                          type: [string, 'null']
+                          format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchant/settlements:
+    get:
+      tags: [Merchants]
+      summary: Settlement history and treasury balance for the authenticated merchant
+      operationId: listMerchantSettlements
+      responses:
+        '200':
+          description: Settlements plus the balance still held in treasury
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  treasury_balance_usdc:
+                    type: string
+                  payout_status:
+                    type: string
+                    enum: [pending, failed, fiat_sent, no_settlements]
+                  settlements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        payment_id:
+                          type: string
+                        amount_usdc:
+                          type: string
+                        status:
+                          type: string
+                        fiat_amount:
+                          type: [string, 'null']
+                        fiat_currency:
+                          type: [string, 'null']
+                        created_at:
+                          type: [string, 'null']
+                          format: date-time
+                        settled_at:
+                          type: [string, 'null']
+                          format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchant/settings:
+    get:
+      tags: [Merchants]
+      summary: Settings for the authenticated merchant
+      operationId: getMerchantSettings
+      responses:
+        '200':
+          description: Webhook signing key, fee recipient, and API keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchant/settings/webhook-key/rotate:
+    post:
+      tags: [Webhooks]
+      summary: Rotate the merchant webhook signing key
+      operationId: rotateWebhookSigningKey
+      responses:
+        '200':
+          description: The new signing key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhook_signing_key:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchant/settings/fee-recipient:
+    put:
+      tags: [Merchants]
+      summary: Set the fee recipient for the authenticated merchant
+      operationId: updateFeeRecipient
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fee_recipient]
+              properties:
+                fee_recipient:
+                  type: string
+      responses:
+        '200':
+          description: Fee recipient updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fee_recipient:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchant/api-keys:
+    post:
+      tags: [Auth]
+      summary: Create an API key for the authenticated merchant
+      operationId: createMerchantApiKey
+      description: The full key is returned once, on creation, and cannot be retrieved again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, lifetime_days]
+              properties:
+                label:
+                  type: string
+                lifetime_days:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  default: 30
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantApiKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchant/api-keys/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      tags: [Auth]
+      summary: Revoke an API key
+      operationId: revokeMerchantApiKey
+      responses:
+        '200':
+          description: API key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/subscriptions/metrics:
+    get:
+      tags: [Subscriptions]
+      summary: Subscription metrics for a merchant and billing period
+      operationId: getSubscriptionMetrics
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: query
+          required: true
+          description: Billing month in `YYYY-MM` form.
+          schema:
+            type: string
+            example: '2026-11'
+      responses:
+        '200':
+          description: MRR, churn, and dunning metrics for the period
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                  mrr_usdc:
+                    type: string
+                  active_subscribers:
+                    type: integer
+                  new_subscribers:
+                    type: integer
+                  churned_subscribers:
+                    type: integer
+                  churn_rate:
+                    type: number
+                  trial_conversions:
+                    type: integer
+                  trial_conversion_rate:
+                    type: number
+                  past_due_subscribers:
+                    type: integer
+                  dunning_recovery_rate:
+                    type: number
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/subscriptions/{id}/invoices:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Subscriptions]
+      summary: Invoices generated for a subscription
+      operationId: listSubscriptionInvoices
+      description: Visible to the subscription's merchant and subscriber.
+      responses:
+        '200':
+          description: Invoices for the subscription
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoices:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invoice'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/reports/reconciliation:
+    get:
+      tags: [Reports]
+      summary: Download a CSV reconciliation report
+      operationId: downloadReconciliationReport
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Payments, refunds, and settlements in the range, as CSV
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /merchants/{merchantId}/payments:
+    parameters:
+      - $ref: '#/components/parameters/MerchantId'
+    get:
+      tags: [Payments]
+      summary: List a merchant's payments
+      operationId: listMerchantPayments
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 20
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of payments
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /merchants/{merchantId}/disputes:
+    parameters:
+      - $ref: '#/components/parameters/MerchantId'
+    get:
+      tags: [Disputes]
+      summary: List a merchant's disputes
+      operationId: listMerchantDisputes
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Disputes for the merchant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disputes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Dispute'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /refunds/{refundId}:
+    parameters:
+      - $ref: '#/components/parameters/RefundId'
+    get:
+      tags: [Refunds]
+      summary: Retrieve a refund
+      operationId: getRefund
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: The refund record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /events:
+    get:
+      tags: [Events]
+      summary: List indexed events
+      operationId: listEvents
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: type
+          in: query
+          description: Filter by event type.
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: Lowest ledger to include.
+          schema:
+            type: integer
+        - name: to
+          in: query
+          description: Highest ledger to include.
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Matching events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/invoices/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Invoices]
+      summary: Retrieve an invoice
+      operationId: getInvoice
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: The invoice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Invoices]
+      summary: Void an invoice
+      operationId: voidInvoice
+      description: Soft delete; only the owning merchant may void, and paid invoices cannot be voided.
+      responses:
+        '200':
+          description: Invoice voided
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoiceId:
+                    type: string
+                  status:
+                    type: string
+                    example: Voided
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/invoices/{id}/pdf:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Invoices]
+      summary: Download an invoice as PDF
+      operationId: downloadInvoicePdf
+      description: Visible to the invoice's merchant and subscriber.
+      responses:
+        '200':
+          description: Rendered invoice
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/treasury/fees:
+    get:
+      tags: [Treasury]
+      summary: Paginated fee collection history
+      operationId: listTreasuryFees
+      description: Requires the `admin` scope.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+        - name: token
+          in: query
+          description: Filter by token symbol or contract id.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Fee collection rows
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/merchants/leaderboard:
+    get:
+      tags: [Merchants]
+      summary: Top merchants by score
+      operationId: getMerchantLeaderboard
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Ranked merchants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  merchants:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/admin/replay:
+    post:
+      tags: [Admin]
+      summary: Replay indexer events for a ledger range
+      operationId: replayEvents
+      description: |
+        Requires the `admin` scope. Streams `text/event-stream` progress frames
+        and a final `complete` frame. The unversioned `/admin/replay` path is
+        served by the same handler.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: from_ledger
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: to_ledger
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Replay progress stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '501':
+          description: Replay handler is not configured on this instance
+  /admin/replay-dlq:
+    post:
+      tags: [Admin]
+      summary: Drain the indexer dead-letter queue
+      operationId: replayDlq
+      description: Requires the `admin` scope.
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Replay summary
+          content:
+            application/json:
+              schema:
+                type: object
+        '501':
+          description: DLQ replay handler is not configured on this instance
+  /v1/webhooks/test:
+    post:
+      tags: [Webhooks]
+      summary: Send a synthetic webhook delivery
+      operationId: sendTestWebhook
+      description: Requires the `manage:webhooks` scope and a merchant API key.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_id, event_type]
+              properties:
+                endpoint_id:
+                  type: string
+                event_type:
+                  type: string
+      responses:
+        '200':
+          description: Delivery attempted; the outcome of the merchant's endpoint is in the body
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery_id:
+                    type: string
+                  event_type:
+                    type: string
+                  livemode:
+                    type: boolean
+                    example: false
+                  delivered:
+                    type: boolean
+                  http_status:
+                    type: [integer, 'null']
+                  duration_ms:
+                    type: integer
+                  response_body:
+                    type: [string, 'null']
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: The endpoint is disabled
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/webhooks/{endpointId}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/EndpointId'
+    get:
+      tags: [Webhooks]
+      summary: Delivery history for one webhook endpoint
+      operationId: listWebhookDeliveries
+      description: Requires the `manage:webhooks` scope. The endpoint must belong to the calling merchant.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: payment_id
+          in: query
+          description: Only deliveries for this payment.
+          schema:
+            type: string
+        - name: before
+          in: query
+          description: Keyset cursor returned as `next_before` by the previous page.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deliveries plus the cursor for the next page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  next_before:
+                    type: [string, 'null']
+                  retention_days:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Merchant API key (`read:payments`, `read:analytics`, `manage:webhooks`, or `admin` scope).
   parameters:
     Id:
       name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    MerchantId:
+      name: merchantId
+      in: path
+      required: true
+      schema:
+        type: string
+    RefundId:
+      name: refundId
+      in: path
+      required: true
+      schema:
+        type: string
+    EndpointId:
+      name: endpointId
       in: path
       required: true
       schema:
@@ -498,6 +1495,12 @@ components:
             $ref: '#/components/schemas/Error'
     NotFound:
       description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Credentials are valid but not allowed to perform this action
       content:
         application/json:
           schema:
@@ -686,6 +1689,60 @@ components:
         created_at:
           type: string
           format: date-time
+    DisputeEvidence:
+      type: object
+      properties:
+        ipfs_cid:
+          type: string
+        evidence_hash:
+          type: string
+          description: SHA-256 digest of the uploaded file, hex encoded
+        ipfs_gateway_url:
+          type: string
+          format: uri
+        filename:
+          type: string
+        content_type:
+          type: string
+        uploaded_by:
+          type: string
+        tx_hash:
+          type: string
+          description: Transaction that anchored the digest on-chain
+        created_at:
+          type: string
+          format: date-time
+    MerchantSettings:
+      type: object
+      properties:
+        webhook_signing_key:
+          type: string
+        fee_recipient:
+          type: string
+        api_keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/MerchantApiKey'
+    MerchantApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        masked_key:
+          type: string
+        lifetime_days:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        api_key:
+          type: string
+          description: Full key, returned only in the creation response
     FxConvertRequest:
       type: object
       required: [from, to, amount]
