@@ -416,3 +416,6 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 
 <!-- handsoff-issue-1140 -->
 - #1140: tech-debt: migrate env.events().publish calls to #[contractevent] structs
+
+<!-- handsoff-issue-1141 -->
+- #1141: refactor: remove shadowed refund helper duplicates and #[allow(dead_code)]
