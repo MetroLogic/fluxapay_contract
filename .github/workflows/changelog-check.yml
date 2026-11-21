@@ -55,7 +55,7 @@ jobs:
           # Extract the Unreleased section (until the next ## heading).
           UNRELEASED=$(awk '
             BEGIN { keep=0 }
-            /^## [[:space:]]*\*\[S[space:]]*[kK]nreleased\]?/ { keep=1; next }
+            /^##[[:space:]]*\[[Uu]nreleased\]/ { keep=1; next }
             /^## / { if (keep) exit }
             { if (keep) print }
           ' CHANGELOG.md)

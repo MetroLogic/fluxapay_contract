@@ -169,7 +169,7 @@ export class Database implements SettlementStore {
     const ts = new Date(event.timestamp * 1000);
 
     switch (table) {
-      case "payments":
+      case "payments": {
         // Issue #1037: PAYMENT/RETRY_CREATED is emitted by the contract and
         // carries (new_payment_id, original_payment_id), but the Drizzle
         // `payments` schema has no `retryOfPaymentId` column yet to persist

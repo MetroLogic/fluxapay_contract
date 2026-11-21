@@ -12,6 +12,7 @@ import {
 import { getCachedRate } from "./fx-rate-cache";
 import { createRateLimitMiddleware } from "./rate-limit";
 import { anchorEvidenceHash, parseEvidenceMultipart, pinEvidence } from "./evidence";
+import {
   extractApiKey,
   getKeyMerchantId,
   getKeyScopes,
@@ -68,9 +69,6 @@ export type EventReplayHandler = (
   toLedger: number,
   onProgress?: (progress: ReplayProgressUpdate) => void,
 ) => Promise<{ processed: number; stored: number; skipped_duplicates?: number; total: number }>;
-
-  return { start, endExclusive: new Date(end.getTime() + 86_400_000) };
-}
 
 function asInteger(value: unknown): bigint {
   const parsed = BigInt(String(value ?? 0));
@@ -444,24 +442,6 @@ export function createServer(
       }
     }
   );
-
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const rateAgeSecs = Math.max(0, nowSecs - cached.updatedAt);
-    const stale = rateAgeSecs > DEFAULT_FX_STALENESS_SECS;
-
-    const amountUsdc = Number(amountStroops) / 10 ** USDC_DECIMALS;
-    const amountFiat = amountUsdc * cached.rate;
-
-    res.status(200).json({
-      from,
-      to,
-      amount_usdc: formatFixed(amountUsdc, 2),
-      amount_fiat: formatFixed(amountFiat, 2),
-      rate: formatFixed(cached.rate, 2),
-      rate_age_secs: rateAgeSecs,
-      stale,
-    });
-  });
 
   // Issue #817: auth endpoints (stricter 10 req/min per-IP via rate limiter above)
   app.post("/v1/auth/login", (req: Request, res: Response) => {

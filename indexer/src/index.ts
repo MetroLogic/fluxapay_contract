@@ -4,7 +4,7 @@
  * persists events to PostgreSQL, exposes dead-letter queue retry, and starts the REST API.
  */
 
-import { SorobanRpc as rpc, scValToNative } from "stellar-sdk";
+import { SorobanRpc as rpc, scValToNative, xdr } from "stellar-sdk";
 import { Database } from "./database";
 import { ContractEvent, AnyEvent, StreamEvent } from "./types";
 import { AnchorWithdrawPayload, SettlementService } from "./settlement";
@@ -196,6 +196,16 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): EventSu
   };
 }
 
+/** Page size requested from `getEvents`; also the point at which a page is
+ * considered "full" and the next page has to be read before the ledger cursor
+ * can be trusted to have reached the chain tip. */
+const EVENT_PAGE_LIMIT = 100;
+
+/** Upper bound on pages drained by a single poll cycle, so one slow RPC can
+ * never monopolise the subscriber. Remaining pages resume on the next tick via
+ * the persisted paging cursor. */
+const MAX_PAGES_PER_POLL = 10;
+
 export class EventSubscriber {
   private server: Pick<rpc.Server, "getEvents">;
   private database: Database;
@@ -205,6 +215,21 @@ export class EventSubscriber {
   private pollTimer: NodeJS.Timeout | null = null;
   private dlqRetryTimer: NodeJS.Timeout | null = null;
   private replayWebhookDispatcher?: ReplayWebhookDispatcher;
+  /**
+   * Issue #1263: guards the poll cycle so at most one `getEvents` request and
+   * batch write is active per subscriber instance. `setInterval` used to fire a
+   * second `pollEvents()` while a slow RPC/batch was still running, letting
+   * both cycles read from the same ledger cursor and interleave writes.
+   */
+  private pollInFlight = false;
+  /**
+   * Issue #1263: paging token of the next unread page after a full page. It is
+   * only set once the page it belongs to has been fully processed, so a crash
+   * or RPC failure re-reads the page instead of skipping its events.
+   */
+  private pollCursor: string | null = null;
+  /** Settles when the in-flight poll cycle (if any) finishes; awaited by `shutdown`. */
+  private activePoll: Promise<void> | null = null;
 
   constructor(
     config: EventSubscriptionConfig,
@@ -243,13 +268,11 @@ export class EventSubscriber {
   async start(): Promise<void> {
     console.log(`Starting event subscription from ledger ${this.currentLedger}`);
 
-    // Main subscription loop
-    this.pollTimer = setInterval(async () => {
-      try {
-        await this.pollEvents();
-      } catch (error) {
-        console.error("Error polling events:", error);
-      }
+    // Main subscription loop. `pollEvents()` is serialized internally, so a
+    // tick that fires while the previous cycle is still running is a no-op
+    // instead of a second concurrent poll.
+    this.pollTimer = setInterval(() => {
+      void this.runPollCycle();
     }, this.config.pollInterval);
 
     // Auto-retry DLQ loop
@@ -267,8 +290,48 @@ export class EventSubscriber {
     });
   }
 
-  async pollEvents(): Promise<void> {
+  /**
+   * Run one poll cycle, logging (rather than propagating) failures so the
+   * interval keeps polling after a failed cycle.
+   */
+  private async runPollCycle(): Promise<void> {
     try {
+      await this.pollEvents();
+    } catch (error) {
+      console.error("Error polling events:", error);
+    }
+  }
+
+  /**
+   * Issue #1263: fetch and persist the next page(s) of contract events.
+   *
+   * Poll cycles are serialized: a call that arrives while another cycle is
+   * still in flight (slow RPC response, large batch, slow database) is skipped,
+   * so event ordering and cursor advancement stay deterministic. The ledger
+   * cursor only moves after every event of the page has been processed, and a
+   * full page hands off through `pollCursor` so events beyond the page limit
+   * are never skipped. Failures propagate to the caller (`start` logs them and
+   * keeps polling) and leave the cursor untouched so the page is retried.
+   */
+  async pollEvents(): Promise<void> {
+    if (this.pollInFlight) {
+      console.warn("Skipping event poll: previous poll cycle is still running");
+      return;
+    }
+
+    this.pollInFlight = true;
+    const cycle = this.pollAndPersistEvents();
+    this.activePoll = cycle;
+    try {
+      await cycle;
+    } finally {
+      this.pollInFlight = false;
+      this.activePoll = null;
+    }
+  }
+
+  private async pollAndPersistEvents(): Promise<void> {
+    for (let page = 0; page < MAX_PAGES_PER_POLL; page++) {
       const request: Parameters<rpc.Server["getEvents"]>[0] = {
         filters: [
           {
@@ -276,28 +339,60 @@ export class EventSubscriber {
             contractIds: this.config.contractIds,
           },
         ],
-        startLedger: this.currentLedger,
-        limit: 100,
+        limit: EVENT_PAGE_LIMIT,
       };
+      if (this.pollCursor) {
+        // When paging, the RPC expects `cursor` rather than `startLedger`.
+        request.cursor = this.pollCursor;
+      } else {
+        request.startLedger = this.currentLedger;
+      }
 
       const response = await this.server.getEvents(request);
+      const events = response.events ?? [];
 
-      if (!response.events || response.events.length === 0) {
-        if (response.latestLedger) {
-          this.currentLedger = response.latestLedger;
+      if (events.length === 0) {
+        // Nothing left to read from here, so the cursor is drained and we can
+        // safely move on to the chain tip for the next cycle.
+        this.pollCursor = null;
+        if (typeof response.latestLedger === "number") {
+          this.currentLedger = Math.max(this.currentLedger, response.latestLedger);
         }
         return;
       }
 
-      console.log(`Found ${response.events.length} events across configured contracts`);
+      console.log(`Found ${events.length} events across configured contracts`);
 
-      await this.processBatch(response.events);
+      // Only advance any cursor once this page has fully settled (successfully
+      // stored or dead-lettered), so a failed batch is re-read rather than
+      // skipped.
+      await this.processBatch(events);
 
-      if (response.latestLedger) {
-        this.currentLedger = response.latestLedger + 1;
+      const lastEvent = events[events.length - 1];
+      const lastLedger =
+        typeof lastEvent.ledger === "number"
+          ? lastEvent.ledger
+          : parseInt(lastEvent.ledger, 10);
+      if (!Number.isSafeInteger(lastLedger)) {
+        throw new Error(
+          `Soroban RPC returned an invalid event ledger: ${lastEvent.ledger}`,
+        );
       }
-    } catch (error) {
-      console.error("Error in pollEvents:", error);
+
+      this.currentLedger = lastLedger + 1;
+
+      if (events.length < EVENT_PAGE_LIMIT) {
+        this.pollCursor = null;
+        return;
+      }
+
+      const nextCursor = lastEvent.pagingToken;
+      if (!nextCursor) {
+        throw new Error("Soroban RPC event page is full but has no paging token");
+      }
+      // A full page may hold more events in the same ledger, so continuing
+      // from `currentLedger` alone would skip them.
+      this.pollCursor = nextCursor;
     }
   }
 
@@ -500,6 +595,9 @@ export class EventSubscriber {
 
     console.warn("Could not parse PAYMENT/RETRY_CREATED value as a 2-tuple:", raw);
     return {};
+  }
+
+  /**
    * Decode a raw RPC event into an `AnchorWithdrawPayload` if (and only if)
    * its topics match `(PAYMENT, ANCHOR_WITHDRAW, merchant_id, anchor_domain)`.
    * Returns `null` for every other event type.
@@ -860,7 +958,20 @@ export class EventSubscriber {
   async shutdown(): Promise<void> {
     console.log("Shutting down event subscriber...");
     if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
     if (this.dlqRetryTimer) clearInterval(this.dlqRetryTimer);
+    this.dlqRetryTimer = null;
+
+    // Let an in-flight poll finish before closing the pool: closing mid-batch
+    // would fail writes for events whose cursor has not advanced yet.
+    if (this.activePoll) {
+      try {
+        await this.activePoll;
+      } catch (error) {
+        console.error("Error finishing in-flight poll during shutdown:", error);
+      }
+    }
+
     await this.database.close();
   }
 }

@@ -226,6 +226,6 @@ export type AnyEvent =
   | StreamEvent
   | SubscriptionEvent
   | InvoiceEvent
-  | SettlementAnchorWithdrawEvent;
+  | SettlementAnchorWithdrawEvent
   | FXOracleEvent
   | PaymentLinkEvent;
