@@ -404,20 +404,20 @@ app.use(
 );
 
 // ---------------------------------------------------------------------------
-// Routes: analytics (Issue #1151)
+// Routes: analytics (Issue #1151, Issue #1150, Issue #803)
 // ---------------------------------------------------------------------------
 
-app.use(
-  "/v1/analytics",
-  createAnalyticsRouter({
-    serverPublicKey: SERVER_PUBLIC_KEY,
-    jwtSecret: JWT_SECRET,
-    indexerUrl: process.env.INDEXER_URL,
-    networkPassphrase: NETWORK_PASSPHRASE,
-    homeDomain: HOME_DOMAIN,
-    jwtSecret: JWT_SECRET,
-  }),
-);
+const analyticsRouter = createAnalyticsRouter({
+  serverPublicKey: SERVER_PUBLIC_KEY,
+  jwtSecret: JWT_SECRET,
+  indexerUrl: process.env.INDEXER_URL,
+  networkPassphrase: NETWORK_PASSPHRASE,
+  homeDomain: HOME_DOMAIN,
+});
+
+app.use("/v1/analytics", analyticsRouter);
+// Issue #803 / #1150: GET /v1/payment-links/:id/stats handled directly
+app.use("/v1", analyticsRouter);
 
 // ---------------------------------------------------------------------------
 // Routes: settlements (Issue #828)
