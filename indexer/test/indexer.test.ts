@@ -10,6 +10,7 @@
 import assert from "node:assert";
 import { createHmac } from "node:crypto";
 import test, { describe, it } from "node:test";
+import nock from "nock";
 import { nativeToScVal, xdr } from "stellar-sdk";
 import {
   createReplayWebhookDispatcher,
@@ -49,6 +50,7 @@ function createMockDatabase() {
     payments: new Map<string, any>(),
     refunds: new Map<string, any>(),
     disputes: new Map<string, any>(),
+    settlements: new Map<string, any>(),
     merchants: new Map<string, { registeredAt: Date | string; kycSubmittedAt: Date | string | null }>(),
     contractEvents: new Array<any>(),
     dlqEvents: new Map<string, any>(),
@@ -380,6 +382,14 @@ function createMockDatabase() {
     async removeDeadLetterEvent(eventId: string) {
       state.dlqEvents.delete(eventId);
     },
+
+    async getSettlement(paymentId: string) {
+      return state.settlements.get(paymentId) ?? null;
+    },
+
+    async upsertSettlement(record: any) {
+      state.settlements.set(record.paymentId, record);
+    },
   };
 
   return mockDb as unknown as Database & { state: typeof state };
@@ -389,13 +399,14 @@ const onboardingAuthConfig = {
   webAuthEndpoint: "https://example.test/auth",
   homeDomain: "example.test",
   serverPublicKey: "c2VydmVy",
+  jwtSecret: "onboarding-test-secret",
   adminAccounts: new Set<string>(),
 };
 
 function createSEP10Token(merchantId: string): string {
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({
-    iss: "server",
+    iss: onboardingAuthConfig.homeDomain,
     sub: "account",
     merchant_id: merchantId,
     iat: Math.floor(Date.now() / 1000),
@@ -403,7 +414,7 @@ function createSEP10Token(merchantId: string): string {
   })).toString("base64url");
   const message = `${header}.${payload}`;
   const signature = crypto
-    .createHmac("sha256", Buffer.from(onboardingAuthConfig.serverPublicKey, "base64"))
+    .createHmac("sha256", onboardingAuthConfig.jwtSecret)
     .update(message)
     .digest("base64url");
   return `${message}.${signature}`;
@@ -765,25 +776,7 @@ describe("ISSUE #617 — Dead-Letter Queue and Retry", () => {
 });
 
 describe("ISSUE #616 — Indexer REST API Server", () => {
-  it("should return health status on GET /health without auth", async () => {
-    const mockDb = createMockDatabase();
-    const app = createServer(mockDb);
-    const server = app.listen(0);
-    const address = server.address() as any;
-
-    try {
-      const res = await fetch(`http://127.0.0.1:${address.port}/health`);
-      const data = (await res.json()) as any;
-
-      assert.strictEqual(res.status, 200);
-      assert.strictEqual(data.status, "healthy");
-      assert.strictEqual(data.database, "connected");
-    } finally {
-      server.close();
-    }
-  });
-
-  it("should return 503 Service Unavailable when database connection is down", async () => {
+  it("should return liveness status on GET /health without checking dependencies", async () => {
     const mockDb = createMockDatabase();
     mockDb.state.dbConnected = false;
     const app = createServer(mockDb);
@@ -794,11 +787,139 @@ describe("ISSUE #616 — Indexer REST API Server", () => {
       const res = await fetch(`http://127.0.0.1:${address.port}/health`);
       const data = (await res.json()) as any;
 
-      assert.strictEqual(res.status, 503);
-      assert.strictEqual(data.status, "unhealthy");
-      assert.strictEqual(data.database, "disconnected");
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(data, { status: "alive" });
     } finally {
       server.close();
+    }
+  });
+
+  it("should report ready when the database and Soroban RPC are available", async () => {
+    const mockDb = createMockDatabase();
+    const app = createServer(
+      mockDb,
+      undefined,
+      onboardingAuthConfig,
+      undefined,
+      async () => true,
+    );
+    const server = app.listen(0);
+    const address = server.address() as any;
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/ready`);
+      const data = (await res.json()) as any;
+
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(data, {
+        status: "ready",
+        checks: { database: "available", rpc: "available" },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("should report not ready when the database is unavailable", async () => {
+    const mockDb = createMockDatabase();
+    mockDb.state.dbConnected = false;
+    const app = createServer(
+      mockDb,
+      undefined,
+      onboardingAuthConfig,
+      undefined,
+      async () => true,
+    );
+    const server = app.listen(0);
+    const address = server.address() as any;
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/ready`);
+      const data = (await res.json()) as any;
+      assert.strictEqual(res.status, 503);
+      assert.deepStrictEqual(data, {
+        status: "not_ready",
+        checks: { database: "unavailable", rpc: "available" },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("should report not ready when the configured Soroban RPC is unavailable", async () => {
+    const app = createServer(
+      createMockDatabase(),
+      undefined,
+      onboardingAuthConfig,
+      undefined,
+      async () => false,
+    );
+    const server = app.listen(0);
+    const address = server.address() as any;
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/ready`);
+      const data = (await res.json()) as any;
+      assert.strictEqual(res.status, 503);
+      assert.deepStrictEqual(data, {
+        status: "not_ready",
+        checks: { database: "available", rpc: "unavailable" },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("should return the SEP-24 handoff to the authenticated merchant and poll the anchor", async () => {
+    const secret = "settlement-status-test-secret";
+    const authConfig = {
+      ...onboardingAuthConfig,
+      jwtSecret: secret,
+    };
+    const mockDb = createMockDatabase();
+    mockDb.state.settlements.set("pay_interactive", {
+      paymentId: "pay_interactive",
+      merchantId: "merchant-1",
+      anchorDomain: "anchor.example.com",
+      anchorTxnId: "anchor-session-1",
+      sep24Endpoint: "https://anchor.example.com/sep24",
+      interactiveUrl: "https://anchor.example.com/withdraw/session",
+      amount: 15000,
+      currency: "USD",
+      status: "awaiting_user",
+    });
+    nock("https://anchor.example.com")
+      .get("/sep24/transaction")
+      .query({ id: "anchor-session-1" })
+      .reply(200, { transaction: { status: "incomplete" } });
+
+    const app = createServer(mockDb, undefined, authConfig, undefined, async () => true);
+    const server = app.listen(0);
+    const address = server.address() as any;
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${address.port}/v1/merchant/settlements/pay_interactive`,
+        {
+          headers: {
+            Authorization: `Bearer ${signSEP10Token(secret, "merchant-1", "example.test")}`,
+          },
+        },
+      );
+      const data = (await res.json()) as any;
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(data, {
+        payment_id: "pay_interactive",
+        status: "awaiting_user",
+        anchor_transaction_id: "anchor-session-1",
+        interactive_url: "https://anchor.example.com/withdraw/session",
+        amount: 15000,
+        currency: "USD",
+      });
+      assert.ok(nock.isDone());
+    } finally {
+      server.close();
+      nock.cleanAll();
     }
   });
 
@@ -1042,7 +1163,12 @@ describe("ISSUE #616 — Indexer REST API Server", () => {
       return { processed: 10, total: 10, stored: 10, skipped_duplicates: 2 };
     };
 
-    const app = createServer(mockDb as any, undefined, mockReplayHandler as any);
+    const app = createServer(
+      mockDb as any,
+      undefined,
+      onboardingAuthConfig,
+      mockReplayHandler as any,
+    );
     const server = app.listen(0);
     const port = (server.address() as any).port;
 
@@ -1070,12 +1196,17 @@ describe("ISSUE #616 — Indexer REST API Server", () => {
     const previousApiKey = process.env.API_KEY;
     process.env.API_KEY = "replay_admin_key";
     registerApiKey({ key: "replay_read_key", scopes: ["read:analytics"] });
-    const app = createServer(createMockDatabase() as any, undefined, async () => ({
-      processed: 0,
-      stored: 0,
-      skipped_duplicates: 0,
-      total: 1,
-    }));
+    const app = createServer(
+      createMockDatabase() as any,
+      undefined,
+      onboardingAuthConfig,
+      async () => ({
+        processed: 0,
+        stored: 0,
+        skipped_duplicates: 0,
+        total: 1,
+      }),
+    );
     const server = app.listen(0);
     const port = (server.address() as any).port;
 

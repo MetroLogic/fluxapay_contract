@@ -15,20 +15,19 @@
  *   1. PaymentProcessor emits PAYMENT/ANCHOR_WITHDRAW on settlement.
  *   2. The indexer (see `index.ts`) decodes the event and calls
  *      `SettlementService.settle(payload)`.
- *   3. `settle()` uses `sep6_endpoint` if present, else falls back to
- *      `sep24_endpoint`.
- *   4. POSTs the SEP-6 withdrawal request.
- *   5. Polls the anchor for transaction status, up to `POLL_MAX_RETRIES`
- *      times, `POLL_INTERVAL_MS` apart, before giving up and marking the
- *      settlement `failed`.
+ * 3. `settle()` starts SEP-6 when configured; an explicit `incomplete`
+ *    response (or no SEP-6 endpoint) starts a SEP-24 interactive withdrawal.
+ * 4. Persists the SEP-24 session and exposes its URL through the merchant
+ *    settlement-status endpoint.
+ * 5. Resumes anchor status polling when the merchant polls after the UI
+ *    handoff. Only authoritative terminal anchor statuses complete/fail it.
  *   6. Persists progress in the `settlements` table (via `Database`) and
  *      emits `SETTLEMENT/FIAT_SENT` or `SETTLEMENT/FIAT_FAILED` to any
  *      registered listeners (e.g. a webhook notifier wired up by the host
  *      service).
  *
- * The whole flow is idempotent on `payment_id`: a re-delivered event (e.g.
- * after an RPC reorg) short-circuits once a settlement has reached a
- * terminal state.
+ * The flow is idempotent on `payment_id`: a re-delivered event reuses a
+ * persisted SEP-24 session and short-circuits once a terminal state is reached.
  */
 
 import * as http from "http";
@@ -49,13 +48,15 @@ export interface AnchorWithdrawPayload {
   ledgerTimestamp: number;
 }
 
-export type SettlementStatus = "pending" | "fiat_sent" | "failed";
+export type SettlementStatus = "pending" | "awaiting_user" | "fiat_sent" | "failed";
 
 export interface SettlementRecord {
   paymentId: string;
   merchantId: string;
   anchorDomain: string;
   anchorTxnId: string | null;
+  sep24Endpoint?: string | null;
+  interactiveUrl?: string | null;
   amount: number;
   currency: string;
   status: SettlementStatus;
@@ -81,7 +82,15 @@ export const POLL_MAX_RETRIES = 10;
 export const POLL_INTERVAL_MS = 30_000;
 
 const TERMINAL_SUCCESS = new Set(["completed"]);
-const TERMINAL_FAILURE = new Set(["error", "no_market", "too_small", "too_large"]);
+const TERMINAL_FAILURE = new Set([
+  "cancelled",
+  "error",
+  "expired",
+  "no_market",
+  "refunded",
+  "too_large",
+  "too_small",
+]);
 
 interface HttpResponse {
   status: number;
@@ -181,16 +190,20 @@ export class SettlementService {
   async settle(payload: AnchorWithdrawPayload): Promise<void> {
     const existing = await this.store.getSettlement(payload.paymentId);
     if (existing && existing.status !== "pending") {
-      console.log(
-        `Settlement for payment ${payload.paymentId} already ${existing.status}, skipping`
-      );
+      if (existing.status !== "awaiting_user") {
+        console.log(
+          `Settlement for payment ${payload.paymentId} already ${existing.status}, skipping`
+        );
+        return;
+      }
+    }
+
+    if (existing?.anchorTxnId && existing.sep24Endpoint) {
+      await this.resume(payload.paymentId);
       return;
     }
 
-    // Prefer SEP-6 (no UI required); fall back to SEP-24's transfer server
-    // only if no SEP-6 endpoint was configured for the merchant's anchor.
-    const endpoint = payload.sep6Endpoint || payload.sep24Endpoint;
-    if (!endpoint) {
+    if (!payload.sep6Endpoint && !payload.sep24Endpoint) {
       console.warn(
         `No anchor endpoint configured for payment ${payload.paymentId}; skipping offramp`
       );
@@ -208,7 +221,12 @@ export class SettlementService {
     });
 
     try {
-      const anchorTxnId = await this.initiateWithdrawal(endpoint, payload);
+      if (!payload.sep6Endpoint) {
+        await this.initiateInteractiveWithdrawal(payload.sep24Endpoint, payload);
+        return;
+      }
+
+      const anchorTxnId = await this.initiateSep6Withdrawal(payload.sep6Endpoint, payload);
 
       await this.store.upsertSettlement({
         paymentId: payload.paymentId,
@@ -220,66 +238,88 @@ export class SettlementService {
         anchorTxnId,
       });
 
-      const finalStatus = await this.pollUntilTerminal(endpoint, anchorTxnId);
+      const finalStatus = await this.pollUntilTerminal(payload.sep6Endpoint, anchorTxnId);
 
-      if (TERMINAL_SUCCESS.has(finalStatus)) {
-        await this.store.upsertSettlement({
-          paymentId: payload.paymentId,
-          merchantId: payload.merchantId,
-          anchorDomain: payload.anchorDomain,
-          amount: payload.amount,
-          currency: payload.currency,
-          status: "fiat_sent",
-          anchorTxnId,
-        });
-        this.emit({
-          type: "SETTLEMENT/FIAT_SENT",
-          paymentId: payload.paymentId,
-          anchorTxnId,
-          status: "fiat_sent",
-        });
-      } else {
-        await this.markFailed(
-          payload,
-          anchorTxnId,
-          `anchor reported terminal status: ${finalStatus}`
+      if (finalStatus === "incomplete" && payload.sep24Endpoint) {
+        await this.initiateInteractiveWithdrawal(payload.sep24Endpoint, payload);
+      } else if (finalStatus) {
+        await this.applyAnchorStatus(
+          {
+            ...payload,
+            anchorTxnId,
+            sep24Endpoint: null,
+            interactiveUrl: null,
+            status: "pending",
+          },
+          finalStatus
         );
       }
     } catch (error) {
-      await this.markFailed(
-        payload,
-        existing?.anchorTxnId ?? null,
-        error instanceof Error ? error.message : String(error)
+      console.error(
+        `Settlement request failed for payment ${payload.paymentId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
       );
     }
   }
 
-  private async markFailed(
-    payload: AnchorWithdrawPayload,
-    anchorTxnId: string | null,
-    reason: string
+  /**
+   * Polls a persisted SEP-24 transaction once when a merchant asks for its
+   * settlement status after returning from the anchor UI.
+   */
+  async resume(paymentId: string): Promise<SettlementRecord | null> {
+    const record = await this.store.getSettlement(paymentId);
+    if (
+      !record ||
+      !record.anchorTxnId ||
+      !record.sep24Endpoint ||
+      (record.status !== "awaiting_user" && record.status !== "pending")
+    ) {
+      return record;
+    }
+
+    try {
+      const status = await this.pollOnce(record.sep24Endpoint, record.anchorTxnId);
+      if (status) await this.applyAnchorStatus(record, status);
+    } catch (error) {
+      console.error(
+        `Settlement status check failed for payment ${paymentId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    return this.store.getSettlement(paymentId);
+  }
+
+  private async applyAnchorStatus(
+    record: SettlementRecord,
+    status: string
   ): Promise<void> {
-    console.error(`Settlement failed for payment ${payload.paymentId}: ${reason}`);
-    await this.store.upsertSettlement({
-      paymentId: payload.paymentId,
-      merchantId: payload.merchantId,
-      anchorDomain: payload.anchorDomain,
-      amount: payload.amount,
-      currency: payload.currency,
-      status: "failed",
-      anchorTxnId,
-    });
+    if (!TERMINAL_SUCCESS.has(status) && !TERMINAL_FAILURE.has(status)) {
+      await this.store.upsertSettlement({
+        ...record,
+        status:
+          status === "incomplete" && record.interactiveUrl
+            ? "awaiting_user"
+            : "pending",
+      });
+      return;
+    }
+
+    const succeeded = TERMINAL_SUCCESS.has(status);
+    const settlementStatus = succeeded ? "fiat_sent" : "failed";
+    await this.store.upsertSettlement({ ...record, status: settlementStatus });
     this.emit({
-      type: "SETTLEMENT/FIAT_FAILED",
-      paymentId: payload.paymentId,
-      anchorTxnId,
-      status: "failed",
-      reason,
+      type: succeeded ? "SETTLEMENT/FIAT_SENT" : "SETTLEMENT/FIAT_FAILED",
+      paymentId: record.paymentId,
+      anchorTxnId: record.anchorTxnId,
+      status: settlementStatus,
+      ...(!succeeded ? { reason: `anchor reported terminal status: ${status}` } : {}),
     });
   }
 
   /** POST {sep6_endpoint}/transactions/withdrawal */
-  private async initiateWithdrawal(
+  private async initiateSep6Withdrawal(
     endpoint: string,
     payload: AnchorWithdrawPayload
   ): Promise<string> {
@@ -305,11 +345,65 @@ export class SettlementService {
     return body.id;
   }
 
-  /** GET {sep6_endpoint}/transaction?id=... — poll until a terminal status. */
+  /** POST {sep24_endpoint}/transactions/withdraw/interactive */
+  private async initiateInteractiveWithdrawal(
+    endpoint: string,
+    payload: AnchorWithdrawPayload
+  ): Promise<void> {
+    const url = `${endpoint.replace(/\/+$/, "")}/transactions/withdraw/interactive`;
+    const response = await httpRequest("POST", url, {
+      asset_code: "USDC",
+      amount: String(payload.amount),
+      account: payload.payoutAddress,
+      memo: payload.paymentId,
+      memo_type: "text",
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(
+        `SEP-24 interactive withdrawal failed with status ${response.status}`
+      );
+    }
+
+    const body = response.json as { id?: unknown; url?: unknown } | null;
+    if (typeof body?.id !== "string" || !body.id.trim()) {
+      throw new Error("SEP-24 response missing transaction id");
+    }
+    if (typeof body.url !== "string") {
+      throw new Error("SEP-24 response missing interactive URL");
+    }
+
+    let interactiveUrl: URL;
+    try {
+      interactiveUrl = new URL(body.url);
+    } catch {
+      throw new Error("SEP-24 response contains an invalid interactive URL");
+    }
+    if (
+      interactiveUrl.protocol !== "https:" ||
+      interactiveUrl.username ||
+      interactiveUrl.password
+    ) {
+      throw new Error("SEP-24 response contains an unsafe interactive URL");
+    }
+
+    await this.store.upsertSettlement({
+      paymentId: payload.paymentId,
+      merchantId: payload.merchantId,
+      anchorDomain: payload.anchorDomain,
+      anchorTxnId: body.id,
+      sep24Endpoint: endpoint,
+      interactiveUrl: interactiveUrl.toString(),
+      amount: payload.amount,
+      currency: payload.currency,
+      status: "awaiting_user",
+    });
+  }
+
+  /** GET {sep_endpoint}/transaction?id=... — return the anchor's status. */
   private async pollUntilTerminal(
     endpoint: string,
     anchorTxnId: string
-  ): Promise<string> {
+  ): Promise<string | null> {
     const url = `${endpoint.replace(/\/+$/, "")}/transaction?id=${encodeURIComponent(
       anchorTxnId
     )}`;
@@ -318,8 +412,16 @@ export class SettlementService {
       const response = await httpRequest("GET", url);
       if (response.status >= 200 && response.status < 300) {
         const body = response.json as { transaction?: { status?: string } } | null;
-        const status = body?.transaction?.status ?? "incomplete";
-        if (TERMINAL_SUCCESS.has(status) || TERMINAL_FAILURE.has(status)) {
+        const status = body?.transaction?.status;
+        if (typeof status !== "string") {
+          if (attempt < this.maxRetries - 1) await sleep(this.pollIntervalMs);
+          continue;
+        }
+        if (
+          status === "incomplete" ||
+          TERMINAL_SUCCESS.has(status) ||
+          TERMINAL_FAILURE.has(status)
+        ) {
           return status;
         }
       }
@@ -329,7 +431,18 @@ export class SettlementService {
       }
     }
 
-    // Retries exhausted without reaching a terminal state — treat as failed.
-    return "error";
+    return null;
+  }
+
+  private async pollOnce(endpoint: string, anchorTxnId: string): Promise<string | null> {
+    const url = `${endpoint.replace(/\/+$/, "")}/transaction?id=${encodeURIComponent(
+      anchorTxnId
+    )}`;
+    const response = await httpRequest("GET", url);
+    if (response.status < 200 || response.status >= 300) return null;
+    const body = response.json as { transaction?: { status?: string } } | null;
+    return typeof body?.transaction?.status === "string"
+      ? body.transaction.status
+      : null;
   }
 }
