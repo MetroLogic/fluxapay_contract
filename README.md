@@ -413,3 +413,6 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 - #980: feat: add input validation for payment amount field on checkout page
 <!-- handsoff-issue-969 -->
 - #969: feat: add date range and currency filters to dashboard transactions table
+
+<!-- handsoff-issue-1131 -->
+- #1131: test: wire htlc_test.rs into the test build or delete it
