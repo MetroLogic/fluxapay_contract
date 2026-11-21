@@ -1,5 +1,5 @@
 // Updated DexRouter with pre-execution checks, path validation, price impact guard, and fallback logic.
-use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, token, Address, Env, Symbol, Vec};
 
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,11 +23,55 @@ pub struct DexRouter;
     contractimpl
 )]
 impl DexRouter {
-    /// Get the router's factory address.
+    /// Initialize the router with an admin and Soroswap factory address.
+    pub fn initialize(env: Env, admin: Address, factory: Address) {
+        let admin_key = Symbol::new(&env, "Admin");
+        if env.storage().instance().has(&admin_key) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&admin_key, &admin);
+        env.storage().instance().set(&Symbol::new(&env, "Factory"), &factory);
+    }
+
+    /// Admin-configurable factory address (#1145).
+    pub fn set_factory(env: Env, admin: Address, new_factory: Address) {
+        admin.require_auth();
+        let admin_key = Symbol::new(&env, "Admin");
+        if let Some(stored_admin) = env.storage().instance().get::<Symbol, Address>(&admin_key) {
+            if admin != stored_admin {
+                panic!("unauthorized");
+            }
+        } else {
+            env.storage().instance().set(&admin_key, &admin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, "Factory"), &new_factory);
+    }
+
+    /// Admin-configurable external router address (#1146).
+    pub fn set_router(env: Env, admin: Address, router: Address) {
+        admin.require_auth();
+        let admin_key = Symbol::new(&env, "Admin");
+        if let Some(stored_admin) = env.storage().instance().get::<Symbol, Address>(&admin_key) {
+            if admin != stored_admin {
+                panic!("unauthorized");
+            }
+        } else {
+            env.storage().instance().set(&admin_key, &admin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, "Router"), &router);
+    }
+
+    /// Get configured external router address.
+    pub fn router(env: Env) -> Option<Address> {
+        env.storage().instance().get(&Symbol::new(&env, "Router"))
+    }
+
+    /// Get the router's factory address. Returns configured Soroswap factory or placeholder.
     pub fn factory(env: Env) -> Address {
-        // In a real implementation, this would call the router's factory() method
-        // For now, we return a placeholder that can be configured
-        env.current_contract_address()
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "Factory"))
+            .unwrap_or_else(|| env.current_contract_address())
     }
 
     /// Admin configuration for pool reserve between token_in and token_out (#1144, #1147).
@@ -222,7 +266,8 @@ impl DexRouter {
         // fallback swap — it would attempt to trade the output token back for the input token
         // (opposite direction). If a fallback strategy is desired, use swap_with_fallback_router
         // with a different router from the allowlist using the same path.
-        Self::refund_caller(&env, to.clone(), amount_in)?;
+        let token_in = path.get(0).unwrap();
+        Self::refund_caller(env.clone(), token_in, to.clone(), amount_in)?;
         Err(DexRouterError::SwapFailed)
     }
 
@@ -320,9 +365,21 @@ impl DexRouter {
     }
 
     #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
-    fn refund_caller(env: &Env, recipient: Address, amount: i128) -> Result<(), DexRouterError> {
+    pub fn refund_caller(
+        env: Env,
+        token: Address,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<(), DexRouterError> {
+        if amount > 0 {
+            token::Client::new(&env, &token).transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &amount,
+            );
+        }
         env.events().publish(
-            (Symbol::new(env, "REFUND"), Symbol::new(env, "CALLER")),
+            (Symbol::new(&env, "REFUND"), Symbol::new(&env, "CALLER")),
             (recipient, amount),
         );
         Ok(())
@@ -349,7 +406,7 @@ impl DexRouter {
         amounts
     }
 
-    /// Swap for an exact output (#888): merchant gets exactly `amount_out`;
+    /// Swap for an exact output (#888, #1146): merchant gets exactly `amount_out`;
     /// customer pays only the input computed at execution time, capped by `amount_in_max`.
     #[allow(deprecated)]
     pub fn swap_tokens_for_exact_tokens(
@@ -367,6 +424,24 @@ impl DexRouter {
         if amount_out <= 0 {
             return Err(DexRouterError::NoOutputAmount);
         }
+
+        // Invoke real router if configured
+        if let Some(real_router) = env
+            .storage()
+            .instance()
+            .get::<Symbol, Address>(&Symbol::new(&env, "Router"))
+        {
+            if real_router != env.current_contract_address() {
+                return DexRouterClient::new(&env, &real_router).swap_tokens_for_exact_tokens(
+                    &amount_out,
+                    &amount_in_max,
+                    &path,
+                    &to,
+                    &deadline,
+                );
+            }
+        }
+
         let amounts = Self::get_amounts_in(env.clone(), amount_out, path.clone());
         if amounts.is_empty() {
             return Err(DexRouterError::NoOutputAmount);
@@ -378,9 +453,18 @@ impl DexRouter {
         if required_in > amount_in_max {
             return Err(DexRouterError::SlippageExceeded); // never spend more than authorized
         }
+
+        let token_in = path.get(0).unwrap();
+        let token_out = path.get(path.len() - 1).unwrap();
+        token::Client::new(&env, &token_out).transfer(
+            &env.current_contract_address(),
+            &to,
+            &amount_out,
+        );
+
         let surplus = amount_in_max.saturating_sub(required_in);
         if surplus > 0 {
-            Self::refund_caller(&env, to.clone(), surplus)?; // refund above the necessary input
+            Self::refund_caller(env.clone(), token_in, to.clone(), surplus)?; // refund above the necessary input
         }
         env.events().publish(
             (Symbol::new(&env, "SWAP_EXACT_SETTLED"),),
