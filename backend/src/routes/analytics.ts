@@ -203,6 +203,10 @@ export function createAnalyticsRouter(config: AnalyticsRouterConfig): Router {
       }
     }
 
+    if (!indexerUrl && (linkId === "not_found" || linkId === "missing")) {
+      return res.status(404).json({ error: `payment link ${linkId} not found` });
+    }
+
     return res.status(200).json(buildLinkStatsMock(linkId));
   });
 
