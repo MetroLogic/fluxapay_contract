@@ -96,12 +96,40 @@ fn test_get_amounts_out_multiple_hops() {
 }
 
 #[test]
+fn test_check_liquidity_sufficient_and_insufficient() {
 fn test_factory_address_configuration() {
     let env = Env::default();
     env.mock_all_auths();
 
     let contract_id = env.register(DexRouter, ());
     let client = DexRouterClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+
+    let mut path = soroban_sdk::Vec::new(&env);
+    path.push_back(token_a.clone());
+    path.push_back(token_b.clone());
+
+    // By default in simulation mode, check_liquidity returns true
+    assert!(client.check_liquidity(&path));
+
+    // Disable simulation mode without configured reserve -> insufficient liquidity (#1147)
+    client.set_simulation_mode(&admin, &false);
+    assert!(!client.check_liquidity(&path));
+
+    // Configure sufficient pool reserve -> returns true (#1147)
+    client.set_pool_reserve(&admin, &token_a, &token_b, &50000i128);
+    assert!(client.check_liquidity(&path));
+
+    // Configure zero / empty pool reserve -> returns false (#1147)
+    client.set_pool_reserve(&admin, &token_a, &token_b, &0i128);
+    assert!(!client.check_liquidity(&path));
+}
+
+#[test]
+fn test_get_amounts_out_with_pool_reserves_and_simulation_fallback() {
 
     // Default factory returns current contract address before configuration
     assert_eq!(client.factory(), contract_id);
@@ -246,6 +274,43 @@ fn test_swap_tokens_for_exact_tokens_deadline_revert() {
 
     let contract_id = env.register(DexRouter, ());
     let client = DexRouterClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    let token_c = Address::generate(&env);
+
+    let mut path = soroban_sdk::Vec::new(&env);
+    path.push_back(token_a.clone());
+    path.push_back(token_b.clone());
+    path.push_back(token_c.clone());
+
+    // In simulation mode without explicit reserves, uses default 1% haircut (#1144)
+    let sim_amounts = client.get_amounts_out(&1000, &path);
+    assert_eq!(sim_amounts.get(0).unwrap(), 1000);
+    assert_eq!(sim_amounts.get(1).unwrap(), 990);
+    assert_eq!(sim_amounts.get(2).unwrap(), 980);
+
+    // Configure known pool reserves for multi-hop quote (#1144)
+    // Hop 1 (A -> B): reserve 500 (lower than 990 standard quote)
+    client.set_pool_reserve(&admin, &token_a, &token_b, &500);
+    // Hop 2 (B -> C): reserve 1000 (standard quote 500 * 0.99 = 495 is below 1000)
+    client.set_pool_reserve(&admin, &token_b, &token_c, &1000);
+
+    let pool_amounts = client.get_amounts_out(&1000, &path);
+    assert_eq!(pool_amounts.get(0).unwrap(), 1000);
+    assert_eq!(pool_amounts.get(1).unwrap(), 500); // capped by hop 1 reserve
+    assert_eq!(pool_amounts.get(2).unwrap(), 495); // 500 * 99 / 100
+
+    // In production mode (simulation disabled) with missing reserves, output is 0
+    let token_d = Address::generate(&env);
+    let mut unconfigured_path = soroban_sdk::Vec::new(&env);
+    unconfigured_path.push_back(token_a);
+    unconfigured_path.push_back(token_d);
+
+    client.set_simulation_mode(&admin, &false);
+    let unconfigured_amounts = client.get_amounts_out(&1000, &unconfigured_path);
+    assert_eq!(unconfigured_amounts.get(1).unwrap(), 0);
 
     let token_admin = Address::generate(&env);
     let token_in = env

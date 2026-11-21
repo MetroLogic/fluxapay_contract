@@ -407,6 +407,16 @@ app.use(
 // Routes: analytics (Issue #1151, Issue #1150, Issue #803)
 // ---------------------------------------------------------------------------
 
+app.use(
+  "/v1/analytics",
+  createAnalyticsRouter({
+    serverPublicKey: SERVER_PUBLIC_KEY,
+    jwtSecret: JWT_SECRET,
+    indexerUrl: process.env.INDEXER_URL,
+    networkPassphrase: NETWORK_PASSPHRASE,
+    homeDomain: HOME_DOMAIN,
+  }),
+);
 const analyticsRouter = createAnalyticsRouter({
   serverPublicKey: SERVER_PUBLIC_KEY,
   jwtSecret: JWT_SECRET,
