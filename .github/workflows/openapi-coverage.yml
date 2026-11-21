@@ -1,0 +1,42 @@
+name: OpenAPI Docs
+
+# Issue #1265: docs/openapi.yaml claims to describe the REST API, but nothing
+# verified that claim against the routes the indexer actually registers, so
+# route additions and removals could ship undocumented. This job lints the
+# document and checks it against the indexer registrations in both directions.
+# See docs/openapi-coverage.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  openapi-route-coverage:
+    name: Verify OpenAPI covers indexer routes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Static comparison of indexer/src registrations with docs/openapi.yaml.
+      # No dependencies to install: the checker is plain Node.
+      - name: Check indexer routes against docs/openapi.yaml
+        run: node scripts/check-openapi-route-coverage.js --verbose
+
+      - name: Test the coverage checker
+        run: node --test scripts/test/openapi-route-coverage.test.js
+
+      - name: Lint the OpenAPI document
+        run: bash docs/openapi-check.sh
