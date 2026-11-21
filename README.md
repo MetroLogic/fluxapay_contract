@@ -416,3 +416,6 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 
 <!-- handsoff-issue-1131 -->
 - #1131: test: wire htlc_test.rs into the test build or delete it
+
+<!-- handsoff-issue-1134 -->
+- #1134: test: wire treasury_multisig_test.rs into the test build
