@@ -39,6 +39,21 @@ opt-in `cargo build --no-default-features --features contract-<name>`.
 | `dex_router.rs` | `contract-dex-router` | yes |
 | `htlc.rs` | `contract-htlc` | yes |
 
+## WASM Build Target Guard
+
+Soroban deployment artifacts enforce a single-contract invariant. Building a WASM
+target (`wasm32`) with zero or multiple `contract-*` features selected is rejected
+at build time by `fluxapay/build.rs` (Issue #1269).
+
+### Validation Rules
+
+- **WASM Builds (`target_arch = "wasm32"` or `target_family = "wasm"`)**:
+  - Exactly **one** `contract-*` feature must be enabled.
+  - Zero contract features selected: fails with a diagnostic listing all available contract features and example command.
+  - More than one contract feature selected: fails with a diagnostic listing the conflicting features.
+- **Native Builds (Host tests, clippy, doc generation)**:
+  - The guard is skipped on non-WASM targets, preserving existing workflows like `cargo test --all-features` and `cargo clippy --all-targets --all-features`.
+
 ## Missing flags
 
 The following modules have **no** feature flag, so they are not independently
