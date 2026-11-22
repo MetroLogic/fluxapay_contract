@@ -30,7 +30,7 @@ opt-in `cargo build --no-default-features --features contract-<name>`.
 | Module | Feature flag | Independently deployable |
 | --- | --- | --- |
 | `payment_processor.rs` | `contract-payment-processor` (default) | yes |
-| `stream.rs` / `payment_streaming.rs` | `contract-payment-streaming` | yes |
+| `stream.rs` | `contract-payment-streaming` | yes |
 | `refund_manager.rs` | `contract-refund-manager` | yes |
 | `gas_estimator.rs` | `contract-gas-estimator` | yes |
 | `fx_oracle.rs` | `contract-fx-oracle` | yes |
