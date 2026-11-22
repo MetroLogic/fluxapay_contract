@@ -87,8 +87,10 @@ Protected endpoints use an API key via `x-api-key` or a bearer token, except `GE
 
 | Method | Endpoint | Auth Required | Description |
 |--------|----------|---------------|-------------|
-| `GET` | `/health` | No | Liveness and PostgreSQL connection check. Returns 200 `{ status: "healthy", database: "connected" }` or 503 if DB is down. |
+| `GET` | `/health` | No | Lightweight liveness probe. Always returns 200 `{ "status": "alive" }`; dependency checks are handled by readiness. |
+| `GET` | `/ready` | No | Readiness probe for PostgreSQL and the configured `SOROBAN_RPC_URL` (`getHealth`). Returns 200 `{ "status": "ready", "checks": { "database": "available", "rpc": "available" } }` or 503 with `status: "not_ready"` and each unavailable check. Does not expose errors or endpoint URLs. |
 | `GET` | `/v1/merchants/me/onboarding` | SEP-10 bearer JWT | Returns six merchant setup steps and `completion_pct`. Uses the token's `merchant_id` claim, falling back to `sub`. |
+| `GET` | `/v1/merchant/settlements/:paymentId` | SEP-10 bearer JWT | Returns merchant-owned settlement status and, while `awaiting_user`, the anchor's interactive URL and transaction ID. Polling this endpoint resumes SEP-24 status checks. |
 | `GET` | `/v1/reports/reconciliation?from=YYYY-MM-DD&to=YYYY-MM-DD` | Merchant API key | Returns merchant-scoped payment, settlement, refund, dispute adjustment, and FX equivalent data. The inclusive date range is limited to 31 days. Set `Accept: text/csv` for CSV output. An optional `merchant_id` query must match the merchant assigned to the key. |
 | `GET` | `/payments/:paymentId` | Yes | Get payment record by payment ID. Returns 404 if not found. |
 | `GET` | `/merchants/:merchantId/payments` | Yes | Query paginated payments for a merchant. Supports query parameters `page` (default 1), `limit` (default 20), and `status`. Returns useful pagination metadata. |
@@ -101,6 +103,35 @@ Protected endpoints use an API key via `x-api-key` or a bearer token, except `GE
 | `GET` | `/v1/payment-links` | SEP-10 merchant | List the authenticated merchant's payment links and their seven-day conversion counts. |
 | `GET` | `/v1/payment-links/:id/analytics` | SEP-10 merchant | Return views, attempts, conversions, conversion rate, revenue, and last use; links owned by other merchants return 404. |
 | `GET` | `/v1/subscriptions/metrics?merchant_id=<id>&period=YYYY-MM` | Merchant API key (`read:analytics`) | Return monthly recurring revenue, subscriber activity, churn, trial conversions, past-due count, and dunning recovery rate. |
+
+### SEP-24 interactive settlement
+
+When SEP-6 reports `incomplete` or is not configured, an anchor SEP-24
+interactive withdrawal is initiated. The transaction ID and validated
+interactive URL are returned by
+`GET /v1/merchant/settlements/:paymentId`, for example:
+
+```json
+{
+  "payment_id": "pay_123",
+  "status": "awaiting_user",
+  "anchor_transaction_id": "anchor-txn-456",
+  "interactive_url": "https://anchor.example/withdraw/session",
+  "amount": 15000,
+  "currency": "USD"
+}
+```
+
+The indexer does not receive an anchor push callback. After the user completes
+or cancels the anchor UI and returns to the merchant application, the
+application should poll this endpoint again. The indexer
+checks the persisted SEP-24 transaction ID against the anchor on each poll.
+Only anchor-reported terminal statuses change the settlement to `fiat_sent`
+or `failed`; temporary network failures leave it non-terminal. For operator
+recovery, reconcile the transaction with the anchor before retrying and never
+create a second withdrawal while the persisted anchor transaction ID exists.
+See the [SEP-6/SEP-24 integration guide](../docs/sep6-sep24-anchor-integration.md)
+for the detailed recovery procedure.
 
 The checkout page should call `POST /v1/payment-links/{id}/view` once when
 the link checkout loads. `LINK/USED` contract events associate the resulting

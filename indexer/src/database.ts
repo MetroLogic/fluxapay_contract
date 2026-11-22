@@ -666,7 +666,11 @@ export class Database implements SettlementStore {
         await tx.insert(settlements).values({
           paymentId: String(value.payment_id),
           merchantId: String(value.merchant_id),
+          anchorDomain: String(value.anchor_domain ?? ""),
+          anchorTxnId:
+            value.anchor_txn_id != null ? String(value.anchor_txn_id) : null,
           amount: BigInt(String(value.amount ?? 0)),
+          currency: value.currency != null ? String(value.currency) : null,
           status: event.topic[1],
           createdAt: ts,
           settledAt: ts,
@@ -719,7 +723,8 @@ export class Database implements SettlementStore {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT payment_id, merchant_id, anchor_domain, anchor_txn_id, amount, currency, status
+        `SELECT payment_id, merchant_id, anchor_domain, anchor_txn_id, sep24_endpoint,
+                interactive_url, amount, currency, status
          FROM settlements WHERE payment_id = $1`,
         [paymentId]
       );
@@ -730,6 +735,8 @@ export class Database implements SettlementStore {
         merchantId: row.merchant_id,
         anchorDomain: row.anchor_domain,
         anchorTxnId: row.anchor_txn_id,
+        sep24Endpoint: row.sep24_endpoint,
+        interactiveUrl: row.interactive_url,
         amount: Number(row.amount),
         currency: row.currency,
         status: row.status as SettlementStatus,
@@ -741,22 +748,24 @@ export class Database implements SettlementStore {
 
   /**
    * Insert or update the settlement row for a payment, keyed by
-   * `payment_id`. Called at each step of the SEP-6 withdrawal flow
-   * (initiated -> pending -> fiat_sent/failed).
+   * `payment_id`. Called at each step of the SEP-6/SEP-24 withdrawal flow.
    */
   async upsertSettlement(record: SettlementRecord): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query(
         `INSERT INTO settlements
-           (payment_id, merchant_id, anchor_domain, anchor_txn_id, amount, currency, status, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+           (payment_id, merchant_id, anchor_domain, anchor_txn_id, amount, currency,
+            status, sep24_endpoint, interactive_url, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
          ON CONFLICT (payment_id) DO UPDATE SET
            anchor_domain = $3,
            anchor_txn_id = COALESCE($4, settlements.anchor_txn_id),
            amount = $5,
            currency = $6,
            status = $7,
+           sep24_endpoint = COALESCE($8, settlements.sep24_endpoint),
+           interactive_url = COALESCE($9, settlements.interactive_url),
            updated_at = CURRENT_TIMESTAMP`,
         [
           record.paymentId,
@@ -766,6 +775,8 @@ export class Database implements SettlementStore {
           record.amount,
           record.currency,
           record.status,
+          record.sep24Endpoint ?? null,
+          record.interactiveUrl ?? null,
         ]
       );
     } finally {

@@ -5,7 +5,8 @@ This directory contains the FluxaPay Soroban Event Indexer service that syncs ev
 ## Features
 
 - **Multi-Contract Event Indexing (#618)**: Subscribes simultaneously to events across all 5 FluxaPay contracts (`PaymentProcessor`, `RefundManager`, `MerchantRegistry`, `FXOracle`, `PaymentLinkManager`).
-- **REST API Server (#616)**: HTTP API for querying payments, merchant payments (with pagination & status filter), disputes, refunds, events, and health status. Protected with API key authentication (`x-api-key` header or `Authorization: Bearer <API_KEY>`).
+- **REST API Server (#616)**: HTTP API for querying payments, disputes, refunds, events, settlements, liveness, and dependency readiness.
+- **SEP-24 Settlement Handoff**: Persists anchor interactive withdrawal sessions and resumes authoritative status polling after merchant return from the anchor UI.
 - **Merchant Onboarding Checklist (#1074)**: SEP-10-authenticated checklist endpoint derived from indexed merchant registration and verification data.
 - **Reconciliation Report Export (#1081)**: Merchant-scoped date-range reports with settlement, refund, dispute adjustment, fiat conversion, and CSV output.
 - **Dead-Letter Queue & Automatic Retry (#617)**: Persists failed events to `dead_letter_events` with error tracking and retry counters. Includes an automatic retry worker and an authenticated `POST /admin/replay-dlq` manual replay endpoint.

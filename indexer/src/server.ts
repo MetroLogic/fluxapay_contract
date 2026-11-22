@@ -12,6 +12,7 @@ import {
 import { getCachedRate } from "./fx-rate-cache";
 import { createRateLimitMiddleware } from "./rate-limit";
 import { anchorEvidenceHash, parseEvidenceMultipart, pinEvidence } from "./evidence";
+import {
   extractApiKey,
   getKeyMerchantId,
   getKeyScopes,
@@ -20,8 +21,12 @@ import { anchorEvidenceHash, parseEvidenceMultipart, pinEvidence } from "./evide
   requireScope,
 } from "./auth/api-key";
 import { requireSEP10Auth } from "./auth/middleware";
+import { loadSEP10AuthConfig, type SEP10AuthConfig } from "./auth/config";
+import { SettlementService } from "./settlement";
 
 dotenv.config();
+
+const PAYMENT_AMOUNT_DECIMALS = 7;
 
 // Issue #1163: per-merchant settings held by the running server. These are
 // process-local until a durable merchant settings table is added; the dashboard
@@ -69,7 +74,24 @@ export type EventReplayHandler = (
   onProgress?: (progress: ReplayProgressUpdate) => void,
 ) => Promise<{ processed: number; stored: number; skipped_duplicates?: number; total: number }>;
 
-  return { start, endExclusive: new Date(end.getTime() + 86_400_000) };
+async function checkSorobanRpcEndpoint(endpoint: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3_000);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return false;
+    const body = (await response.json()) as { result?: { status?: unknown } };
+    return body.result?.status === "healthy";
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function asInteger(value: unknown): bigint {
@@ -325,9 +347,16 @@ function formatUsdc(stroops: string | number | bigint): string {
 export function createServer(
   database: Database,
   replayDlqHandler?: ReplayDLQHandler,
-  sep10AuthConfig: SEP10AuthConfig = loadSEP10AuthConfig()
+  sep10AuthConfig: SEP10AuthConfig = loadSEP10AuthConfig(),
+  eventReplayHandler?: EventReplayHandler,
+  rpcReadinessCheck: () => Promise<boolean> = () =>
+    checkSorobanRpcEndpoint(
+      process.env.SOROBAN_RPC_URL || "http://localhost:8000/soroban/rpc"
+    )
 ) {
   const app = express();
+  const sep10Config = sep10AuthConfig;
+  const settlementService = new SettlementService(database);
   app.use(express.json());
 
   // Issue #817: rate limit ALL routes (auth gets a stricter per-IP budget).
@@ -382,6 +411,48 @@ export function createServer(
   );
 
   app.get(
+    "/v1/merchant/settlements/:paymentId",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = req.auth?.merchant_id || req.auth?.sub;
+        if (!merchantId) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+
+        let settlement = await database.getSettlement(req.params.paymentId);
+        if (
+          !settlement ||
+          (settlement.merchantId !== merchantId &&
+            !sep10Config.adminAccounts.has(req.auth!.sub))
+        ) {
+          res.status(404).json({ error: "Settlement not found" });
+          return;
+        }
+
+        if (settlement.status === "awaiting_user" || settlement.status === "pending") {
+          settlement =
+            (await settlementService.resume(req.params.paymentId)) ?? settlement;
+        }
+
+        res.status(200).json({
+          payment_id: settlement.paymentId,
+          status: settlement.status,
+          anchor_transaction_id: settlement.anchorTxnId,
+          interactive_url: settlement.status === "awaiting_user"
+            ? settlement.interactiveUrl ?? null
+            : null,
+          amount: settlement.amount,
+          currency: settlement.currency,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  app.get(
     "/v1/disputes/:id/evidence",
     requireSEP10Auth(sep10Config),
     async (req: Request, res: Response) => {
@@ -398,18 +469,24 @@ export function createServer(
     },
   );
 
-  // GET /health - Public endpoint checking database connection
+  // Liveness only: dependency failures must not trigger a process restart.
   app.get("/health", async (_req: Request, res: Response) => {
-    try {
-      const health = await database.checkHealth();
-      if (health.healthy) {
-        res.status(200).json({ status: "healthy", database: "connected" });
-      } else {
-        res.status(503).json({ status: "unhealthy", database: "disconnected", error: health.details });
-      }
-    } catch (error: any) {
-      res.status(503).json({ status: "unhealthy", database: "disconnected", error: error.message || String(error) });
-    }
+    res.status(200).json({ status: "alive" });
+  });
+
+  app.get("/ready", async (_req: Request, res: Response) => {
+    const [databaseHealthy, rpcHealthy] = await Promise.all([
+      database.checkHealth().then((health) => health.healthy).catch(() => false),
+      rpcReadinessCheck().catch(() => false),
+    ]);
+    const ready = databaseHealthy && rpcHealthy;
+    res.status(ready ? 200 : 503).json({
+      status: ready ? "ready" : "not_ready",
+      checks: {
+        database: databaseHealthy ? "available" : "unavailable",
+        rpc: rpcHealthy ? "available" : "unavailable",
+      },
+    });
   });
 
   // Merchant onboarding is scoped to the merchant in the authenticated SEP-10 token.
@@ -484,8 +561,6 @@ export function createServer(
           res.status(401).json({ error: "Merchant API key authentication required" });
           return;
         }
-
-  const sep10Config = loadSEP10AuthConfig();
 
   // Issue #855: Real-time event streaming via Server-Sent Events (SSE)
   const sseHandler = async (req: Request, res: Response): Promise<void> => {
@@ -653,7 +728,13 @@ export function createServer(
           const stroops = BigInt(row.amount ?? 0);
           const status = String(row.status ?? "unknown");
           // Pending/failed payouts represent value still held in treasury.
-          if (status === "pending" || status === "failed") treasuryStroops += stroops;
+          if (
+            status === "pending" ||
+            status === "awaiting_user" ||
+            status === "failed"
+          ) {
+            treasuryStroops += stroops;
+          }
           return {
             payment_id: String(row.payment_id),
             amount_usdc: formatUsdc(stroops),
@@ -668,6 +749,7 @@ export function createServer(
           treasury_balance_usdc: formatUsdc(treasuryStroops),
           payout_status:
             settlements.find((item) => item.status === "failed")?.status ??
+            settlements.find((item) => item.status === "awaiting_user")?.status ??
             settlements.find((item) => item.status === "pending")?.status ??
             (settlements.length > 0 ? "fiat_sent" : "no_settlements"),
           settlements,
@@ -1325,8 +1407,15 @@ export async function startServer(
   port = parseInt(process.env.PORT || process.env.INDEXER_API_PORT || "3001", 10),
   replayDlqHandler?: ReplayDLQHandler,
   eventReplayHandler?: EventReplayHandler,
+  rpcReadinessCheck?: () => Promise<boolean>,
 ) {
-  const app = createServer(database, replayDlqHandler, eventReplayHandler);
+  const app = createServer(
+    database,
+    replayDlqHandler,
+    loadSEP10AuthConfig(),
+    eventReplayHandler,
+    rpcReadinessCheck,
+  );
   // Issue #961: automatic webhook delivery retry with exponential backoff.
   startWebhookRetryDaemon(database.getPool(), new WebhookStore(database.getPool()));
   const server = app.listen(port, () => {

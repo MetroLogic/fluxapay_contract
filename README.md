@@ -413,3 +413,14 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 - #980: feat: add input validation for payment amount field on checkout page
 <!-- handsoff-issue-969 -->
 - #969: feat: add date range and currency filters to dashboard transactions table
+
+<!-- handsoff-issue-1140 -->
+- #1140: tech-debt: migrate env.events().publish calls to #[contractevent] structs
+
+<!-- handsoff-issue-1141 -->
+- #1141: refactor: remove shadowed refund helper duplicates and #[allow(dead_code)]
+<!-- handsoff-issue-1131 -->
+- #1131: test: wire htlc_test.rs into the test build or delete it
+
+<!-- handsoff-issue-1134 -->
+- #1134: test: wire treasury_multisig_test.rs into the test build

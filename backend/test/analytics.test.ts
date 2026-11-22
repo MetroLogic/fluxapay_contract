@@ -29,13 +29,12 @@ function makeJwt(merchantId: string): string {
 function createTestApp() {
   const app = express();
   app.use(express.json());
-  app.use(
-    "/v1/analytics",
-    createAnalyticsRouter({
-      serverPublicKey: "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
-      jwtSecret: JWT_SECRET,
-    }),
-  );
+  const analyticsRouter = createAnalyticsRouter({
+    serverPublicKey: "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
+    jwtSecret: JWT_SECRET,
+  });
+  app.use("/v1/analytics", analyticsRouter);
+  app.use("/v1", analyticsRouter);
   return app;
 }
 
@@ -106,6 +105,35 @@ async function main() {
       res.body.conversion_rate.endsWith("%"),
       "conversion_rate ends with %",
     );
+  }
+
+  // --- /v1/payment-links/:id/stats direct mount (Issue #803 / #1150) ---
+  {
+    const res = await request(
+      app,
+      "/v1/payment-links/link_direct/stats",
+      `Bearer ${token}`,
+    );
+    assert.strictEqual(res.status, 200, "direct payment-links stats request → 200");
+    assert.strictEqual(res.body.link_id, "link_direct", "link_id matched");
+    assert.ok(
+      typeof res.body.conversion_rate === "string",
+      "conversion_rate is a string",
+    );
+    assert.ok(
+      res.body.conversion_rate.endsWith("%"),
+      "conversion_rate ends with %",
+    );
+  }
+
+  // --- /v1/payment-links/:id/stats returns 404 for missing link ---
+  {
+    const res = await request(
+      app,
+      "/v1/payment-links/not_found/stats",
+      `Bearer ${token}`,
+    );
+    assert.strictEqual(res.status, 404, "missing payment link → 404");
   }
 
   // --- expired token → 401 ---
