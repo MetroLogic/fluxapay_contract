@@ -4,7 +4,7 @@
  * persists events to PostgreSQL, exposes dead-letter queue retry, and starts the REST API.
  */
 
-import { SorobanRpc as rpc, scValToNative } from "stellar-sdk";
+import { SorobanRpc as rpc, scValToNative, xdr } from "stellar-sdk";
 import { Database } from "./database";
 import { ContractEvent, AnyEvent, StreamEvent } from "./types";
 import { AnchorWithdrawPayload, SettlementService } from "./settlement";
@@ -34,6 +34,15 @@ export interface EventSubscriptionConfig {
 }
 
 export type ReplayWebhookDispatcher = (event: AnyEvent) => Promise<void>;
+
+/**
+ * Issue #1264: the API server handle `EventSubscriber.shutdown()` closes
+ * before the database pool. Duck-typed so tests can pass a fake; a real
+ * `http.Server` (as returned by `startServer`) satisfies this shape.
+ */
+export interface ClosableApiServer {
+  close(callback?: (err?: Error) => void): void;
+}
 
 export interface EventSubscriberDependencies {
   eventSource?: Pick<rpc.Server, "getEvents">;
@@ -205,6 +214,13 @@ export class EventSubscriber {
   private pollTimer: NodeJS.Timeout | null = null;
   private dlqRetryTimer: NodeJS.Timeout | null = null;
   private replayWebhookDispatcher?: ReplayWebhookDispatcher;
+  // Issue #1264: the REST API server attached via `setApiServer`, closed by
+  // `shutdown()` before the database pool.
+  private apiServer: ClosableApiServer | null = null;
+  // Issue #1264: guards so `start()` never registers the signal handlers
+  // twice, and `shutdown()` runs its steps exactly once.
+  private signalHandlersRegistered = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     config: EventSubscriptionConfig,
@@ -235,6 +251,16 @@ export class EventSubscriber {
     }
   }
 
+  /**
+   * Issue #1264: attach the REST API server started by `startServer` so
+   * `shutdown()` can close the HTTP listener before the database pool.
+   * Call before `start()` (see `main()`); a later call replaces the handle.
+   * Passing `null` detaches it.
+   */
+  setApiServer(server: ClosableApiServer | null): void {
+    this.apiServer = server;
+  }
+
   async initialize(): Promise<void> {
     await this.database.initialize();
     console.log(`Event subscriber initialized with ${this.config.contractIds.length} contract ID(s): ${this.config.contractIds.join(", ")}`);
@@ -243,28 +269,46 @@ export class EventSubscriber {
   async start(): Promise<void> {
     console.log(`Starting event subscription from ledger ${this.currentLedger}`);
 
-    // Main subscription loop
-    this.pollTimer = setInterval(async () => {
-      try {
-        await this.pollEvents();
-      } catch (error) {
-        console.error("Error polling events:", error);
-      }
-    }, this.config.pollInterval);
+    // A fresh start clears any completed shutdown so a later `shutdown()`
+    // runs its steps again (Issue #1264).
+    this.shutdownPromise = null;
+
+    // Main subscription loop. Guarded so a repeated `start()` does not
+    // orphan the previous timers (Issue #1264).
+    if (!this.pollTimer) {
+      this.pollTimer = setInterval(async () => {
+        try {
+          await this.pollEvents();
+        } catch (error) {
+          console.error("Error polling events:", error);
+        }
+      }, this.config.pollInterval);
+    }
 
     // Auto-retry DLQ loop
-    this.dlqRetryTimer = setInterval(async () => {
-      try {
-        await this.retryDLQEvents(false);
-      } catch (error) {
-        console.error("Error retrying DLQ events:", error);
-      }
-    }, this.config.dlqRetryIntervalMs);
+    if (!this.dlqRetryTimer) {
+      this.dlqRetryTimer = setInterval(async () => {
+        try {
+          await this.retryDLQEvents(false);
+        } catch (error) {
+          console.error("Error retrying DLQ events:", error);
+        }
+      }, this.config.dlqRetryIntervalMs);
+    }
 
-    // Graceful shutdown
-    process.on("SIGINT", async () => {
-      await this.shutdown();
-    });
+    // Graceful shutdown (Issue #1264): SIGINT and SIGTERM share one
+    // idempotent shutdown path. Registered at most once even when
+    // `start()` is called more than once.
+    if (!this.signalHandlersRegistered) {
+      this.signalHandlersRegistered = true;
+      const onShutdownSignal = () => {
+        this.shutdown().catch((error) => {
+          console.error("Error during graceful shutdown:", error);
+        });
+      };
+      process.on("SIGINT", onShutdownSignal);
+      process.on("SIGTERM", onShutdownSignal);
+    }
   }
 
   async pollEvents(): Promise<void> {
@@ -412,6 +456,28 @@ export class EventSubscriber {
         }
       }
 
+      // Issue #766: Guard against null memo in STREAM/WITHDRAWN event handler
+      // When a stream withdrawal is triggered programmatically (no memo provided),
+      // destructuring or reading memo must never throw TypeError: Cannot read properties of null.
+      if (topics[0] === "STREAM" && topics[1] === "WITHDRAWN") {
+        let memo: string | null = null;
+        if (event.transaction && event.transaction.memo) {
+          memo = event.transaction.memo.value != null
+            ? event.transaction.memo.value.toString()
+            : (event.transaction.memo.toString?.() ?? null);
+        } else if (event.memo) {
+          memo = typeof event.memo === "object" && event.memo?.value != null
+            ? event.memo.value.toString()
+            : (event.memo.toString?.() ?? null);
+        } else if (value && typeof value === "object" && (value as any).memo !== undefined) {
+          const m = (value as any).memo;
+          memo = m && typeof m === "object" && m.value != null
+            ? m.value.toString()
+            : (m != null ? String(m) : null);
+        }
+        value.memo = memo;
+      }
+
       const decodeNativeValue = (rawValue: unknown): unknown => {
         if (typeof rawValue === "string") {
           return scValToNative(xdr.ScVal.fromXDR(rawValue, "base64"));
@@ -500,6 +566,9 @@ export class EventSubscriber {
 
     console.warn("Could not parse PAYMENT/RETRY_CREATED value as a 2-tuple:", raw);
     return {};
+  }
+
+  /**
    * Decode a raw RPC event into an `AnchorWithdrawPayload` if (and only if)
    * its topics match `(PAYMENT, ANCHOR_WITHDRAW, merchant_id, anchor_domain)`.
    * Returns `null` for every other event type.
@@ -857,11 +926,40 @@ export class EventSubscriber {
     };
   }
 
+  /**
+   * Issue #1264: the single shutdown path for SIGINT and SIGTERM.
+   * Idempotent: concurrent or repeated calls share one promise and never
+   * re-run a step. Order matters — stop new polls/retries first, close
+   * the API server, and only then close the database pool.
+   */
   async shutdown(): Promise<void> {
-    console.log("Shutting down event subscriber...");
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    if (this.dlqRetryTimer) clearInterval(this.dlqRetryTimer);
-    await this.database.close();
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+    this.shutdownPromise = (async () => {
+      console.log("Shutting down event subscriber...");
+      if (this.pollTimer) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+      }
+      if (this.dlqRetryTimer) {
+        clearInterval(this.dlqRetryTimer);
+        this.dlqRetryTimer = null;
+      }
+      const apiServer = this.apiServer;
+      if (apiServer) {
+        await new Promise<void>((resolve) => {
+          apiServer.close((error) => {
+            if (error) {
+              console.error("Error closing API server:", error);
+            }
+            resolve();
+          });
+        });
+      }
+      await this.database.close();
+    })();
+    return this.shutdownPromise;
   }
 }
 
@@ -869,16 +967,21 @@ async function main(): Promise<void> {
   const config = loadConfigFromEnv();
   const subscriber = new EventSubscriber(config);
   await subscriber.initialize();
-  await subscriber.start();
 
   // Start REST API Server alongside subscriber
   const database = (subscriber as any).database;
-  await startServer(
+  const apiServer = await startServer(
     database,
     config.apiPort,
     () => subscriber.retryDLQEvents(true),
     (from, to, onProgress) => subscriber.replayLedgerRange(from, to, onProgress),
   );
+  // Issue #1264: hand the listener to the subscriber so a SIGINT/SIGTERM
+  // closes it before the database pool. Must happen before `start()`
+  // registers the signal handlers.
+  subscriber.setApiServer(apiServer);
+
+  await subscriber.start();
 }
 
 if (require.main === module) {
