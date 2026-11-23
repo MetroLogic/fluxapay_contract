@@ -15,7 +15,8 @@ export {
 } from "./retention";
 export {
   BACKOFF_SCHEDULE_MS, BASE_DELAY_MS, computeBackoffDelayMs, MAX_RETRY_ATTEMPTS,
-  startWebhookRetryDaemon, WEBHOOK_RETRY_INTERVAL_MS, type RetryJobHandle,
+  startWebhookRetryDaemon, WEBHOOK_CLAIM_LEASE_MS, WEBHOOK_RETRY_INTERVAL_MS,
+  type RetryJobHandle, type WebhookRetryDaemonOptions,
 } from "./retry";
 export {
   buildSignatureHeader,
@@ -37,10 +38,13 @@ export {
 } from "./signing";
 export {
   DEFAULT_DELIVERY_PAGE_SIZE,
+  DEFAULT_WEBHOOK_CLAIM_LEASE_MS,
   DELIVERY_LOG_RETENTION_DAYS,
   MAX_DELIVERY_PAGE_SIZE,
+  MAX_WEBHOOK_CLAIM_BATCH,
   TEST_DELIVERY_LIMIT_PER_HOUR,
   WebhookStore,
+  type ClaimedWebhookRetry,
 } from "./store";
 export {
   isWebhookEventType,

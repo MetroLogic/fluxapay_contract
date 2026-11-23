@@ -1,5 +1,10 @@
 import type { Pool } from "pg";
-import type { DeliveryAttempt, DeliveryLogRow, WebhookEndpoint } from "./types";
+import type {
+  DeliveryAttempt,
+  DeliveryLogRow,
+  WebhookEndpoint,
+  WebhookEnvelope,
+} from "./types";
 
 /**
  * Persistence for webhook endpoints and the delivery log (Issues #808, #810).
@@ -22,6 +27,30 @@ export const DELIVERY_LOG_RETENTION_DAYS = 30;
 /** Upper bound on a delivery listing page. */
 export const MAX_DELIVERY_PAGE_SIZE = 100;
 export const DEFAULT_DELIVERY_PAGE_SIZE = 20;
+
+/**
+ * DLQ claim lease (Issue #1258).
+ *
+ * A worker owns a claimed row until the lease lapses. The default is well
+ * above the 10s delivery timeout plus a database round trip, so a live worker
+ * never loses its claim mid-delivery, while a worker that exits still has its
+ * rows reclaimed promptly by the next sweep.
+ */
+export const DEFAULT_WEBHOOK_CLAIM_LEASE_MS = 120_000;
+
+/** Rows one sweep may claim. */
+export const MAX_WEBHOOK_CLAIM_BATCH = 100;
+
+/** A DLQ row this worker holds the lease for, with its fencing token. */
+export interface ClaimedWebhookRetry {
+  id: number;
+  eventId: string;
+  endpointId: string;
+  payload: WebhookEnvelope;
+  retryCount: number;
+  /** Fences completion: writes only apply while the worker still owns the row. */
+  claimToken: string;
+}
 
 export class WebhookStore {
   constructor(private readonly pool: Pool) {}
@@ -165,6 +194,130 @@ export class WebhookStore {
       [endpointId],
     );
     return rows[0]?.count ?? 0;
+  }
+
+  /**
+   * Atomically claim due webhook DLQ rows for delivery (Issue #1258).
+   *
+   * The candidate selection and the claim are one statement: `FOR UPDATE SKIP
+   * LOCKED` inside the CTE makes a concurrent sweep skip rows another worker
+   * has locked, and the `UPDATE` stamps a fresh fencing token and lease before
+   * the statement commits. Two workers can never receive the same row.
+   *
+   * A row is claimable when it is due and either unclaimed or its lease has
+   * lapsed, which is how rows held by a worker that exited are recovered.
+   * Non-webhook DLQ rows are left alone for the event-retry path.
+   */
+  async claimDueWebhookRetries(
+    workerId: string,
+    options: { limit?: number; leaseMs?: number } = {},
+  ): Promise<ClaimedWebhookRetry[]> {
+    const limit = Math.min(
+      Math.max(options.limit ?? MAX_WEBHOOK_CLAIM_BATCH, 1),
+      MAX_WEBHOOK_CLAIM_BATCH,
+    );
+    const leaseMs = Math.max(options.leaseMs ?? DEFAULT_WEBHOOK_CLAIM_LEASE_MS, 1_000);
+
+    const { rows } = await this.pool.query(
+      `WITH due AS (
+         SELECT id
+           FROM dead_letter_events
+          WHERE status IS DISTINCT FROM 'permanently_failed'
+            AND raw_data->>'endpoint_id' IS NOT NULL
+            AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+            AND (claim_expires_at IS NULL OR claim_expires_at <= NOW())
+          ORDER BY COALESCE(next_retry_at, created_at) ASC
+          LIMIT $2
+          FOR UPDATE SKIP LOCKED
+       )
+       UPDATE dead_letter_events AS d
+          SET claimed_by = $1,
+              claim_token = gen_random_uuid(),
+              claimed_at = NOW(),
+              claim_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond')
+         FROM due
+        WHERE d.id = due.id
+       RETURNING d.id,
+                 d.event_id,
+                 d.raw_data,
+                 d.raw_data->>'endpoint_id' AS endpoint_id,
+                 COALESCE(d.retry_count, 0) AS retry_count,
+                 d.claim_token`,
+      [workerId, limit, leaseMs],
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      eventId: row.event_id,
+      endpointId: row.endpoint_id,
+      payload: row.raw_data as WebhookEnvelope,
+      retryCount: row.retry_count,
+      claimToken: row.claim_token,
+    }));
+  }
+
+  /**
+   * Remove a claimed row after a successful delivery.
+   *
+   * Returns false when the claim is gone (lease reclaimed and the row claimed
+   * by someone else, or already deleted), so the caller can report a stale
+   * attempt instead of assuming the worker still owns the outcome.
+   */
+  async markWebhookRetryDelivered(id: number, claimToken: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM dead_letter_events
+        WHERE id = $1 AND claim_token = $2::uuid`,
+      [id, claimToken],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Re-schedule a claimed row after a failed attempt, releasing the claim so
+   * the next sweep can pick it up once the backoff elapses.
+   */
+  async scheduleWebhookRetry(
+    id: number,
+    claimToken: string,
+    options: { retryCount: number; error: string; delayMs: number },
+  ): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE dead_letter_events
+          SET retry_count = $3,
+              next_retry_at = NOW() + ($4::bigint * INTERVAL '1 millisecond'),
+              error = $5,
+              claimed_by = NULL,
+              claim_token = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL
+        WHERE id = $1 AND claim_token = $2::uuid`,
+      [id, claimToken, options.retryCount, options.delayMs, options.error],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Promote a claimed row to permanent failure and release the claim. It is
+   * excluded from every later claim sweep by its status.
+   */
+  async failWebhookRetryPermanently(
+    id: number,
+    claimToken: string,
+    options: { retryCount: number; error: string },
+  ): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE dead_letter_events
+          SET retry_count = $3,
+              status = 'permanently_failed',
+              error = $4,
+              claimed_by = NULL,
+              claim_token = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL
+        WHERE id = $1 AND claim_token = $2::uuid`,
+      [id, claimToken, options.retryCount, options.error],
+    );
+    return (rowCount ?? 0) > 0;
   }
 
   /** Delete log rows past the retention window. Returns rows removed. */
