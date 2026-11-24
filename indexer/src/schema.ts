@@ -16,6 +16,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -255,6 +256,15 @@ export const deadLetterEvents = pgTable("dead_letter_events", {
   error: text("error").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
   retryCount: integer("retry_count").default(0),
+  // Retry scheduling added by migration 013 (Issue #961).
+  nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+  status: text("status").notNull().default("pending"),
+  // Durable per-attempt claim/lease added by migration 015 (Issue #1258).
+  // `claimToken` fences a late worker whose lease was already reclaimed.
+  claimedBy: text("claimed_by"),
+  claimToken: uuid("claim_token"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
 });
 
 export const indexerCheckpoint = pgTable("indexer_checkpoint", {

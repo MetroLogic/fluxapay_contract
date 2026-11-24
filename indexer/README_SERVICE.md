@@ -35,6 +35,7 @@ Environment variables (see `.env.example`):
 | `STELLAR_SERVER_PUBLIC_KEY` | _(required for onboarding endpoint)_ | SEP-10 JWT verification key |
 | `DLQ_RETRY_INTERVAL_MS` | `60000` | DLQ automatic retry interval in milliseconds |
 | `DLQ_MIN_AGE_SECONDS` | `60` | Minimum age in seconds before a DLQ record is retried |
+| `WEBHOOK_CLAIM_LEASE_MS` | `120000` | Lease held on a claimed webhook DLQ row before another worker may recover it |
 
 ---
 
@@ -78,6 +79,16 @@ When event processing fails (e.g. malformed JSON, temporary DB error), the raw e
 ### Replay Operations
 - **Automatic Retry**: Background worker polls `dead_letter_events` every `DLQ_RETRY_INTERVAL_MS` and retries records older than `DLQ_MIN_AGE_SECONDS`. On success, the DLQ record is removed; on failure, `retry_count` is incremented.
 - **Manual Replay**: Endpoint `POST /admin/replay-dlq` triggers immediate replay of DLQ events and returns `{ attempted, succeeded, failed }`.
+
+### Webhook Retry Claims (#1258)
+
+Webhook deliveries are retried from the same table by `startWebhookRetryDaemon`. Several indexer instances may run the daemon at once, so each sweep claims due rows atomically with `FOR UPDATE SKIP LOCKED` before delivering anything:
+
+- `claimed_by` / `claimed_at` record the owning worker and attempt start.
+- `claim_expires_at` is the lease (`WEBHOOK_CLAIM_LEASE_MS`, default 120s). A row whose worker exits is reclaimable once the lease lapses.
+- `claim_token` fences completion. Success, retry scheduling and permanent failure are written with `WHERE id = ... AND claim_token = ...`, so a worker whose lease expired can never overwrite the result of the worker that recovered the row.
+
+Delivery remains at-least-once: a crash between a successful HTTP request and the delete can cause one duplicate delivery after the lease expires, which merchants deduplicate with the payload's `event_id`.
 
 ---
 
