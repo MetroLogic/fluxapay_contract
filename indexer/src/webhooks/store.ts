@@ -1,3 +1,4 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type {
   DeliveryAttempt,
@@ -54,6 +55,171 @@ export interface ClaimedWebhookRetry {
 
 export class WebhookStore {
   constructor(private readonly pool: Pool) {}
+
+  async listEndpoints(merchantId: string): Promise<WebhookEndpoint[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, merchant_id, url, signing_secret, event_types, enabled,
+              COALESCE(signing_algorithm, 'hmac_sha256') AS signing_algorithm
+         FROM webhook_endpoints
+        WHERE merchant_id = $1
+        ORDER BY created_at ASC, id ASC`,
+      [merchantId],
+    ).catch(async () => this.pool.query(
+      `SELECT id, merchant_id, url, signing_secret, event_types, enabled
+         FROM webhook_endpoints
+        WHERE merchant_id = $1
+        ORDER BY created_at ASC, id ASC`,
+      [merchantId],
+    ));
+
+    return rows.map((row) => this.mapEndpoint(row));
+  }
+
+  async createEndpoint(input: {
+    merchantId: string;
+    url: string;
+    eventTypes: string[];
+    signingSecret: string;
+    signingAlgorithm?: "hmac_sha256" | "ed25519";
+  }): Promise<WebhookEndpoint> {
+    const id = `wh_${randomUUID()}`;
+    const algorithm = input.signingAlgorithm ?? "hmac_sha256";
+    const { rows } = await this.pool.query(
+      `INSERT INTO webhook_endpoints
+         (id, merchant_id, url, signing_secret, event_types, enabled, signing_algorithm)
+       VALUES ($1, $2, $3, $4, $5, TRUE, $6)
+       RETURNING id, merchant_id, url, signing_secret, event_types, enabled,
+                 COALESCE(signing_algorithm, 'hmac_sha256') AS signing_algorithm`,
+      [id, input.merchantId, input.url, input.signingSecret, input.eventTypes, algorithm],
+    ).catch(async () => {
+      const result = await this.pool.query(
+        `INSERT INTO webhook_endpoints
+           (id, merchant_id, url, signing_secret, event_types, enabled)
+         VALUES ($1, $2, $3, $4, $5, TRUE)
+         RETURNING id, merchant_id, url, signing_secret, event_types, enabled`,
+        [id, input.merchantId, input.url, input.signingSecret, input.eventTypes],
+      );
+      return result;
+    });
+    return this.mapEndpoint(rows[0]);
+  }
+
+  async updateEndpoint(
+    endpointId: string,
+    merchantId: string,
+    input: {
+      url?: string;
+      eventTypes?: string[];
+      enabled?: boolean;
+      signingAlgorithm?: "hmac_sha256" | "ed25519";
+      signingSecret?: string;
+    },
+  ): Promise<WebhookEndpoint | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    const add = (value: unknown) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+
+    if (input.url !== undefined) sets.push(`url = ${add(input.url)}`);
+    if (input.eventTypes !== undefined) sets.push(`event_types = ${add(input.eventTypes)}`);
+    if (input.enabled !== undefined) sets.push(`enabled = ${add(input.enabled)}`);
+    if (input.signingAlgorithm !== undefined) sets.push(`signing_algorithm = ${add(input.signingAlgorithm)}`);
+    if (input.signingSecret !== undefined) {
+      sets.push(`signing_secret = ${add(input.signingSecret)}`);
+    }
+    if (sets.length === 0) return this.getEndpointForMerchant(endpointId, merchantId);
+
+    sets.push("updated_at = NOW()");
+    params.push(endpointId, merchantId);
+    const idParam = `$${params.length - 1}`;
+    const merchantParam = `$${params.length}`;
+    const { rows } = await this.pool.query(
+      `UPDATE webhook_endpoints
+          SET ${sets.join(", ")}
+        WHERE id = ${idParam} AND merchant_id = ${merchantParam}
+        RETURNING id, merchant_id, url, signing_secret, event_types, enabled,
+                  COALESCE(signing_algorithm, 'hmac_sha256') AS signing_algorithm`,
+      params,
+    ).catch(async () => {
+      const fallback: string[] = [];
+      const fallbackValues: unknown[] = [];
+      const fallbackAdd = (value: unknown) => {
+        fallbackValues.push(value);
+        return `$${fallbackValues.length}`;
+      };
+      if (input.url !== undefined) fallback.push(`url = ${fallbackAdd(input.url)}`);
+      if (input.eventTypes !== undefined) fallback.push(`event_types = ${fallbackAdd(input.eventTypes)}`);
+      if (input.enabled !== undefined) fallback.push(`enabled = ${fallbackAdd(input.enabled)}`);
+      if (input.signingSecret !== undefined) fallback.push(`signing_secret = ${fallbackAdd(input.signingSecret)}`);
+      fallback.push("updated_at = NOW()");
+      fallbackValues.push(endpointId, merchantId);
+      const result = await this.pool.query(
+        `UPDATE webhook_endpoints
+            SET ${fallback.join(", ")}
+          WHERE id = $${fallbackValues.length - 1} AND merchant_id = $${fallbackValues.length}
+          RETURNING id, merchant_id, url, signing_secret, event_types, enabled`,
+        fallbackValues,
+      );
+      return result;
+    });
+    return rows.length > 0 ? this.mapEndpoint(rows[0]) : null;
+  }
+
+  async deleteEndpoint(endpointId: string, merchantId: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM webhook_endpoints WHERE id = $1 AND merchant_id = $2`,
+      [endpointId, merchantId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  async rotateSigningSecret(
+    endpointId: string,
+    merchantId: string,
+  ): Promise<{ endpoint: WebhookEndpoint; signingSecret: string } | null> {
+    const signingSecret = randomBytes(32).toString("base64url");
+    const { rows } = await this.pool.query(
+      `UPDATE webhook_endpoints
+          SET signing_secret = $1, updated_at = NOW()
+        WHERE id = $2 AND merchant_id = $3
+        RETURNING id, merchant_id, url, signing_secret, event_types, enabled,
+                  COALESCE(signing_algorithm, 'hmac_sha256') AS signing_algorithm`,
+      [signingSecret, endpointId, merchantId],
+    ).catch(async () => {
+      const result = await this.pool.query(
+        `UPDATE webhook_endpoints
+            SET signing_secret = $1, updated_at = NOW()
+          WHERE id = $2 AND merchant_id = $3
+          RETURNING id, merchant_id, url, signing_secret, event_types, enabled`,
+        [signingSecret, endpointId, merchantId],
+      );
+      return result;
+    });
+    if (rows.length === 0) return null;
+    return { endpoint: this.mapEndpoint(rows[0]), signingSecret };
+  }
+
+  async getEndpointForMerchant(
+    endpointId: string,
+    merchantId: string,
+  ): Promise<WebhookEndpoint | null> {
+    const endpoint = await this.getEndpoint(endpointId);
+    return endpoint?.merchantId === merchantId ? endpoint : null;
+  }
+
+  private mapEndpoint(row: Record<string, any>): WebhookEndpoint {
+    return {
+      id: row.id,
+      merchantId: row.merchant_id,
+      url: row.url,
+      signingSecret: row.signing_secret,
+      eventTypes: row.event_types ?? [],
+      enabled: row.enabled,
+      signingAlgorithm: (row.signing_algorithm as "hmac_sha256" | "ed25519") ?? "hmac_sha256",
+    };
+  }
 
   async getEndpoint(endpointId: string): Promise<WebhookEndpoint | null> {
     const { rows } = await this.pool.query(
