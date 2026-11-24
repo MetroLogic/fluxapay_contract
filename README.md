@@ -66,6 +66,9 @@ item that keeps it in sync.
 | Feature | Status | Code / Guide |
 |---|---|---|
 | Core payments (create / verify / settle) | Implemented | [docs/architecture.md](docs/architecture.md) |
+| Merchant REST API & webhooks | Implemented | [OpenAPI reference](docs/openapi.yaml), [docs/webhooks.md](docs/webhooks.md) |
+| Merchant dashboard | Implemented | [dashboard/README.md](dashboard/README.md) |
+| TypeScript SDK | Implemented | [sdk/README.md](sdk/README.md) |
 | Refunds (full & partial) | Implemented | [Refunds](#refunds) below, `fluxapay/src/refund_manager.rs` |
 | Payment links (fixed USDC amount) | Implemented | `fluxapay/src/payment_link.rs` |
 | Payment links — multi-currency / fiat (FX oracle conversion) | Implemented | `fluxapay/src/fx_oracle.rs`, `fluxapay/src/payment_link.rs` (property-tested: `fluxapay/src/proptests.rs`) |
@@ -230,15 +233,27 @@ Make stablecoin payments simple, practical, and accessible so merchants can sell
 
 ## Roadmap
 
-•⁠ ⁠[ ] Core payment gateway (USDC on Stellar)
-•⁠ ⁠[ ] Merchant dashboard
-•⁠ ⁠[ ] API for payments + webhooks
-•⁠ ⁠[ ] Payment links
-•⁠ ⁠[ ] Invoicing
-•⁠ ⁠[ ] SDKs
-•⁠ ⁠[ ] Fiat settlement integrations
-•⁠ ⁠[ ] Refunds & dispute tooling (where applicable)
-•⁠ ⁠[ ] Multi-currency support & expanded stablecoins
+This list reflects the [Feature Status](#feature-status) table above. Roadmap items are grouped so shipped functionality is not confused with active or future work.
+
+### Shipped
+
+- [x] Core payment gateway (USDC on Stellar) — [architecture and status](docs/architecture.md)
+- [x] Merchant REST API and webhooks — [OpenAPI reference](docs/openapi.yaml), [webhooks guide](docs/webhooks.md)
+- [x] Merchant dashboard — [dashboard implementation and setup](dashboard/README.md)
+- [x] Payment links, including fixed-USDC and multi-currency fiat configurations — `fluxapay/src/payment_link.rs`, `fluxapay/src/fx_oracle.rs`
+- [x] Invoicing — [invoice implementation](fluxapay/src/invoice_test.rs)
+- [x] TypeScript SDK — [SDK guide](sdk/README.md)
+- [x] Full and partial refunds, and dispute tooling — [refunds](#refunds), [disputes guide](docs/disputes.md)
+- [x] SEP-6 / SEP-24 anchor settlement integration — [integration guide](docs/sep6-sep24-anchor-integration.md)
+
+### In Progress
+
+- [ ] Real DEX routing and token swaps — the current router is simulated locally: quotes and settlement do not execute real on-chain swaps. See [DEX router status](docs/dex-router-status.md) and [ADR-0005](docs/ADR-0005-dex-simulation-to-real-migration.md).
+
+### Planned
+
+- [ ] Expanded stablecoin rail support beyond the current USDC payment flow — no additional stablecoin implementation is listed in [Feature Status](#feature-status)
+- [ ] Broader production fiat payout partner integrations and operational coverage — track current anchor settlement support in [SEP-6 / SEP-24 integration documentation](docs/sep6-sep24-anchor-integration.md)
 
 ## Contributing
 
