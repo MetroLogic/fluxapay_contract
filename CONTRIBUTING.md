@@ -539,6 +539,38 @@ the change is breaking per [`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md
 
 ---
 
+## 7.6. OpenAPI Route Coverage (Issue #1265)
+
+[`docs/openapi.yaml`](docs/openapi.yaml) describes the FluxaPay HTTP API. CI verifies that
+it stays in sync with the routes the indexer registers, in both directions: a registered
+route without a spec entry fails, and a documented operation that is no longer registered
+fails too.
+
+**Any PR that adds, removes, or changes an indexer route must update `docs/openapi.yaml` in
+the same PR.** Operations served by the separate `backend/` API are outside the check's
+scope; they are tracked through the exception list described below.
+
+Run the check and its tests locally:
+
+```bash
+node scripts/check-openapi-route-coverage.js --verbose
+node --test scripts/test/openapi-route-coverage.test.js
+bash docs/openapi-check.sh
+```
+
+Documented operations the indexer does not serve (routes served by the separate `backend/`
+API, and endpoints with no HTTP implementation yet) are listed with an `owner` and a
+`reason` in [`docs/openapi-coverage-exceptions.json`](docs/openapi-coverage-exceptions.json).
+The list is ratcheted — the check fails when an entry becomes stale — so never add an
+exception for a route that exists and is merely undocumented: document the route instead.
+
+The matching rules (parameter names are ignored, an unversioned path aliases its `/v1`
+twin, each operation is reported once) and the full update workflow are in
+[`docs/openapi-coverage.md`](docs/openapi-coverage.md). CI enforcement lives in
+[`.github/workflows/openapi-coverage.yml`](.github/workflows/openapi-coverage.yml).
+
+---
+
 ## 8. Issue Workflow
 
 ### Labels

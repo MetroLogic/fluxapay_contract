@@ -26,6 +26,7 @@ Operational scripts for deployment, SDK generation, local development, and CI ch
 | `sandbox-init.sh` | Bootstrap local Stellar sandbox — builds WASM, generates local identities, funds admin via friendbot. | `STELLAR_RPC_URL`, `STELLAR_NETWORK` | Local dev first-time setup |
 | `check-mainnet-contract-ids.js` | CI informational check — warns when `sdk/src/network-profiles.ts` mainnet still has `UNSET_CONTRACT_ID` placeholders. Always exits 0. | None | CI |
 | `check-error-map-sync.ts` | CI gate — verifies `FLUXAPAY_CONTRACT_ERROR_MAP` in `sdk/src/index.ts` matches the `Error` enum in `fluxapay/src/lib.rs`. Fails CI (exit 1) on drift **or when an expected source file cannot be found** (the missing path is printed). | None | CI |
+| `check-openapi-route-coverage.js` | CI gate (Issue #1265) — compares the routes the indexer registers (`indexer/src/server.ts`, `indexer/src/webhooks/routes.ts`) with `docs/openapi.yaml` and fails when a route has no matching path+method, when a documented operation is no longer registered, or when an exception in `docs/openapi-coverage-exceptions.json` is stale. Parameter names and `/v1` aliases are matched deterministically. | None | CI, and after adding/removing an indexer route |
 | `check_librs_boundaries.sh` | CI gate (Issue #1222 / ADR-0006) — fails if `fluxapay/src/lib.rs` grows beyond the frozen baseline in `.librs-baseline` (line count, with a small tolerance, or `pub fn` count, strict). Keeps `lib.rs` a thin wiring file. | None | CI |
 | `webhook-test-helper.js` | Generates a valid signed webhook payload (HMAC-SHA256) and prints a copy-pasteable `curl` command with `X-FluxaPay-Signature` and `X-FluxaPay-Timestamp` headers. | None | When testing webhook verification |
 
@@ -96,6 +97,32 @@ npx tsx scripts/check-error-map-sync.ts
 
 To verify the fail-loud behavior, temporarily rename a source file and re-run — the
 script must exit non-zero and print the missing path.
+
+### `check-openapi-route-coverage`
+
+The `OpenAPI Docs` CI job (`.github/workflows/openapi-coverage.yml`) runs the
+coverage check, its tests, and the Redocly lint on every pull request. It needs no
+`npm install`: the checker is a dependency-free Node script.
+
+```bash
+node scripts/check-openapi-route-coverage.js --verbose
+node --test scripts/test/openapi-route-coverage.test.js
+```
+
+The check fails with a per-route list, for example:
+
+```
+OpenAPI route coverage check failed:
+
+  - POST /v1/merchants/leaderboard is registered at indexer/src/server.ts:1208 but not documented
+  - POST /v1/refunds is documented at docs/openapi.yaml:218 but the indexer no longer registers it
+```
+
+Routes that are served by `backend/` or not implemented yet belong in
+`docs/openapi-coverage-exceptions.json` with an `owner` and a `reason`; the file is
+ratcheted, so entries must be deleted once they become obsolete. The full workflow
+(including the alias and parameter rules) is in
+[`docs/openapi-coverage.md`](../docs/openapi-coverage.md).
 
 ## Environment Variables Reference
 

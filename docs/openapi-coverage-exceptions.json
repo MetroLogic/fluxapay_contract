@@ -1,0 +1,87 @@
+{
+  "$comment": [
+    "Issue #1265: operations documented in docs/openapi.yaml that the indexer does not register.",
+    "The coverage check (scripts/check-openapi-route-coverage.js) fails when a documented",
+    "operation is not registered, unless it is listed here with an owner and a reason.",
+    "Entries are ratcheted: the check fails if an entry is no longer documented, or if the",
+    "indexer starts serving it (and also when it is registered at the documented path).",
+    "See docs/openapi-coverage.md for the workflow."
+  ],
+  "exceptions": [
+    {
+      "operation": "POST /v1/payments",
+      "owner": "backend",
+      "reason": "Served by the separate Express API service in backend/src/index.ts (POST /v1/payments); the indexer only indexes the resulting events."
+    },
+    {
+      "operation": "POST /v1/invoices",
+      "owner": "backend",
+      "reason": "Served by backend/src/routes/invoices.ts (mounted at /v1/invoices); the indexer exposes the read/void side."
+    },
+    {
+      "operation": "POST /v1/payment-links",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Remove once implemented."
+    },
+    {
+      "operation": "GET /v1/refunds",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. The indexer serves GET /refunds/{refundId} and GET /v1/merchant/refunds."
+    },
+    {
+      "operation": "POST /v1/refunds",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Refunds are created on-chain via the RefundManager contract."
+    },
+    {
+      "operation": "GET /v1/disputes",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. The indexer serves GET /merchants/{merchantId}/disputes and the evidence routes."
+    },
+    {
+      "operation": "GET /v1/disputes/{id}",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/; only GET /v1/disputes/{id}/evidence is served."
+    },
+    {
+      "operation": "POST /v1/fx/convert",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. FX conversion is performed by the on-chain DEX router contract."
+    },
+    {
+      "operation": "GET /v1/fx/rates",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Rates live on the FXOracle contract."
+    },
+    {
+      "operation": "GET /v1/webhooks",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Webhook endpoints are configured through the merchant settings and delivery APIs."
+    },
+    {
+      "operation": "POST /v1/webhooks",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Webhook test delivery is POST /v1/webhooks/test."
+    },
+    {
+      "operation": "GET /v1/merchants",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. backend/src/routes/payoutChannels.ts serves /v1/merchants/{id}/payout-channels only."
+    },
+    {
+      "operation": "POST /v1/merchants",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Merchants are registered on-chain through the merchant registry."
+    },
+    {
+      "operation": "GET /v1/subscriptions",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. The indexer serves GET /v1/subscriptions/metrics and GET /v1/subscriptions/{id}/invoices."
+    },
+    {
+      "operation": "POST /v1/subscriptions",
+      "owner": "unimplemented",
+      "reason": "Documented in the original spec (PR #990) but no handler exists in indexer/ or backend/. Subscriptions are created on-chain."
+    }
+  ]
+}
