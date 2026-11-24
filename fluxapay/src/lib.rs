@@ -1,6 +1,7 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use crate::merchant_registry::KycTier;
+pub use constants::NATIVE_XLM_SENTINEL;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, map, token, vec, Address, BytesN, Env,
     Map, MuxedAddress, String, Symbol, Vec,
@@ -63,16 +64,18 @@ pub const SUBSCRIPTION_RETRY_INTERVAL_SECS: u64 = 2 * 24 * 60 * 60;
 const MAX_REASON_LEN: usize = 256;
 const MAX_EVIDENCE_LEN: usize = 512;
 const MAX_NOTES_LEN: usize = 512;
-pub(crate) const ZERO_CONTRACT_STRKEY: &str =
-    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+pub(crate) const ZERO_CONTRACT_STRKEY: &str = NATIVE_XLM_SENTINEL;
 
 mod access_control;
 pub mod account_abstraction;
+pub mod constants;
 mod dex_router;
 pub mod events;
 pub mod fx_oracle;
 pub mod merchant_auth;
 mod payment_state_machine;
+pub mod types;
+mod wrapped_xlm;
 use access_control::{
     role_admin, role_arbitrator, role_merchant, role_oracle, role_settlement_operator,
     AccessControl,
@@ -85,6 +88,8 @@ pub use access_control::{AdminAction, AdminProposal};
 pub use dex_router::{DexRouter, DexRouterClient};
 pub use fx_oracle::{FXOracle, FXOracleClient, FXOracleError};
 pub use merchant_auth::{MerchantAuthError, MerchantAuthorization, MerchantPreAuth};
+pub use types::{SwapAndPayArgsV2, SwapSplit, MAX_SWAP_SPLITS};
+use wrapped_xlm::WrappedXlmClient;
 
 #[contract]
 pub struct PaymentProcessor;
@@ -448,6 +453,8 @@ pub enum Error {
     TimelockNotExpired = 68,
     /// Issue #622: Evidence field is not a valid IPFS CID (CIDv0 starts with "Qm"/46 chars; CIDv1 starts with "bafy"/≥59 chars).
     InvalidEvidenceCid = 69,
+    /// Issue #946: DEX router is not in the admin-managed allowlist.
+    UnapprovedRouter = 70,
 }
 
 #[contracttype]
@@ -1132,6 +1139,10 @@ pub enum DataKey {
     PendingTimelockAction(String),
     /// Issue #624: Counter for generating unique pending action IDs.
     TimelockActionCounter,
+    /// Admin-managed DEX router allowlist (Issue #946).
+    ApprovedRouters,
+    /// Deployment-specific Soroban native-XLM asset contract address (Issue #947).
+    NativeXlmContract,
 }
 
 /// Default initial contract version string.
@@ -9628,46 +9639,19 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Atomic swap and pay: swap sender's token to merchant's required token and create payment.
-    /// Integrates with DEX (e.g., Soroswap) for atomic asset conversion.
-    ///
-    /// # Arguments
-    /// * `payer` - The address making the payment
-    /// * `payment_id` - Unique payment identifier
-    /// * `merchant_id` - Merchant's address
-    /// * `amount` - Amount in the merchant's settlement currency (after swap)
-    /// * `currency` - Settlement currency symbol
-    /// * `deposit_address` - Where the payment should be deposited
-    /// * `token_in` - Address of the token the payer is sending
-    /// * `amount_in` - Amount of token_in to swap
-    /// * `amount_out_min` - Minimum amount of settlement token required
-    /// * `path` - DEX swap path [token_in, ..., settlement_token]
-    /// * `expires_at` - Payment expiry timestamp
-    /// * `dex_router` - Address of the DEX router contract
-    ///
-    /// # Returns
-    /// The created PaymentCharge on success
-    /// Add a router address to the allowlist (issue #437).
-    pub fn add_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
+    /// Admin: add a DEX router to the approved-router allowlist (Issue #946).
+    pub fn add_approved_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
             return Err(Error::Unauthorized);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::AllowedRouter(router.clone()), &true);
-
-        let mut list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AllowedRoutersList)
-            .unwrap_or_else(|| Vec::new(&env));
+        let mut list = Self::get_approved_routers(env.clone());
         if !list.contains(&router) {
             list.push_back(router.clone());
-            env.storage()
-                .persistent()
-                .set(&DataKey::AllowedRoutersList, &list);
         }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovedRouters, &list);
 
         env.events().publish(
             (Symbol::new(&env, "ROUTER"), Symbol::new(&env, "ADDED")),
@@ -9676,31 +9660,22 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Remove a router address from the allowlist (issue #437).
-    pub fn remove_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
+    /// Remove a DEX router from the admin-managed allowlist (Issue #946).
+    pub fn remove_approved_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
             return Err(Error::Unauthorized);
         }
+        let list = Self::get_approved_routers(env.clone());
+        let mut new_list: Vec<Address> = Vec::new(&env);
+        for approved_router in list.iter() {
+            if approved_router != router {
+                new_list.push_back(approved_router);
+            }
+        }
         env.storage()
             .persistent()
-            .remove(&DataKey::AllowedRouter(router.clone()));
-
-        if let Some(list) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Vec<Address>>(&DataKey::AllowedRoutersList)
-        {
-            let mut new_list: Vec<Address> = Vec::new(&env);
-            for r in list.iter() {
-                if r != router {
-                    new_list.push_back(r);
-                }
-            }
-            env.storage()
-                .persistent()
-                .set(&DataKey::AllowedRoutersList, &new_list);
-        }
+            .set(&DataKey::ApprovedRouters, &new_list);
 
         env.events().publish(
             (Symbol::new(&env, "ROUTER"), Symbol::new(&env, "REMOVED")),
@@ -9709,20 +9684,36 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Check if a DEX router is allowed (issue #437).
+    /// Check if a DEX router is approved (Issue #946).
     pub fn is_router_allowed(env: Env, router: Address) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::AllowedRouter(router))
-            .unwrap_or(false)
+        Self::get_approved_routers(env).contains(&router)
     }
 
-    /// Get all allowlisted DEX router addresses (issue #437).
-    pub fn get_allowed_routers(env: Env) -> Vec<Address> {
+    /// Get all approved DEX router addresses (Issue #946).
+    pub fn get_approved_routers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
-            .get(&DataKey::AllowedRoutersList)
+            .get(&DataKey::ApprovedRouters)
+            .or_else(|| {
+                // Preserve routers configured before the canonical registry was introduced.
+                env.storage().persistent().get(&DataKey::AllowedRoutersList)
+            })
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Backward-compatible alias for `add_approved_router`.
+    pub fn add_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
+        Self::add_approved_router(env, admin, router)
+    }
+
+    /// Backward-compatible alias for `remove_approved_router`.
+    pub fn remove_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
+        Self::remove_approved_router(env, admin, router)
+    }
+
+    /// Backward-compatible alias for `get_approved_routers`.
+    pub fn get_allowed_routers(env: Env) -> Vec<Address> {
+        Self::get_approved_routers(env)
     }
 
     /// Set the Wrapped XLM (WXLM) token contract address (issue #434).
@@ -9742,7 +9733,63 @@ impl PaymentProcessor {
         env.storage().persistent().get(&DataKey::WrappedXlmContract)
     }
 
-    /// Swaps tokens via a DEX router and executes a payment (issue #434, #437).
+    /// Configure the native-XLM asset contract for this network (Issue #947).
+    pub fn set_native_xlm_contract(
+        env: Env,
+        admin: Address,
+        native_xlm: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::NativeXlmContract, &native_xlm);
+        Ok(())
+    }
+
+    /// Get the configured native-XLM asset contract, falling back to the sentinel.
+    pub fn get_native_xlm_contract(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::NativeXlmContract)
+            .unwrap_or_else(|| Address::from_str(&env, NATIVE_XLM_SENTINEL))
+    }
+
+    fn prepare_swap_input(
+        env: &Env,
+        payer: &Address,
+        token_in: &Address,
+        amount_in: i128,
+    ) -> Result<Address, Error> {
+        if token_in != &Self::get_native_xlm_contract(env.clone()) {
+            return Ok(token_in.clone());
+        }
+
+        let wxlm = Self::get_wrapped_xlm_contract(env.clone()).ok_or(Error::UnsupportedToken)?;
+        WrappedXlmClient::new(env, &wxlm).wrap(payer, &amount_in, &env.current_contract_address());
+        Ok(wxlm)
+    }
+
+    fn normalize_swap_path(
+        path: &Vec<Address>,
+        token_in: &Address,
+        actual_token_in: &Address,
+    ) -> Result<Vec<Address>, Error> {
+        if path.len() < 2 {
+            return Err(Error::SwapPathInvalid);
+        }
+        let mut actual_path = path.clone();
+        if path.get(0) == Some(token_in.clone()) {
+            actual_path.set(0, actual_token_in.clone());
+        } else if path.get(0) != Some(actual_token_in.clone()) {
+            return Err(Error::SwapPathInvalid);
+        }
+        Ok(actual_path)
+    }
+
+    /// Swaps tokens via an approved DEX router and executes a payment (issues #434, #946).
     #[allow(clippy::too_many_arguments)]
     pub fn swap_and_pay(env: Env, args: SwapAndPayArgs) -> Result<PaymentCharge, Error> {
         args.payer.require_auth();
@@ -9758,28 +9805,14 @@ impl PaymentProcessor {
             return Err(Error::SwapPathInvalid);
         }
 
-        // Issue #437: DEX router allowlist check
-        let allowed_list = Self::get_allowed_routers(env.clone());
-        if !allowed_list.is_empty()
-            && !Self::is_router_allowed(env.clone(), args.dex_router.clone())
-        {
-            return Err(Error::RouterNotAllowed);
+        // An empty allowlist rejects every router (fail-safe default).
+        if !Self::is_router_allowed(env.clone(), args.dex_router.clone()) {
+            return Err(Error::UnapprovedRouter);
         }
 
-        // Issue #434: XLM auto-wrapping detection
-        let native_xlm = Address::from_str(&env, ZERO_CONTRACT_STRKEY);
-        let mut actual_token_in = args.token_in.clone();
-
-        if args.token_in == native_xlm {
-            if let Some(wxlm) = Self::get_wrapped_xlm_contract(env.clone()) {
-                token::Client::new(&env, &wxlm).transfer(
-                    &args.payer,
-                    env.current_contract_address(),
-                    &args.amount_in,
-                );
-                actual_token_in = wxlm;
-            }
-        }
+        let actual_token_in =
+            Self::prepare_swap_input(&env, &args.payer, &args.token_in, args.amount_in)?;
+        let actual_path = Self::normalize_swap_path(&args.path, &args.token_in, &actual_token_in)?;
 
         let quoted_amounts = Self::validate_path_returns(
             &env,
@@ -9787,12 +9820,12 @@ impl PaymentProcessor {
             &actual_token_in,
             args.amount_in,
             args.amount_out_min,
-            &args.path,
+            &actual_path,
         )?;
 
         if let (Some(fx_oracle), Some(oracle_pair)) = (&args.fx_oracle, &args.oracle_pair) {
             let quoted_out = quoted_amounts
-                .get(args.path.len() - 1)
+                .get(actual_path.len() - 1)
                 .ok_or(Error::SwapPathInvalid)?;
             Self::validate_oracle_swap_rate(
                 &env,
@@ -9810,27 +9843,26 @@ impl PaymentProcessor {
         let swap_result = dex_client.swap_exact_tokens_for_tokens(
             &args.amount_in,
             &args.amount_out_min,
-            &args.path,
+            &actual_path,
             &args.deposit_address,
             &deadline,
         );
 
         let actual_out = swap_result
-            .get(args.path.len() - 1)
+            .get(actual_path.len() - 1)
             .ok_or(Error::SwapPathInvalid)?;
         if actual_out < args.amount_out_min {
             return Err(Error::InvalidAmount);
         }
 
         let quoted_out = quoted_amounts
-            .get(args.path.len() - 1)
+            .get(actual_path.len() - 1)
             .ok_or(Error::SwapPathInvalid)?;
         if actual_out < quoted_out {
             return Err(Error::ArbitrageDetected);
         }
 
-        let settlement_token = args
-            .path
+        let settlement_token = actual_path
             .get(args.path.len() - 1)
             .unwrap_or(actual_token_in.clone());
         let create_args = CreatePaymentArgs {
@@ -9888,7 +9920,6 @@ impl PaymentProcessor {
             return Err(Error::InvalidAmount);
         }
 
-        let allowed_list = Self::get_allowed_routers(env.clone());
         let mut total_route_input: i128 = 0;
 
         for route in routes.iter() {
@@ -9896,10 +9927,8 @@ impl PaymentProcessor {
                 return Err(Error::InvalidAmount);
             }
             total_route_input = total_route_input.saturating_add(route.amount_in);
-            if !allowed_list.is_empty()
-                && !Self::is_router_allowed(env.clone(), route.router.clone())
-            {
-                return Err(Error::RouterNotAllowed);
+            if !Self::is_router_allowed(env.clone(), route.router.clone()) {
+                return Err(Error::UnapprovedRouter);
             }
         }
 
@@ -9981,6 +10010,126 @@ impl PaymentProcessor {
             ),
         );
 
+        Ok(payment)
+    }
+
+    /// Execute an atomic swap split across up to three approved DEX routers.
+    pub fn swap_and_pay_v2(env: Env, args: SwapAndPayArgsV2) -> Result<PaymentCharge, Error> {
+        args.payer.require_auth();
+        Self::require_creation_not_paused(&env)?;
+
+        if args.splits.is_empty() || args.splits.len() > MAX_SWAP_SPLITS || args.min_output <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        Self::enforce_create_payment_rate_limit_for_payer(&env, &args.payer)?;
+
+        let total_input = args.splits.iter().try_fold(0i128, |total, split| {
+            if split.amount <= 0 || split.path.len() < 2 {
+                return Err(Error::InvalidAmount);
+            }
+            if !Self::is_router_allowed(env.clone(), split.router.clone()) {
+                return Err(Error::UnapprovedRouter);
+            }
+            total.checked_add(split.amount).ok_or(Error::InvalidAmount)
+        })?;
+
+        let first_split = args.splits.get(0).ok_or(Error::InvalidAmount)?;
+        let actual_token_in =
+            Self::prepare_swap_input(&env, &args.payer, &args.token_in, total_input)?;
+        let first_actual_path =
+            Self::normalize_swap_path(&first_split.path, &args.token_in, &actual_token_in)?;
+        let settlement_token = first_actual_path
+            .get(first_actual_path.len() - 1)
+            .ok_or(Error::SwapPathInvalid)?;
+        let deadline = env.ledger().timestamp().saturating_add(3_600);
+        let mut total_output = 0i128;
+
+        for split in args.splits.iter() {
+            let actual_path =
+                Self::normalize_swap_path(&split.path, &args.token_in, &actual_token_in)?;
+            if actual_path.get(actual_path.len() - 1) != Some(settlement_token.clone()) {
+                return Err(Error::SwapPathInvalid);
+            }
+
+            let quoted_amounts = Self::validate_path_returns(
+                &env,
+                &split.router,
+                &actual_token_in,
+                split.amount,
+                0,
+                &actual_path,
+            )?;
+            if let (Some(fx_oracle), Some(oracle_pair)) = (&args.fx_oracle, &args.oracle_pair) {
+                let quoted_out = quoted_amounts
+                    .get(actual_path.len() - 1)
+                    .ok_or(Error::SwapPathInvalid)?;
+                Self::validate_oracle_swap_rate(
+                    &env,
+                    fx_oracle,
+                    oracle_pair,
+                    split.amount,
+                    quoted_out,
+                    args.max_deviation_bps,
+                )?;
+            }
+
+            let swap_result = DexRouterClient::new(&env, &split.router)
+                .swap_exact_tokens_for_tokens(
+                    &split.amount,
+                    &0,
+                    &actual_path,
+                    &args.deposit_address,
+                    &deadline,
+                );
+            let actual_out = swap_result
+                .get(actual_path.len() - 1)
+                .ok_or(Error::SwapPathInvalid)?;
+            let quoted_out = quoted_amounts
+                .get(actual_path.len() - 1)
+                .ok_or(Error::SwapPathInvalid)?;
+            if actual_out < quoted_out {
+                return Err(Error::ArbitrageDetected);
+            }
+            total_output = total_output
+                .checked_add(actual_out)
+                .ok_or(Error::InvalidAmount)?;
+        }
+
+        if total_output < args.min_output {
+            return Err(Error::RouteOutputInsufficient);
+        }
+
+        let create_args = CreatePaymentArgs {
+            payment_id: args.payment_id.clone(),
+            merchant_id: args.merchant_id,
+            payer: Some(args.payer.clone()),
+            amount: total_output,
+            currency: args.currency,
+            deposit_address: args.deposit_address,
+            expires_at: args.expires_at,
+            duration_secs: None,
+            memo: None,
+            memo_type: None,
+            token_address: Some(settlement_token),
+            client_token: None,
+            metadata_hash: None,
+            metadata: None,
+            fee_waiver_code: None,
+            retry_of_payment_id: None,
+            payer_muxed_id: None,
+        };
+        let mut payment = Self::create_payment(env.clone(), create_args)?;
+        payment.original_token = Some(args.token_in);
+        payment.swap_path = Some(first_split.path);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment.payment_id.clone()), &payment);
+
+        env.events().publish(
+            (Symbol::new(&env, "SWAP"), Symbol::new(&env, "EXECUTED")),
+            (args.payment_id, args.payer, total_input, total_output),
+        );
         Ok(payment)
     }
 

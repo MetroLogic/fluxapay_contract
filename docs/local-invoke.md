@@ -378,6 +378,108 @@ Returns the new dispute ID:
 |-------|-------|----------|
 | `PaymentNotFound` | Payment ID does not exist | Verify the payment ID |
 | `PaymentAlreadyProcessed` | Payment is not in `Confirmed` state | Only confirmed payments can be disputed |
+
+---
+
+## Atomic multi-router swap and pay
+
+`swap_and_pay_v2` executes one to three input splits through approved DEX routers,
+requires every split to end in the same settlement token, and creates a payment
+for the aggregate output. The payment amount is the actual aggregate output;
+`min_output` is the minimum aggregate amount accepted. If any router fails or
+the total output is below `min_output`, the invocation reverts atomically.
+
+Each split supplies its router, input amount, and token path. The sum of split
+amounts is the total input amount. An admin must approve every router before
+the call, and the payer must authorize the invocation.
+
+```bash
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $TEST_CUSTOMER_ADDRESS \
+  -- swap_and_pay_v2 \
+  --args '{"payer":"<PAYER>","payment_id":"order_123","merchant_id":"<MERCHANT>","currency":"USDC","deposit_address":"<DEPOSIT_ADDRESS>","token_in":"<INPUT_TOKEN>","expires_at":1711779600,"fx_oracle":null,"oracle_pair":null,"max_deviation_bps":0,"splits":[{"router":"<ROUTER_A>","amount":6000000,"path":["<INPUT_TOKEN>","<USDC_TOKEN>"]},{"router":"<ROUTER_B>","amount":4000000,"path":["<INPUT_TOKEN>","<USDC_TOKEN>"]}],"min_output":9800000}'
+```
+
+Equivalent Soroban Rust client construction:
+
+```rust
+let args = SwapAndPayArgsV2 {
+    payer: customer,
+    payment_id: String::from_str(&env, "order_123"),
+    merchant_id: merchant,
+    currency: Symbol::new(&env, "USDC"),
+    deposit_address,
+    token_in: input_token.clone(),
+    expires_at: Some(expiration_timestamp),
+    fx_oracle: None,
+    oracle_pair: None,
+    max_deviation_bps: 0,
+    splits: vec![
+        &env,
+        SwapSplit {
+            router: router_a,
+            amount: 6_000_000,
+            path: vec![&env, input_token.clone(), usdc.clone()],
+        },
+        SwapSplit {
+            router: router_b,
+            amount: 4_000_000,
+            path: vec![&env, input_token, usdc],
+        },
+    ],
+    min_output: 9_800_000,
+};
+
+payment_processor_client.swap_and_pay_v2(&args);
+```
+
+The split count is capped at three (`MAX_SWAP_SPLITS`). Unapproved routers
+return `UnapprovedRouter`; aggregate output below `min_output` returns
+`RouteOutputInsufficient`.
+
+## Swap native XLM
+
+Before using native XLM, an admin configures the native asset contract address
+for the current network and the WXLM wrapper contract. The WXLM contract must
+implement `wrap(from, amount, recipient)` and issue the wrapped tokens to the
+payment processor. The native asset address can differ between deployments;
+`NATIVE_XLM_SENTINEL` is only the fallback when no deployment override is set.
+
+The payer submits the native-XLM address as `token_in` and the first path token.
+The contract wraps exactly `amount_in` and replaces that first path token with
+the configured WXLM token before validating and executing the DEX swap.
+
+```bash
+# Admin setup (repeat with addresses for the target network)
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $ADMIN_ADDRESS \
+  -- set_native_xlm_contract \
+  --admin $ADMIN_ADDRESS \
+  --native_xlm $NATIVE_XLM_CONTRACT_ID
+
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $ADMIN_ADDRESS \
+  -- set_wrapped_xlm_contract \
+  --admin $ADMIN_ADDRESS \
+  --wxlm $WXLM_WRAPPER_ID
+
+# Swap XLM through the approved DEX router
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  --source $TEST_CUSTOMER_ADDRESS \
+  -- swap_and_pay \
+  --args '{"payer":"<PAYER>","payment_id":"xlm_order_123","merchant_id":"<MERCHANT>","amount":9900000,"currency":"USDC","deposit_address":"<DEPOSIT_ADDRESS>","token_in":"<NATIVE_XLM_CONTRACT_ID>","amount_in":10000000,"amount_out_min":9900000,"path":["<NATIVE_XLM_CONTRACT_ID>","<USDC_TOKEN>"],"expires_at":1711779600,"dex_router":"<APPROVED_ROUTER>","fx_oracle":null,"oracle_pair":null,"max_deviation_bps":0}'
+```
+
+If the wrapper call fails, Soroban rolls back the full invocation, including
+any native-XLM transfer performed by the wrapper.
 | `InvalidAmount` | Amount ≤ 0 or exceeds payment amount | Use a positive amount within the original payment amount |
 | `RefundExceedsPayment` | Combined disputes + refunds exceed payment | Reduce dispute amount |
 | `InvalidEvidenceFormat` | Evidence is not a CIDv0/CIDv1 IPFS multihash | Pass a CID or disable `require_evidence_cid` |

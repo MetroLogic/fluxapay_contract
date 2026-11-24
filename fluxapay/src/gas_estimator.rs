@@ -51,7 +51,7 @@ mod instructions {
     pub const CREATE_DISPUTE: i64 = 45;
     pub const RESOLVE_DISPUTE: i64 = 80; // includes refund + token transfer
     pub const REJECT_DISPUTE: i64 = 20;
-    pub const SWAP_AND_PAY: i64 = 120; // DEX call + create_payment
+    pub const SWAP_AND_PAY: i64 = 160; // DEX + optional native-XLM wrap + create_payment
     pub const CREATE_STREAM: i64 = 50;
     pub const WITHDRAW_STREAM: i64 = 45;
     pub const CANCEL_STREAM: i64 = 30;
@@ -71,7 +71,7 @@ mod reads {
     pub const CREATE_DISPUTE: u32 = 5;
     pub const RESOLVE_DISPUTE: u32 = 8;
     pub const REJECT_DISPUTE: u32 = 3;
-    pub const SWAP_AND_PAY: u32 = 8; // DEX + create_payment reads
+    pub const SWAP_AND_PAY: u32 = 10; // DEX, XLM/WXLM config, and create_payment reads
     pub const CREATE_STREAM: u32 = 3;
     pub const WITHDRAW_STREAM: u32 = 3;
     pub const CANCEL_STREAM: u32 = 2;
@@ -91,7 +91,7 @@ mod writes {
     pub const CREATE_DISPUTE: u32 = 4;
     pub const RESOLVE_DISPUTE: u32 = 7; // dispute + refund writes + operator note
     pub const REJECT_DISPUTE: u32 = 3; // dispute write + operator note + TTL
-    pub const SWAP_AND_PAY: u32 = 6;
+    pub const SWAP_AND_PAY: u32 = 7; // includes WXLM wrapper state write
     pub const CREATE_STREAM: u32 = 3;
     pub const WITHDRAW_STREAM: u32 = 2;
     pub const CANCEL_STREAM: u32 = 2;
@@ -111,7 +111,7 @@ mod events {
     pub const CREATE_DISPUTE: u32 = 1;
     pub const RESOLVE_DISPUTE: u32 = 3; // REFUND/COMPLETED + DISPUTE/OPERATOR_NOTE + DISPUTE/RESOLVED
     pub const REJECT_DISPUTE: u32 = 2; // DISPUTE/OPERATOR_NOTE + DISPUTE/REJECTED
-    pub const SWAP_AND_PAY: u32 = 2; // SWAP/AND/PAY + PAYMENT/CREATED
+    pub const SWAP_AND_PAY: u32 = 3; // includes a possible WXLM wrapper event
     pub const CREATE_STREAM: u32 = 1;
     pub const WITHDRAW_STREAM: u32 = 1;
     pub const CANCEL_STREAM: u32 = 1;
@@ -388,6 +388,16 @@ mod tests {
         let swap = c.estimate(&Operation::SwapAndPay);
         let create = c.estimate(&Operation::CreatePayment);
         assert!(swap.resource_fee_stroops > create.resource_fee_stroops);
+    }
+
+    #[test]
+    fn swap_and_pay_estimate_includes_native_wrap_overhead() {
+        let env = Env::default();
+        let estimate = client(&env).estimate(&Operation::SwapAndPay);
+
+        assert_eq!(estimate.instructions, instructions::SWAP_AND_PAY);
+        assert_eq!(estimate.ledger_reads, reads::SWAP_AND_PAY);
+        assert_eq!(estimate.events, events::SWAP_AND_PAY);
     }
 
     #[test]

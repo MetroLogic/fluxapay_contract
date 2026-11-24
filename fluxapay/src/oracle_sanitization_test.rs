@@ -68,6 +68,7 @@ fn test_oracle_sanitization_rejects_deviating_dex_quote() {
     let merchant = Address::generate(&env);
     let payer = Address::generate(&env);
     let dex_router = env.register(DexRouter, ());
+    payment_client.add_approved_router(&admin, &dex_router);
     let oracle_operator = Address::generate(&env);
     oracle_client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle_operator);
 
@@ -120,6 +121,7 @@ fn test_oracle_sanitization_accepts_aligned_dex_quote() {
     let merchant = Address::generate(&env);
     let payer = Address::generate(&env);
     let dex_router = env.register(DexRouter, ());
+    payment_client.add_approved_router(&admin, &dex_router);
     let oracle_operator = Address::generate(&env);
     oracle_client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle_operator);
 

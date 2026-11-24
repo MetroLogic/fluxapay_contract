@@ -430,6 +430,11 @@ export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
   63: "RefundNotApproved",
   64: "RouterNotAllowed",
   65: "RouteOutputInsufficient",
+  66: "BatchContainsDuplicates",
+  67: "InputTooLong",
+  68: "TimelockNotExpired",
+  69: "InvalidEvidenceCid",
+  70: "UnapprovedRouter",
   404: "PaymentNotFound",
   405: "RefundNotFound",
   406: "InvalidAmount",
@@ -2134,6 +2139,4 @@ export {
   type GasEstimate,
   type GasOperation,
 } from "./contracts/gas-estimator.js";
-
-
 

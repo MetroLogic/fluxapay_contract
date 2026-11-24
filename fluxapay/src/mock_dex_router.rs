@@ -18,6 +18,12 @@ pub struct MockDexRouter;
 
 #[contractimpl]
 impl MockDexRouter {
+    pub fn last_swap(env: Env) -> Option<(i128, Vec<Address>)> {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, "last_swap"))
+    }
+
     fn read_output(env: &Env) -> Option<i128> {
         env.storage()
             .persistent()
@@ -63,6 +69,9 @@ impl MockDexRouter {
             return Err(MockDexError::SwapFailed);
         }
 
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, "last_swap"), &(amount_in, path.clone()));
         let stored_output = Self::read_output(&env);
         match stored_output {
             Some(output) => {

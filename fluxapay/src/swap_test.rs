@@ -1,13 +1,54 @@
 use crate::merchant_registry::MaybeFeeConfig;
 use crate::{
     merchant_registry::{MerchantRegistry, MerchantRegistryClient},
-    mock_dex_router::{configure_mock_dex, MockDexRouter},
-    Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, SwapAndPayArgs, SwapRoute,
-    ZERO_CONTRACT_STRKEY,
+    mock_dex_router::{configure_mock_dex, MockDexRouter, MockDexRouterClient},
+    Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, SwapAndPayArgs,
+    SwapAndPayArgsV2, SwapRoute, SwapSplit, ZERO_CONTRACT_STRKEY,
 };
 use soroban_sdk::{
-    testutils::Address as _, testutils::Events, token, vec, Address, Env, String, Symbol, Vec,
+    contract, contractimpl, testutils::Address as _, testutils::Events, token, vec, Address, Env,
+    String, Symbol, Vec,
 };
+
+#[contract]
+pub struct MockWrappedXlm;
+
+#[contractimpl]
+impl MockWrappedXlm {
+    pub fn configure(env: Env, fail: bool) {
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, "fail_wrap"), &fail);
+    }
+
+    pub fn wrap(env: Env, from: Address, amount: i128, _recipient: Address) {
+        if env
+            .storage()
+            .persistent()
+            .get::<Symbol, bool>(&Symbol::new(&env, "fail_wrap"))
+            .unwrap_or(false)
+        {
+            panic!("mock wrap failed");
+        }
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, "last_wrap"), &(from, amount));
+    }
+
+    pub fn last_wrap(env: Env) -> Option<(Address, i128)> {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, "last_wrap"))
+    }
+}
+
+fn configure_mock_wxlm(env: &Env, wxlm: &Address, fail: bool) {
+    MockWrappedXlmClient::new(env, wxlm).configure(&fail);
+}
+
+fn last_mock_wrap(env: &Env, wxlm: &Address) -> Option<(Address, i128)> {
+    MockWrappedXlmClient::new(env, wxlm).last_wrap()
+}
 
 fn setup_swap_test_env(
     env: &Env,
@@ -98,6 +139,32 @@ fn build_swap_args(
     }
 }
 
+fn build_swap_v2_args(
+    env: &Env,
+    payment_id: &str,
+    payer: &Address,
+    merchant: &Address,
+    deposit_address: &Address,
+    token_in: &Address,
+    splits: Vec<SwapSplit>,
+    min_output: i128,
+) -> SwapAndPayArgsV2 {
+    SwapAndPayArgsV2 {
+        payer: payer.clone(),
+        payment_id: String::from_str(env, payment_id),
+        merchant_id: merchant.clone(),
+        currency: Symbol::new(env, "USDC"),
+        deposit_address: deposit_address.clone(),
+        token_in: token_in.clone(),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        fx_oracle: None,
+        oracle_pair: None,
+        max_deviation_bps: 0,
+        splits,
+        min_output,
+    }
+}
+
 #[test]
 fn test_swap_and_pay_happy_path_with_mock_dex() {
     let env = Env::default();
@@ -125,6 +192,7 @@ fn test_swap_and_pay_happy_path_with_mock_dex() {
         10_000,
     );
     mint_swap_input(&env, &token_in, &payer, 10_000);
+    payment_client.add_approved_router(&admin, &mock_dex);
 
     let events_before = env.events().all().len();
     let payment = payment_client.swap_and_pay(&args);
@@ -182,6 +250,7 @@ fn test_swap_and_pay_failure_with_mock_dex_insufficient_output() {
         10_000,
     );
     mint_swap_input(&env, &token_in, &payer, 10_000);
+    payment_client.add_approved_router(&admin, &mock_dex);
 
     let result = payment_client.try_swap_and_pay(&args);
     assert!(result.is_err(), "expected swap_and_pay to fail");
@@ -219,6 +288,7 @@ fn test_swap_and_pay_failure_when_mock_dex_swap_errors() {
         10_000,
     );
     mint_swap_input(&env, &token_in, &payer, 10_000);
+    payment_client.add_approved_router(&admin, &mock_dex);
 
     let result = payment_client.try_swap_and_pay(&args);
     assert!(
@@ -285,12 +355,9 @@ fn test_dex_router_allowlist() {
     let payer = Address::generate(&env);
     let deposit_address = Address::generate(&env);
 
-    let approved_router = Address::generate(&env);
-    payment_client.add_router(&admin, &approved_router);
-
-    assert!(payment_client.is_router_allowed(&approved_router));
+    assert!(payment_client.get_approved_routers().is_empty());
     assert!(!payment_client.is_router_allowed(&mock_dex));
-    assert_eq!(payment_client.get_allowed_routers().len(), 1);
+    assert_eq!(payment_client.get_approved_routers().len(), 0);
 
     let unapproved_args = build_swap_args(
         &env,
@@ -306,14 +373,17 @@ fn test_dex_router_allowlist() {
     );
 
     let res = payment_client.try_swap_and_pay(&unapproved_args);
-    assert_eq!(res, Err(Ok(Error::RouterNotAllowed)));
+    assert_eq!(res, Err(Ok(Error::UnapprovedRouter)));
 
-    payment_client.add_router(&admin, &mock_dex);
+    payment_client.add_approved_router(&admin, &mock_dex);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
     let approved_res = payment_client.try_swap_and_pay(&unapproved_args);
     assert!(approved_res.is_ok());
 
-    payment_client.remove_router(&admin, &mock_dex);
+    payment_client.remove_approved_router(&admin, &mock_dex);
     assert!(!payment_client.is_router_allowed(&mock_dex));
+    let removed_res = payment_client.try_swap_and_pay(&unapproved_args);
+    assert_eq!(removed_res, Err(Ok(Error::UnapprovedRouter)));
 }
 
 #[test]
@@ -322,7 +392,8 @@ fn test_xlm_auto_wrapping_and_wrapped_contract() {
     env.mock_all_auths();
     let (admin, payment_client, merchant_client, _token_in, token_out) = setup_swap_test_env(&env);
 
-    let wxlm = Address::generate(&env);
+    let wxlm = env.register(MockWrappedXlm, ());
+    configure_mock_wxlm(&env, &wxlm, false);
     payment_client.set_wrapped_xlm_contract(&admin, &wxlm);
     assert_eq!(
         payment_client.get_wrapped_xlm_contract(),
@@ -336,6 +407,7 @@ fn test_xlm_auto_wrapping_and_wrapped_contract() {
     let payer = Address::generate(&env);
     let deposit_address = Address::generate(&env);
     let native_xlm = Address::from_str(&env, ZERO_CONTRACT_STRKEY);
+    payment_client.set_native_xlm_contract(&admin, &native_xlm);
 
     let xlm_args = build_swap_args(
         &env,
@@ -349,9 +421,92 @@ fn test_xlm_auto_wrapping_and_wrapped_contract() {
         9_900,
         10_000,
     );
+    payment_client.add_approved_router(&admin, &mock_dex);
 
     let payment = payment_client.swap_and_pay(&xlm_args);
     assert_eq!(payment.original_token, Some(native_xlm));
+    assert_eq!(
+        payment.swap_path.as_ref().and_then(|path| path.get(0)),
+        Some(native_xlm)
+    );
+    assert_eq!(last_mock_wrap(&env, &wxlm), Some((payer, 10_000)));
+    assert_eq!(
+        MockDexRouterClient::new(&env, &mock_dex)
+            .last_swap()
+            .map(|(amount, path)| (amount, path.get(0))),
+        Some((10_000, Some(wxlm)))
+    );
+}
+
+#[test]
+fn test_swap_and_pay_non_xlm_does_not_invoke_wrapper() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let wxlm = env.register(MockWrappedXlm, ());
+    configure_mock_wxlm(&env, &wxlm, false);
+    payment_client.set_wrapped_xlm_contract(&admin, &wxlm);
+
+    let router = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router, 10_000, false);
+    payment_client.add_approved_router(&admin, &router);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
+    let args = build_swap_args(
+        &env,
+        "SWAP_NON_XLM_NO_WRAP",
+        &payer,
+        &merchant,
+        &Address::generate(&env),
+        &token_in,
+        &token_out,
+        &router,
+        9_900,
+        10_000,
+    );
+
+    assert!(payment_client.try_swap_and_pay(&args).is_ok());
+    assert_eq!(last_mock_wrap(&env, &wxlm), None);
+    assert_eq!(
+        MockDexRouterClient::new(&env, &router)
+            .last_swap()
+            .map(|(amount, path)| (amount, path.get(0))),
+        Some((10_000, Some(token_in)))
+    );
+}
+
+#[test]
+fn test_swap_and_pay_wrap_failure_reverts_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, _token_in, token_out) = setup_swap_test_env(&env);
+    let wxlm = env.register(MockWrappedXlm, ());
+    configure_mock_wxlm(&env, &wxlm, true);
+    payment_client.set_wrapped_xlm_contract(&admin, &wxlm);
+
+    let router = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router, 10_000, false);
+    payment_client.add_approved_router(&admin, &router);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let native_xlm = Address::from_str(&env, ZERO_CONTRACT_STRKEY);
+    payment_client.set_native_xlm_contract(&admin, &native_xlm);
+    let args = build_swap_args(
+        &env,
+        "XLM_WRAP_FAILURE",
+        &payer,
+        &merchant,
+        &Address::generate(&env),
+        &native_xlm,
+        &token_out,
+        &router,
+        9_900,
+        10_000,
+    );
+
+    assert!(payment_client.try_swap_and_pay(&args).is_err());
+    assert!(payment_client.try_get_payment(&args.payment_id).is_err());
 }
 
 #[test]
@@ -393,6 +548,8 @@ fn test_swap_and_pay_multi_route_aggregation() {
         path: vec![&env, token_in.clone(), token_out.clone()],
         amount_in: 5_000,
     };
+    payment_client.add_approved_router(&admin, &mock_dex1);
+    payment_client.add_approved_router(&admin, &mock_dex2);
     let routes = vec![&env, route1, route2];
 
     let payment = payment_client.swap_and_pay_multi_route(&args, &routes, &9_900);
@@ -401,6 +558,282 @@ fn test_swap_and_pay_multi_route_aggregation() {
         String::from_str(&env, "MULTI_ROUTE_PAYMENT")
     );
     assert_eq!(payment.amount, 9_900);
+}
+
+#[test]
+fn test_swap_and_pay_v2_single_split_matches_single_router_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let router = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router, 10_000, false);
+    payment_client.add_approved_router(&admin, &router);
+
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
+    let splits = vec![
+        &env,
+        SwapSplit {
+            router,
+            amount: 10_000,
+            path: vec![&env, token_in.clone(), token_out],
+        },
+    ];
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_SINGLE",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        splits,
+        9_900,
+    );
+
+    let payment = payment_client.swap_and_pay_v2(&args);
+    assert_eq!(payment.payment_id, String::from_str(&env, "SWAP_V2_SINGLE"));
+    assert_eq!(payment.amount, 10_000);
+}
+
+#[test]
+fn test_swap_and_pay_v2_aggregates_two_splits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let router_a = env.register(MockDexRouter, ());
+    let router_b = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router_a, 5_000, false);
+    configure_mock_dex(&env, &router_b, 6_000, false);
+    payment_client.add_approved_router(&admin, &router_a);
+    payment_client.add_approved_router(&admin, &router_b);
+
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
+    let splits = vec![
+        &env,
+        SwapSplit {
+            router: router_a,
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out.clone()],
+        },
+        SwapSplit {
+            router: router_b,
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out],
+        },
+    ];
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_TWO",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        splits,
+        10_000,
+    );
+
+    let payment = payment_client.swap_and_pay_v2(&args);
+    assert_eq!(payment.amount, 11_000);
+}
+
+#[test]
+fn test_swap_and_pay_v2_aggregates_three_splits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let routers = [
+        env.register(MockDexRouter, ()),
+        env.register(MockDexRouter, ()),
+        env.register(MockDexRouter, ()),
+    ];
+    for (router, output) in routers.iter().zip([3_000, 3_500, 4_000]) {
+        configure_mock_dex(&env, router, output, false);
+        payment_client.add_approved_router(&admin, router);
+    }
+
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 15_000);
+    let splits = vec![
+        &env,
+        SwapSplit {
+            router: routers[0].clone(),
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out.clone()],
+        },
+        SwapSplit {
+            router: routers[1].clone(),
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out.clone()],
+        },
+        SwapSplit {
+            router: routers[2].clone(),
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out],
+        },
+    ];
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_THREE",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        splits,
+        10_000,
+    );
+
+    let payment = payment_client.swap_and_pay_v2(&args);
+    assert_eq!(payment.amount, 10_500);
+}
+
+#[test]
+fn test_swap_and_pay_v2_rejects_output_below_minimum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let router_a = env.register(MockDexRouter, ());
+    let router_b = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router_a, 5_000, false);
+    configure_mock_dex(&env, &router_b, 5_000, false);
+    payment_client.add_approved_router(&admin, &router_a);
+    payment_client.add_approved_router(&admin, &router_b);
+
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    let payment_id = String::from_str(&env, "SWAP_V2_SLIPPAGE");
+    let splits = vec![
+        &env,
+        SwapSplit {
+            router: router_a,
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out.clone()],
+        },
+        SwapSplit {
+            router: router_b,
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out],
+        },
+    ];
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_SLIPPAGE",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        splits,
+        10_001,
+    );
+
+    let result = payment_client.try_swap_and_pay_v2(&args);
+    assert_eq!(result, Err(Ok(Error::RouteOutputInsufficient)));
+    assert!(payment_client.try_get_payment(&payment_id).is_err());
+}
+
+#[test]
+fn test_swap_and_pay_v2_reverts_when_a_split_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let router_a = env.register(MockDexRouter, ());
+    let router_b = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router_a, 5_000, false);
+    configure_mock_dex(&env, &router_b, 5_000, true);
+    payment_client.add_approved_router(&admin, &router_a);
+    payment_client.add_approved_router(&admin, &router_b);
+
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let splits = vec![
+        &env,
+        SwapSplit {
+            router: router_a,
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out.clone()],
+        },
+        SwapSplit {
+            router: router_b,
+            amount: 5_000,
+            path: vec![&env, token_in.clone(), token_out],
+        },
+    ];
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_FAILED_SPLIT",
+        &payer,
+        &merchant,
+        &Address::generate(&env),
+        &token_in,
+        splits,
+        9_000,
+    );
+
+    assert!(payment_client.try_swap_and_pay_v2(&args).is_err());
+    assert!(payment_client.try_get_payment(&args.payment_id).is_err());
+}
+
+#[test]
+fn test_swap_and_pay_v2_enforces_maximum_split_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let router = Address::generate(&env);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let split = SwapSplit {
+        router,
+        amount: 1,
+        path: vec![&env, token_in.clone(), token_out],
+    };
+    let splits = vec![&env, split.clone(), split.clone(), split.clone(), split];
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_TOO_MANY_SPLITS",
+        &Address::generate(&env),
+        &merchant,
+        &Address::generate(&env),
+        &token_in,
+        splits,
+        1,
+    );
+
+    let result = payment_client.try_swap_and_pay_v2(&args);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn test_swap_and_pay_v2_rejects_unapproved_router() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let router = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &router, 10_000, false);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let split = SwapSplit {
+        router,
+        amount: 10_000,
+        path: vec![&env, token_in.clone(), token_out],
+    };
+    let args = build_swap_v2_args(
+        &env,
+        "SWAP_V2_UNAPPROVED",
+        &Address::generate(&env),
+        &merchant,
+        &Address::generate(&env),
+        &token_in,
+        vec![&env, split],
+        9_000,
+    );
+
+    let result = payment_client.try_swap_and_pay_v2(&args);
+    assert_eq!(result, Err(Ok(Error::UnapprovedRouter)));
 }
 
 #[test]
