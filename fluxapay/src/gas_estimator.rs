@@ -56,7 +56,7 @@ mod instructions {
     pub const CREATE_DISPUTE: i64 = 45;
     pub const RESOLVE_DISPUTE: i64 = 80; // includes refund + token transfer
     pub const REJECT_DISPUTE: i64 = 20;
-    pub const SWAP_AND_PAY: i64 = 120; // DEX call + create_payment
+    pub const SWAP_AND_PAY: i64 = 160; // DEX + optional native-XLM wrap + create_payment
     pub const CREATE_STREAM: i64 = 50;
     pub const WITHDRAW_STREAM: i64 = 45;
     pub const CANCEL_STREAM: i64 = 30;
@@ -76,7 +76,7 @@ mod reads {
     pub const CREATE_DISPUTE: u32 = 5;
     pub const RESOLVE_DISPUTE: u32 = 8;
     pub const REJECT_DISPUTE: u32 = 3;
-    pub const SWAP_AND_PAY: u32 = 8; // DEX + create_payment reads
+    pub const SWAP_AND_PAY: u32 = 10; // DEX, XLM/WXLM config, and create_payment reads
     pub const CREATE_STREAM: u32 = 3;
     pub const WITHDRAW_STREAM: u32 = 3;
     pub const CANCEL_STREAM: u32 = 2;
@@ -96,7 +96,7 @@ mod writes {
     pub const CREATE_DISPUTE: u32 = 4;
     pub const RESOLVE_DISPUTE: u32 = 7; // dispute + refund writes + operator note
     pub const REJECT_DISPUTE: u32 = 3; // dispute write + operator note + TTL
-    pub const SWAP_AND_PAY: u32 = 6;
+    pub const SWAP_AND_PAY: u32 = 7; // includes WXLM wrapper state write
     pub const CREATE_STREAM: u32 = 3;
     pub const WITHDRAW_STREAM: u32 = 2;
     pub const CANCEL_STREAM: u32 = 2;
@@ -116,7 +116,7 @@ mod events {
     pub const CREATE_DISPUTE: u32 = 1;
     pub const RESOLVE_DISPUTE: u32 = 3; // REFUND/COMPLETED + DISPUTE/OPERATOR_NOTE + DISPUTE/RESOLVED
     pub const REJECT_DISPUTE: u32 = 2; // DISPUTE/OPERATOR_NOTE + DISPUTE/REJECTED
-    pub const SWAP_AND_PAY: u32 = 2; // SWAP/AND/PAY + PAYMENT/CREATED
+    pub const SWAP_AND_PAY: u32 = 3; // includes a possible WXLM wrapper event
     pub const CREATE_STREAM: u32 = 1;
     pub const WITHDRAW_STREAM: u32 = 1;
     pub const CANCEL_STREAM: u32 = 1;
@@ -426,6 +426,71 @@ impl GasEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::Env;
+
+    fn client(env: &Env) -> GasEstimatorClient<'_> {
+        let id = env.register(GasEstimator, ());
+        GasEstimatorClient::new(env, &id)
+    }
+
+    #[test]
+    fn estimate_returns_correct_fields() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let est = c.estimate(&Operation::CreatePayment);
+
+        assert_eq!(est.operation, Operation::CreatePayment);
+        assert_eq!(est.instructions, instructions::CREATE_PAYMENT);
+        assert_eq!(est.ledger_reads, reads::CREATE_PAYMENT);
+        assert_eq!(est.ledger_writes, writes::CREATE_PAYMENT);
+        assert_eq!(est.events, events::CREATE_PAYMENT);
+
+        let expected_fee = instructions::CREATE_PAYMENT * FEE_PER_10K_INSTRUCTIONS
+            + reads::CREATE_PAYMENT as i64 * FEE_PER_LEDGER_READ
+            + writes::CREATE_PAYMENT as i64 * FEE_PER_LEDGER_WRITE
+            + events::CREATE_PAYMENT as i64 * FEE_PER_EVENT;
+        assert_eq!(est.resource_fee_stroops, expected_fee);
+    }
+
+    #[test]
+    fn estimate_all_returns_all_operations() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let all = c.estimate_all();
+        assert_eq!(all.len(), 16);
+    }
+
+    #[test]
+    fn swap_and_pay_is_most_expensive() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let swap = c.estimate(&Operation::SwapAndPay);
+        let create = c.estimate(&Operation::CreatePayment);
+        assert!(swap.resource_fee_stroops > create.resource_fee_stroops);
+    }
+
+    #[test]
+    fn swap_and_pay_estimate_includes_native_wrap_overhead() {
+        let env = Env::default();
+        let estimate = client(&env).estimate(&Operation::SwapAndPay);
+
+        assert_eq!(estimate.instructions, instructions::SWAP_AND_PAY);
+        assert_eq!(estimate.ledger_reads, reads::SWAP_AND_PAY);
+        assert_eq!(estimate.events, events::SWAP_AND_PAY);
+    }
+
+    #[test]
+    fn resolve_dispute_higher_than_reject_dispute() {
+        let env = Env::default();
+        let c = client(&env);
+
+        let resolve = c.estimate(&Operation::ResolveDispute);
+        let reject = c.estimate(&Operation::RejectDispute);
+        assert!(resolve.resource_fee_stroops > reject.resource_fee_stroops);
+    }
 
     #[test]
     fn gas_estimator_create_payment_estimate_preserves_fee_profile() {

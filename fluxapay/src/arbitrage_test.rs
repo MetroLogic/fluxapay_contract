@@ -188,6 +188,7 @@ fn test_validate_path_returns_rejects_circular_path() {
     let merchant = Address::generate(&env);
     let payer = Address::generate(&env);
     let dex_router = env.register(DexRouter, ());
+    payment_client.add_approved_router(&admin, &dex_router);
 
     merchant_client.register_merchant(
         &merchant,
@@ -232,6 +233,7 @@ fn test_validate_path_returns_rejects_insufficient_quote() {
     let merchant = Address::generate(&env);
     let payer = Address::generate(&env);
     let dex_router = env.register(DexRouter, ());
+    payment_client.add_approved_router(&admin, &dex_router);
 
     merchant_client.register_merchant(
         &merchant,
@@ -277,6 +279,7 @@ fn test_swap_and_pay_accepts_valid_path_returns() {
     let payer = Address::generate(&env);
     let deposit = Address::generate(&env);
     let dex_router = env.register(DexRouter, ());
+    payment_client.add_approved_router(&admin, &dex_router);
 
     merchant_client.register_merchant(
         &merchant,
