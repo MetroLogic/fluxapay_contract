@@ -23,6 +23,22 @@ The indexer implements SEP-6 withdrawal, SEP-24 interactive handoff, and persist
 4. **Status tracking.** The merchant polls the authenticated status endpoint after the anchor UI returns control. Each poll fetches the transaction from the anchor; only an authoritative `completed` status becomes `fiat_sent`, and authoritative cancellation/error statuses become `failed`.
 5. **Notifications.** The indexer emits `SETTLEMENT/FIAT_SENT` or `SETTLEMENT/FIAT_FAILED` to registered listeners. A payment-settled webhook is not currently connected to these events.
 
+### Settlement SEP-10 Credentials
+
+Configure `ANCHOR_SEP10_SECRET_KEY` and optionally `ANCHOR_SEP10_WEB_AUTH_ENDPOINT` for one settlement account shared by anchors. For per-anchor accounts or auth servers, set `ANCHOR_SEP10_CREDENTIALS` to a JSON object keyed by anchor domain, for example:
+
+```json
+{
+  "anchor.example.com": {
+    "secretKey": "S...",
+    "webAuthEndpoint": "https://anchor.example.com/auth",
+    "networkPassphrase": "Test SDF Network ; September 2015"
+  }
+}
+```
+
+The settlement service fetches, signs, submits, caches, and refreshes SEP-10 tokens per normalized anchor domain. Tokens are sent as bearer credentials and are never reused across domains. Keep secret keys in deployment secrets or a restricted environment file; do not add them to code or logs.
+
 ### `settlements` Table (indexer DB)
 
 | Column | Type | Description |
@@ -453,12 +469,13 @@ subscription loop in `indexer/src/index.ts`:
   listeners registered via `onSettlementEvent` (the indexer currently logs
   them; a future callback-webhook notifier can subscribe the same way).
 
-The SEP-10 JWT auth and hosted UI are supplied by the existing authentication
-service and the anchor. The indexer status endpoint requires a SEP-10 bearer
-JWT. The dead-letter queue and ops dashboard described under "Security
-Considerations" and "Failure Handling" are not connected to settlement
-notifications; failed settlement recovery remains a manual anchor/merchant
-reconciliation.
+SEP-10 authentication is implemented by the off-chain settlement service with
+per-anchor credential configuration and token caching. The SEP-24 interactive
+fallback UI hand-off described above remains follow-up work. The dead-letter
+queue and ops dashboard described under "Security
+Considerations" and "Failure Handling" are also not yet implemented; today
+a failed settlement is simply recorded with `status = 'failed'` in the
+`settlements` table for manual follow-up.
 
 ---
 
