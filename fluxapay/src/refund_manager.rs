@@ -96,7 +96,7 @@ impl RefundManager {
             .unwrap_or(REFUND_FEE_BPS)
     }
 
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+    pub(crate) fn get_refund_cooldown_secs(env: &Env) -> u64 {
         env.storage()
             .persistent()
             .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
@@ -2375,14 +2375,14 @@ impl RefundManager {
         counter
     }
 
-    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
+    pub(crate) fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Refund(refund_id.clone()))
             .ok_or(Error::RefundNotFound)
     }
 
-    fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
+    pub(crate) fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentRefunds(payment_id.clone()))
