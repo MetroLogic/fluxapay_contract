@@ -304,3 +304,148 @@ jobs:
               stellar contract optimize --wasm "$wasm"
             fi
           done
+
+  # Job 4: WASM feature build matrix
+  #
+  # Builds each deployable contract feature independently for the
+  # wasm32-unknown-unknown target, optimizes it, and enforces the size budget.
+  # This catches missing feature flags, invalid feature combinations, and size
+  # regressions before merge.
+  #
+  # The job runs in parallel with the native "build" job — both need the same
+  # quality gates (format, lint, cargo-deny, cargo-audit) but neither depends
+  # on the other.
+  wasm-feature-matrix:
+    name: WASM Size Check (${{ matrix.feature }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [format, lint, cargo-deny, cargo-audit]
+
+    strategy:
+      # Run all matrix entries even if one fails so we get the full size report
+      # for every feature in a single CI run.
+      fail-fast: false
+      matrix:
+        feature:
+          - contract-payment-processor
+          - contract-payment-streaming
+          - contract-refund-manager
+          - contract-gas-estimator
+          - contract-fx-oracle
+          - contract-merchant-registry
+          - contract-payment-link
+          - contract-dex-router
+          - contract-htlc
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-unknown
+
+      # Share the Stellar CLI binary cache with the "build" job so both jobs
+      # benefit from a warm cache on the same runner OS and Cargo.lock.
+      - name: Cache Stellar CLI
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        id: cache-stellar-cli
+        with:
+          path: ~/.cargo/bin/stellar
+          key: ${{ runner.os }}-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install system dependencies
+        if: steps.cache-stellar-cli.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Stellar CLI
+        if: steps.cache-stellar-cli.outputs.cache-hit != 'true'
+        run: cargo install --locked stellar-cli
+
+      - name: Verify Stellar CLI
+        run: stellar --version
+
+      - name: Cache cargo (per-feature)
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-${{ matrix.feature }}-
+            ${{ runner.os }}-cargo-wasm-
+
+      # Build exactly one contract feature at a time.  --no-default-features
+      # ensures the default (contract-payment-processor) is not silently
+      # included alongside the matrix feature.  --profile release-wasm uses
+      # the size-optimised profile defined in the root Cargo.toml.
+      - name: Build WASM (${{ matrix.feature }})
+        run: >
+          cargo build
+          --profile release-wasm
+          --target wasm32-unknown-unknown
+          --no-default-features
+          --features ${{ matrix.feature }}
+          -p fluxapay
+
+      # The release-wasm profile outputs to release-wasm/, not release/.
+      # Verify the artifact is present before attempting to optimize it.
+      - name: Verify artifact exists
+        run: |
+          WASM=target/wasm32-unknown-unknown/release-wasm/fluxapay.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::error::Expected artifact not found: $WASM"
+            echo "  Feature: ${{ matrix.feature }}"
+            echo "  Files present in release-wasm/:"
+            ls -lh target/wasm32-unknown-unknown/release-wasm/ 2>/dev/null || echo "  (directory does not exist)"
+            exit 1
+          fi
+          echo "Artifact present: $WASM ($(stat -c%s "$WASM") bytes pre-optimize)"
+
+      - name: Optimize WASM (${{ matrix.feature }})
+        run: |
+          stellar contract optimize \
+            --wasm target/wasm32-unknown-unknown/release-wasm/fluxapay.wasm
+
+      # Compare the optimized binary against:
+      #   1. The soft baseline in .wasm-size-baseline (95 000 bytes) — a
+      #      regression relative to the last intentional size update.
+      #   2. The hard cap MAX_WASM_SIZE_KB (100 KB = 102 400 bytes) — an
+      #      absolute CI ceiling that must never be exceeded.
+      #
+      # Both thresholds are reported so engineers know which limit failed.
+      - name: Check WASM size (${{ matrix.feature }})
+        run: |
+          WASM=target/wasm32-unknown-unknown/release-wasm/fluxapay.wasm
+          FEATURE="${{ matrix.feature }}"
+          HARD_CAP_BYTES=$(( ${{ env.MAX_WASM_SIZE_KB }} * 1024 ))
+          BASELINE_BYTES=$(cat .wasm-size-baseline)
+
+          SIZE=$(stat -c%s "$WASM")
+          SIZE_KB=$(echo "scale=2; $SIZE / 1024" | bc)
+
+          echo "Feature:        $FEATURE"
+          echo "Optimized size: ${SIZE} bytes (${SIZE_KB} KB)"
+          echo "Soft baseline:  ${BASELINE_BYTES} bytes ($(echo "scale=2; $BASELINE_BYTES / 1024" | bc) KB)"
+          echo "Hard cap:       ${HARD_CAP_BYTES} bytes (${{ env.MAX_WASM_SIZE_KB }} KB)"
+
+          FAILED=0
+
+          if [ "$SIZE" -gt "$HARD_CAP_BYTES" ]; then
+            echo "::error::$FEATURE exceeds the hard WASM size cap: ${SIZE} bytes > ${HARD_CAP_BYTES} bytes (${{ env.MAX_WASM_SIZE_KB }} KB). Reduce binary size before merging."
+            FAILED=1
+          fi
+
+          if [ "$SIZE" -gt "$BASELINE_BYTES" ]; then
+            echo "::warning::$FEATURE exceeds the soft size baseline: ${SIZE} bytes > ${BASELINE_BYTES} bytes. If this increase is intentional, run scripts/update-wasm-baseline.sh and commit the updated .wasm-size-baseline."
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "✅ $FEATURE: ${SIZE} bytes — within budget."
