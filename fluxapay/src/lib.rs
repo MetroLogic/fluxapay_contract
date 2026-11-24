@@ -970,6 +970,12 @@ pub enum BillingInterval {
 
 impl BillingInterval {
     /// Returns the approximate duration in seconds for each interval.
+    ///
+    /// # Parameters
+    /// - `&self` - Reference to the billing interval whose duration is returned.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn to_secs(&self) -> u64 {
         match self {
             BillingInterval::Daily => 86_400,
@@ -1216,6 +1222,13 @@ pub struct ContractHealth {
 )]
 #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl RefundManager {
+    /// Returns the contract version.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn version() -> u32 {
         1
     }
@@ -1250,6 +1263,13 @@ impl RefundManager {
             .unwrap_or(REFUND_COOLDOWN_SECS)
     }
 
+    /// Returns the dispute bond amount.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_dispute_bond_amount(env: Env) -> i128 {
         env.storage()
             .persistent()
@@ -1261,6 +1281,15 @@ impl RefundManager {
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
     /// `LONG_LIVE_TTL` so metadata survives archival.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `key: Symbol` - Metadata key whose value is read or changed.
+    /// - `value: String` - Metadata value to store for the specified key.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_contract_metadata(
         env: Env,
         admin: Address,
@@ -1287,6 +1316,13 @@ impl RefundManager {
 
     /// Public read of an on-chain metadata entry set via `set_contract_metadata`
     /// (issue #667). Returns `None` if the key was never set.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `key: Symbol` - Metadata key whose value is read or changed.
+    ///
+    /// # Errors
+    /// Returns `None` when no contract metadata is available; no errors are returned.
     pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
         env.storage()
             .instance()
@@ -1331,6 +1367,16 @@ impl RefundManager {
         Self::validate_init_address(env, token_address)
     }
 
+    /// Initializes refund manager.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `usdc_token_address: Address` - Address of the USDC token contract.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAddress`.
+    /// Also propagates errors from `Self::validate_admin_and_token`.
     pub fn initialize_refund_manager(
         env: Env,
         admin: Address,
@@ -1368,6 +1414,14 @@ impl RefundManager {
     }
 
     /// Admin-only: set the refund processing fee in basis points (0–1000, max 10%).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `bps: i128` - Fee rate in basis points.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_refund_fee_bps(env: Env, admin: Address, bps: i128) -> Result<(), Error> {
         admin.require_auth();
 
@@ -1383,12 +1437,27 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Returns the refund fee bps.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_refund_fee_bps(env: Env) -> i128 {
         Self::get_refund_fee_bps_internal(&env)
     }
 
     /// Admin: configure the DEX router used to route swap_and_pay refunds
     /// back to the payer's original token (Issue #173).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `dex_router: Address` - Address of the DEX router used for swap-based refunds.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_dex_router_address(
         env: Env,
         admin: Address,
@@ -1406,6 +1475,14 @@ impl RefundManager {
 
     /// Admin: require a `receipt_hash` on every refund before `process_refund`
     /// will execute it (Issue #176).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `require_receipt_hash: bool` - Whether refund requests must include a receipt hash.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_refund_policy(
         env: Env,
         admin: Address,
@@ -1426,6 +1503,12 @@ impl RefundManager {
     /// `refund_fee_bps`, and `cooldown_secs`. Lets integrators check policy
     /// before submitting a refund without having to know every individual
     /// storage key / setter.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_refund_policy(env: Env) -> RefundPolicy {
         let require_receipt_hash: bool = env
             .storage()
@@ -1441,6 +1524,16 @@ impl RefundManager {
         }
     }
 
+    /// Grants role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn grant_role(
         env: Env,
         admin: Address,
@@ -1450,6 +1543,15 @@ impl RefundManager {
         AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
+    /// Grants merchant role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn grant_merchant_role(
         env: Env,
         admin: Address,
@@ -1459,6 +1561,16 @@ impl RefundManager {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Revokes role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn revoke_role(
         env: Env,
         admin: Address,
@@ -1469,6 +1581,15 @@ impl RefundManager {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Revokes merchant role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn revoke_merchant_role(
         env: Env,
         admin: Address,
@@ -1481,6 +1602,16 @@ impl RefundManager {
     /// Synchronize a role grant across PaymentProcessor and RefundManager.
     ///
     /// If either grant fails, the transaction aborts and no changes are persisted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `payment_processor_address: Address` - Address of payment processor participating in the operation.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`, `Error::Unauthorized`.
     pub fn sync_grant_role_with_processor(
         env: Env,
         admin: Address,
@@ -1516,6 +1647,16 @@ impl RefundManager {
     /// Synchronize a role revoke across PaymentProcessor and RefundManager.
     ///
     /// If either revoke fails, the transaction aborts and no changes are persisted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `payment_processor_address: Address` - Address of payment processor participating in the operation.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`, `Error::Unauthorized`.
     pub fn sync_revoke_role_with_processor(
         env: Env,
         admin: Address,
@@ -1548,14 +1689,41 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Returns whether the account has the specified role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         AccessControl::has_role(&env, &role, &account)
     }
 
+    /// Renounces role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn renounce_role(env: Env, account: Address, role: Symbol) -> Result<(), Error> {
         AccessControl::renounce_role(&env, account, role).map_err(|_| Error::AccessControlError)
     }
 
+    /// Proposes admin.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `current_admin: Address` - Address of the current administrator authorizing this operation.
+    /// - `new_admin: Address` - Address proposed to become the administrator.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn propose_admin(
         env: Env,
         current_admin: Address,
@@ -1565,19 +1733,53 @@ impl RefundManager {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Claims admin.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `new_admin: Address` - Address proposed to become the administrator.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn claim_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         AccessControl::claim_admin(&env, new_admin).map_err(|_| Error::AccessControlError)
     }
 
+    /// Accepts admin.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `new_admin: Address` - Address proposed to become the administrator.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         AccessControl::accept_admin(&env, new_admin).map_err(|_| Error::AccessControlError)
     }
 
+    /// Cancels admin transfer.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `current_admin: Address` - Address of the current administrator authorizing this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn cancel_admin_transfer(env: Env, current_admin: Address) -> Result<(), Error> {
         AccessControl::cancel_admin_transfer(&env, current_admin)
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Transfers admin.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `current_admin: Address` - Address of the current administrator authorizing this operation.
+    /// - `new_admin: Address` - Address proposed to become the administrator.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
+    /// Also propagates errors from `Self::propose_admin`.
     pub fn transfer_admin(
         env: Env,
         current_admin: Address,
@@ -1586,15 +1788,39 @@ impl RefundManager {
         Self::propose_admin(env, current_admin, new_admin)
     }
 
+    /// Accepts admin transfer.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `new_admin: Address` - Address proposed to become the administrator.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
+    /// Also propagates errors from `Self::claim_admin`.
     pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), Error> {
         Self::claim_admin(env, new_admin)
     }
 
+    /// Returns the current administrator address.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns `None` when no admin is available; no errors are returned.
     pub fn get_admin(env: Env) -> Option<Address> {
         AccessControl::get_admin(&env)
     }
 
     /// Add an address to the global blacklist (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `address: Address` - Address whose status or configuration is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn add_to_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -1607,6 +1833,14 @@ impl RefundManager {
     }
 
     /// Remove an address from the global blacklist (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `address: Address` - Address whose status or configuration is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -1619,6 +1853,13 @@ impl RefundManager {
     }
 
     /// Returns true when an address is globally blacklisted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `address: Address` - Address whose status or configuration is queried or changed.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn is_blacklisted(env: Env, address: Address) -> bool {
         env.storage()
             .persistent()
@@ -1642,6 +1883,18 @@ impl RefundManager {
     /// path used by a `swap_and_pay` payment, so `process_refund` can route
     /// the refund back through the DEX to the payer's original token
     /// (Issue #173).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    /// - `original_token: Address` - Address of original token participating in the operation.
+    /// - `swap_path: Vec<Address>` - Address of swap path participating in the operation.
+    ///
+    /// # Errors
+    /// No errors are generated directly by this function.
     pub fn register_swap_payment(
         env: Env,
         payment_id: String,
@@ -1698,6 +1951,17 @@ impl RefundManager {
     /// Issue #168: Configure fee split destinations for platform fees.
     /// Admin can set allocation ratios and destination addresses.
     /// `treasury_bps + developer_bps` must be ≤ 10 000; any remainder goes to treasury.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `treasury_bps: u32` - Numeric treasury bps value used by the operation.
+    /// - `developer_bps: u32` - Numeric developer bps value used by the operation.
+    /// - `treasury_address: Address` - Address of treasury participating in the operation.
+    /// - `developer_address: Address` - Address of developer participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn configure_fee_split(
         env: Env,
         admin: Address,
@@ -1740,6 +2004,14 @@ impl RefundManager {
 
     /// Struct-based setter for the platform fee split config (alias for `configure_fee_split`).
     /// Admin only. `config.treasury_bps + config.developer_bps` must be ≤ 10 000.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `config: FeeSplitConfig` - Value used to configure or filter config.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_fee_split_config(
         env: Env,
         admin: Address,
@@ -1771,15 +2043,37 @@ impl RefundManager {
     }
 
     /// Get the current fee split configuration.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns `None` when no fee split config is available; no errors are returned.
     pub fn get_fee_split_config(env: Env) -> Option<FeeSplitConfig> {
         env.storage().persistent().get(&DataKey::FeeSplitConfig)
     }
 
     /// Returns all addresses currently holding the given role (issue #37).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no role members match; no errors are returned.
     pub fn get_role_members(env: Env, role: Symbol) -> Vec<Address> {
         AccessControl::get_role_members(&env, &role)
     }
 
+    /// Proposes fee update.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `new_fee: i128` - Proposed replacement fee amount or rate.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn propose_fee_update(env: Env, admin: Address, new_fee: i128) -> Result<(), Error> {
         admin.require_auth();
         if Some(admin.clone()) != AccessControl::get_admin(&env) {
@@ -1795,6 +2089,14 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Finalizes fee update.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::FeeProposalNotReady`, `Error::NoFeeProposal`, `Error::Unauthorized`.
     pub fn finalize_fee_update(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         if Some(admin.clone()) != AccessControl::get_admin(&env) {
@@ -1821,6 +2123,16 @@ impl RefundManager {
     }
 
     /// Register a payment with the refund manager so refund amounts can be validated.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn register_payment(
         env: Env,
         payment_id: String,
@@ -1878,6 +2190,17 @@ impl RefundManager {
     }
 
     /// Helper for tests to register a confirmed payment with an explicit payer address.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn register_payment_with_payer(
         env: Env,
         payment_id: String,
@@ -1934,6 +2257,20 @@ impl RefundManager {
         }
     }
 
+    /// Queues auto refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `caller: Address` - Address making the call; it is checked against the function?s authorization rules.
+    /// - `registry_address: Address` - Address of the merchant registry contract.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `refund_amount: i128` - Amount to refund from the specified payment.
+    /// - `requester: Address` - Address requesting the refund or other action.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    ///
+    /// # Errors
+    /// Returns `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::create_refund_internal`.
     pub fn queue_auto_refund(
         env: Env,
         caller: Address,
@@ -1967,6 +2304,24 @@ impl RefundManager {
         )
     }
 
+    /// Creates a refund request for a payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `refund_amount: i128` - Amount to refund from the specified payment.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    /// - `requester: Address` - Address requesting the refund or other action.
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// stellar contract invoke --id $REFUND_MANAGER_ID --network testnet --source $REQUESTER_ADDRESS -- create_refund --payment_id "payment-001" --refund_amount 500000000 --reason "Customer requested cancellation" --requester $REQUESTER_ADDRESS
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::create_refund_internal`.
     pub fn create_refund(
         env: Env,
         payment_id: String,
@@ -1996,6 +2351,18 @@ impl RefundManager {
     ///   `Error::DuplicateIdempotencyKey`.
     ///
     /// Passing `None` is exactly equivalent to `create_refund` (backward compatible).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `refund_amount: i128` - Amount to refund from the specified payment.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    /// - `requester: Address` - Address requesting the refund or other action.
+    /// - `idempotency_key: Option<String>` - Optional key used to recognize safe retries of this request.
+    ///
+    /// # Errors
+    /// Returns `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::create_refund_internal`.
     pub fn create_refund_idempotent(
         env: Env,
         payment_id: String,
@@ -2021,6 +2388,19 @@ impl RefundManager {
     ///
     /// Issue #638: also accepts an optional `idempotency_key` with the same
     /// semantics as `create_refund_idempotent`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `refund_amount: i128` - Amount to refund from the specified payment.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    /// - `requester: Address` - Address requesting the refund or other action.
+    /// - `receipt_hash: Option<BytesN<32>>` - Optional hash of the receipt associated with the refund.
+    /// - `idempotency_key: Option<String>` - Optional key used to recognize safe retries of this request.
+    ///
+    /// # Errors
+    /// Returns `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::create_refund_internal`.
     pub fn create_refund_with_receipt(
         env: Env,
         payment_id: String,
@@ -2196,6 +2576,22 @@ impl RefundManager {
         Ok(refund_id)
     }
 
+    /// Processes an approved refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// stellar contract invoke --id $REFUND_MANAGER_ID --network testnet --source $OPERATOR_ADDRESS -- process_refund --operator $OPERATOR_ADDRESS --refund_id "refund-001"
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::MissingReceiptHash`, `Error::PaymentNotFound`, `Error::Reentrancy`, `Error::RefundAlreadyProcessed`, `Error::RefundExpired`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_paused`, `Self::require_not_blacklisted`, `Self::get_refund_internal`, `Self::process_refund_internal`.
     pub fn process_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         Self::require_not_paused(&env)?;
@@ -2218,6 +2614,13 @@ impl RefundManager {
         Self::process_refund_internal(&env, &operator, refund_id)
     }
 
+    /// Returns the treasury balance.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_treasury_balance(env: Env) -> i128 {
         let usdc_token: Address = env
             .storage()
@@ -2260,6 +2663,14 @@ impl RefundManager {
 
     /// Return a page of treasury withdrawal history (newest-first).
     /// `offset` skips the first N records; `limit` caps the page size (max 100).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no treasury withdrawal history match; no errors are returned.
     pub fn get_treasury_withdrawal_history(
         env: Env,
         offset: u32,
@@ -2282,6 +2693,16 @@ impl RefundManager {
         page
     }
 
+    /// Withdraws treasury.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `destination: Address` - Address of destination participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InsufficientTreasuryBalance`, `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn withdraw_treasury(
         env: Env,
         admin: Address,
@@ -2569,6 +2990,15 @@ impl RefundManager {
     }
 
     /// Reject a pending refund (operator only). Emits REFUND/REJECTED (issue #27).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::RefundAlreadyProcessed`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_refund_internal`.
     pub fn reject_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         let has_settlement =
@@ -2606,6 +3036,15 @@ impl RefundManager {
     /// (Issue #170). Marks it `Rejected` so it no longer blocks the
     /// payment's refundable balance. Callable by the same roles as
     /// `process_refund`/`reject_refund`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::RefundAlreadyProcessed`, `Error::RefundExpired`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_refund_internal`.
     pub fn expire_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         let has_settlement =
@@ -2645,6 +3084,15 @@ impl RefundManager {
     /// Issue #171: Approve a pending refund, allowing customer to claim it.
     /// Operator marks the refund as approved without processing it immediately.
     /// Customer can then call process_refund to claim the approved refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::RefundAlreadyProcessed`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_refund_internal`.
     pub fn approve_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
         let has_settlement =
@@ -2682,6 +3130,15 @@ impl RefundManager {
     /// operator has called `approve_refund`. `process_refund` remains
     /// available for operators/oracles who need to execute a refund
     /// directly without waiting for the customer to claim it.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `requester: Address` - Address requesting the refund or other action.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::MissingReceiptHash`, `Error::PaymentNotFound`, `Error::Reentrancy`, `Error::RefundAlreadyProcessed`, `Error::RefundExpired`, `Error::RefundNotApproved`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_paused`, `Self::require_not_blacklisted`, `Self::get_refund_internal`, `Self::process_refund_internal`.
     pub fn claim_refund(env: Env, requester: Address, refund_id: String) -> Result<(), Error> {
         requester.require_auth();
         Self::require_not_paused(&env)?;
@@ -2703,6 +3160,14 @@ impl RefundManager {
     }
     /// Admin-configurable refund expiry window in seconds (Issue #170).
     /// Applies to refunds created after this call.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `secs: u64` - Duration in seconds for the configured expiry or interval.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_refund_expiry(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -2733,6 +3198,18 @@ impl RefundManager {
     /// Only merchants with KYC tier `Full` or `Business` may call this.
     /// The merchant must be the `merchant_id` on the original payment.
     /// Executes the USDC transfer immediately (no `Pending` state).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `refund_amount: i128` - Amount to refund from the specified payment.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    /// - `registry_address: Address` - Address of the merchant registry contract.
+    ///
+    /// # Errors
+    /// Returns `Error::DirectTransferNotDisputable`, `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::create_refund_internal`, `Self::get_refund_internal`.
     pub fn refund_instantly(
         env: Env,
         merchant_id: Address,
@@ -2836,6 +3313,16 @@ impl RefundManager {
         Ok(refund_id)
     }
 
+    /// Cancels refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `caller: Address` - Address making the call; it is checked against the function?s authorization rules.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::RefundAlreadyProcessed`, `Error::RefundCancelled`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_refund_internal`.
     pub fn cancel_refund(env: Env, caller: Address, refund_id: String) -> Result<(), Error> {
         caller.require_auth();
 
@@ -2869,10 +3356,27 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Returns the refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `refund_id: String` - Identifier of the refund being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::RefundNotFound`.
+    /// Also propagates errors from `Self::get_refund_internal`.
     pub fn get_refund(env: Env, refund_id: String) -> Result<Refund, Error> {
         Self::get_refund_internal(&env, &refund_id)
     }
 
+    /// Returns the refunds associated with a payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// No errors are generated directly by this function.
     pub fn get_payment_refunds(env: Env, payment_id: String) -> Result<Vec<Refund>, Error> {
         let refund_ids = RefundManager::get_payment_refunds_internal(&env, &payment_id);
         let mut refunds = vec![&env];
@@ -2912,6 +3416,20 @@ impl RefundManager {
     }
 
     // Dispute handling functions
+    /// Creates a dispute for a payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    /// - `evidence: String` - Evidence text or content reference attached to the dispute.
+    /// - `disputer: Address` - Address of disputer participating in the operation.
+    /// - `payout_splits: Vec<SettlementSplit>` - Collection of payout splits values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::DisputeRateLimitExceeded`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::InvalidEvidenceCid`, `Error::InvalidPaymentId`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RefundExceedsPayment`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::create_dispute_inner`.
     pub fn create_dispute(
         env: Env,
         payment_id: String,
@@ -2939,6 +3457,14 @@ impl RefundManager {
     /// identically to `create_dispute`; failures do not revert successes.
     /// Bonds are deducted only for successful disputes.
     /// Emits `DISPUTE/BATCH_CREATED` with `(success_count, fail_count)`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `disputes: Vec<CreateDisputeArgs>` - Collection of disputes values to process or return.
+    /// - `max_batch: u32` - Numeric max batch value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::BatchTooLarge`.
     pub fn batch_create_disputes(
         env: Env,
         disputes: Vec<CreateDisputeArgs>,
@@ -3247,6 +3773,16 @@ impl RefundManager {
         Ok(dispute_id)
     }
 
+    /// Reviews dispute.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn review_dispute(env: Env, operator: Address, dispute_id: String) -> Result<(), Error> {
         operator.require_auth();
 
@@ -3284,6 +3820,15 @@ impl RefundManager {
     ///
     /// * `per_payer` — max concurrent open/under-review disputes per disputer
     /// * `global_per_hour` — max dispute creations per hour across all disputers
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `per_payer: u32` - Numeric per payer value used by the operation.
+    /// - `global_per_hour: u32` - Numeric global per hour value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_dispute_rate_limits(
         env: Env,
         admin: Address,
@@ -3306,6 +3851,14 @@ impl RefundManager {
 
     /// Toggle whether non-empty dispute evidence must be a valid IPFS CID.
     /// Set `false` for testnet/dev to accept arbitrary evidence strings.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `require_cid: bool` - Flag indicating whether to enable or require require cid.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_require_evidence_cid(
         env: Env,
         admin: Address,
@@ -3321,6 +3874,15 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Sets dispute threshold.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_dispute_threshold(env: Env, admin: Address, amount: i128) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -3441,6 +4003,16 @@ impl RefundManager {
     /// Operator-only: set or update the review deadline for an open or under-review dispute.
     /// Emits DISPUTE/DEADLINE_SET. If the current ledger time already exceeds the deadline,
     /// the dispute is also flagged as escalated and DISPUTE/ESCALATED is emitted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `deadline: u64` - Numeric deadline value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn set_dispute_deadline(
         env: Env,
         operator: Address,
@@ -3501,6 +4073,16 @@ impl RefundManager {
     /// Operator: configure multi-party payout splits for a marketplace dispute.
     /// Splits must sum to exactly `dispute.amount`; validated again at
     /// resolution time in case the dispute amount changes. (Issue #446)
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `splits: Vec<SettlementSplit>` - Recipient addresses and amounts for splitting the settlement.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::InvalidSplitSum`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn set_dispute_payout_splits(
         env: Env,
         operator: Address,
@@ -3579,12 +4161,28 @@ impl RefundManager {
     }
 
     /// Anyone may call this to trigger escalation after a dispute review deadline elapses.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeNotFound`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn check_dispute_deadline(env: Env, dispute_id: String) -> Result<(), Error> {
         let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
         let _ = Self::maybe_escalate_dispute_due_to_deadline(&env, &dispute_id, &mut dispute)?;
         Ok(())
     }
 
+    /// Escalates expired disputes.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_ids: Vec<String>` - Collection of dispute ids values to process or return.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn escalate_expired_disputes(env: Env, dispute_ids: Vec<String>) -> u32 {
         let mut count = 0;
         let mut i = 0;
@@ -3608,6 +4206,18 @@ impl RefundManager {
         count
     }
 
+    /// Resolves dispute with refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `resolution_notes: String` - Identifier or text value used for resolution notes.
+    /// - `operator_signature: String` - Identifier or text value used for operator signature.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::InvalidSplitSum`, `Error::MissingReceiptHash`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Reentrancy`, `Error::RefundAlreadyProcessed`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::RefundExpired`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_paused`, `Self::get_dispute_internal`, `Self::create_refund_internal`, `Self::process_refund_internal`.
     pub fn resolve_dispute_with_refund(
         env: Env,
         operator: Address,
@@ -3785,6 +4395,18 @@ impl RefundManager {
         Ok(refund_id)
     }
 
+    /// Rejects dispute.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `resolution_notes: String` - Identifier or text value used for resolution notes.
+    /// - `operator_signature: String` - Identifier or text value used for operator signature.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::InputTooLong`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn reject_dispute(
         env: Env,
         operator: Address,
@@ -3901,6 +4523,13 @@ impl RefundManager {
     }
 
     /// Retrieve the persisted operator note for a dispute.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeNotFound`.
     pub fn get_dispute_operator_note(
         env: Env,
         dispute_id: String,
@@ -3928,6 +4557,19 @@ impl RefundManager {
     /// * `signature_buyer`    – Ed25519 signature from the buyer (64 bytes).
     /// * `merchant_pubkey`    – Ed25519 public key of the merchant (32 bytes).
     /// * `signature_merchant` – Ed25519 signature from the merchant (64 bytes).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `settlement_amount: i128` - Numeric settlement amount value used by the operation.
+    /// - `buyer_pubkey: BytesN<32>` - Value used to configure or filter buyer pubkey.
+    /// - `signature_buyer: BytesN<64>` - Value used to configure or filter signature buyer.
+    /// - `merchant_pubkey: BytesN<32>` - Value used to configure or filter merchant pubkey.
+    /// - `signature_merchant: BytesN<64>` - Value used to configure or filter signature merchant.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::DuplicateIdempotencyKey`, `Error::InputTooLong`, `Error::InvalidAmount`, `Error::MissingReceiptHash`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Reentrancy`, `Error::RefundAlreadyProcessed`, `Error::RefundCooldownNotElapsed`, `Error::RefundExceedsPayment`, `Error::RefundExpired`, `Error::RefundNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`, `Self::create_refund_internal`, `Self::process_refund_internal`.
     pub fn settle_dispute_collaboratively(
         env: Env,
         dispute_id: String,
@@ -4028,6 +4670,13 @@ impl RefundManager {
     }
 
     /// Retrieve the collaborative settlement record for a dispute.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeNotFound`.
     pub fn get_collaborative_settlement(
         env: Env,
         dispute_id: String,
@@ -4039,6 +4688,13 @@ impl RefundManager {
     }
 
     /// Issue #184: Get the current dispute count for a merchant.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
         env.storage()
             .persistent()
@@ -4047,6 +4703,13 @@ impl RefundManager {
     }
 
     /// Issue #184: Get the current confirmed payment count for a merchant.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_payment_count(env: Env, merchant_id: Address) -> u64 {
         env.storage()
             .persistent()
@@ -4102,6 +4765,17 @@ impl RefundManager {
     /// * `dispute_id`  – Dispute to vote on.
     /// * `token`       – Governance token contract address.
     /// * `amount`      – Amount to lock (must be > 0).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `arbitrator: Address` - Address of arbitrator participating in the operation.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `token: Address` - Address of token participating in the operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::InvalidAmount`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn lock_stake(
         env: Env,
         arbitrator: Address,
@@ -4159,6 +4833,16 @@ impl RefundManager {
     /// * `arbitrator` – Voting arbitrator; must sign.
     /// * `dispute_id` – Dispute to vote on.
     /// * `choice`     – `VoteChoice::Favour` or `VoteChoice::Against`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `arbitrator: Address` - Address of arbitrator participating in the operation.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `choice: VoteChoice` - Value used to configure or filter choice.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn cast_vote(
         env: Env,
         arbitrator: Address,
@@ -4238,6 +4922,17 @@ impl RefundManager {
     /// * `dispute_id`  – Dispute to finalize.
     /// * `token`       – Governance token used for stakes.
     /// * `arbitrators` – List of all arbitrators who participated.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `token: Address` - Address of token participating in the operation.
+    /// - `arbitrators: Vec<Address>` - Address of arbitrators participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn finalize_dispute_vote(
         env: Env,
         operator: Address,
@@ -4380,6 +5075,16 @@ impl RefundManager {
     /// * `arbitrator` – Must hold the `ARBITRATOR` role; must sign.
     /// * `dispute_id` – Dispute to vote on; must currently be `UnderReview`.
     /// * `choice`     – `ArbitratorVoteChoice::Approve` or `::Reject`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `arbitrator: Address` - Address of arbitrator participating in the operation.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `choice: ArbitratorVoteChoice` - Value used to configure or filter choice.
+    ///
+    /// # Errors
+    /// Returns `Error::AlreadyVoted`, `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`, `Self::auto_resolve_dispute`.
     pub fn vote_dispute(
         env: Env,
         arbitrator: Address,
@@ -4488,6 +5193,13 @@ impl RefundManager {
     }
 
     /// Get the current vote tally for a dispute.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_vote_tally(env: Env, dispute_id: String) -> VoteTally {
         env.storage()
             .persistent()
@@ -4500,12 +5212,29 @@ impl RefundManager {
             })
     }
 
+    /// Returns the dispute.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeNotFound`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, Error> {
         let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
         let _ = Self::maybe_escalate_dispute_due_to_deadline(&env, &dispute_id, &mut dispute)?;
         Ok(dispute)
     }
 
+    /// Returns the disputes associated with a payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// No errors are generated directly by this function.
     pub fn get_payment_disputes(env: Env, payment_id: String) -> Result<Vec<Dispute>, Error> {
         let dispute_ids = Self::get_payment_disputes_internal(&env, &payment_id);
         let mut disputes = vec![&env];
@@ -4518,6 +5247,14 @@ impl RefundManager {
     }
 
     /// Issue #575: Get disputes for a payment filtered by dispute status.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `status: DisputeStatus` - Payment or dispute status used to filter or update records.
+    ///
+    /// # Errors
+    /// No errors are generated directly by this function.
     pub fn get_payment_disputes_by_status(
         env: Env,
         payment_id: String,
@@ -4535,6 +5272,13 @@ impl RefundManager {
         Ok(disputes)
     }
 
+    /// Returns the dispute summary.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_dispute_summary(env: Env) -> DisputeSummary {
         let total_count: u64 = env
             .storage()
@@ -4576,6 +5320,16 @@ impl RefundManager {
     }
 
     /// Issue #178: Submit an arbitrator vote on a dispute resolution.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    /// - `arbitrator: Address` - Address of arbitrator participating in the operation.
+    /// - `vote: ArbitratorVoteChoice` - Value used to configure or filter vote.
+    ///
+    /// # Errors
+    /// Returns `Error::DisputeAlreadyResolved`, `Error::DisputeNotFound`, `Error::InvalidAmount`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn submit_arbitrator_vote(
         env: Env,
         dispute_id: String,
@@ -4636,6 +5390,14 @@ impl RefundManager {
     }
 
     /// Issue #178: Check arbitrator voting threshold and auto-resolve if met.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `dispute_id: String` - Identifier of the dispute being queried or processed.
+    ///
+    /// # Errors
+    /// Returns `Error::ArbitrationVotingThresholdNotMet`, `Error::DisputeNotFound`.
+    /// Also propagates errors from `Self::get_dispute_internal`.
     pub fn check_arbitration_threshold(env: Env, dispute_id: String) -> Result<bool, Error> {
         let dispute = Self::get_dispute_internal(&env, &dispute_id)?;
 
@@ -4705,6 +5467,21 @@ impl RefundManager {
     }
 
     // Subscription management functions
+    /// Creates a subscription plan.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    /// - `name: String` - Identifier or text value used for name.
+    /// - `description: String` - Identifier or text value used for description.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    /// - `billing_interval: BillingInterval` - Billing cadence for the subscription plan.
+    /// - `trial_days: Option<u32>` - Optional trial days value used when provided.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::TrialTooLong`, `Error::Unauthorized`.
     pub fn create_subscription_plan(
         env: Env,
         merchant: Address,
@@ -4759,6 +5536,19 @@ impl RefundManager {
     }
 
     /// Create a billing plan with an explicit interval in seconds.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    /// - `name: String` - Identifier or text value used for name.
+    /// - `description: String` - Identifier or text value used for description.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    /// - `interval_secs: u64` - Length of the billing interval in seconds.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -4800,6 +5590,14 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Returns the subscription plan.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
     pub fn get_subscription_plan(env: Env, plan_id: String) -> Result<SubscriptionPlan, Error> {
         env.storage()
             .persistent()
@@ -4808,10 +5606,27 @@ impl RefundManager {
     }
 
     /// Alias for `get_subscription_plan`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_subscription_plan`.
     pub fn get_plan(env: Env, plan_id: String) -> Result<SubscriptionPlan, Error> {
         Self::get_subscription_plan(env, plan_id)
     }
 
+    /// Deactivates subscription plan.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`, `Error::Unauthorized`.
     pub fn deactivate_subscription_plan(
         env: Env,
         merchant: Address,
@@ -4840,6 +5655,18 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Creates a subscription to a plan.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    /// - `max_payments: Option<u32>` - Optional max payments value used when provided.
+    /// - `affiliate: Option<Address>` - Address of affiliate participating in the operation.
+    /// - `affiliate_fee_bps: Option<u32>` - Optional affiliate fee bps value used when provided.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`.
     pub fn subscribe(
         env: Env,
         payer: Address,
@@ -4935,6 +5762,15 @@ impl RefundManager {
     }
 
     /// Subscribe to a plan using a caller-supplied subscription identifier.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyExists`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`.
     pub fn subscribe_to_plan(
         env: Env,
         payer: Address,
@@ -5030,10 +5866,27 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Returns the subscription.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn get_subscription(env: Env, subscription_id: String) -> Result<Subscription, Error> {
         Self::get_subscription_internal(&env, &subscription_id)
     }
 
+    /// Returns the subscriptions associated with a payer.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no payer subscriptions match; no errors are returned.
     pub fn get_payer_subscriptions(env: Env, payer: Address) -> Vec<Subscription> {
         let subscription_ids = Self::get_payer_subscriptions_internal(&env, &payer);
         let mut subscriptions = vec![&env];
@@ -5054,6 +5907,16 @@ impl RefundManager {
     /// page always contains `limit` live subscribers when that many remain.
     ///
     /// Used by merchants for plan-level analytics and bulk notifications.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `plan_id: String` - Identifier of the subscription plan being queried or changed.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    /// - `include_cancelled: bool` - Flag indicating whether to enable or require include cancelled.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no plan subscribers match; no errors are returned.
     pub fn get_plan_subscribers(
         env: Env,
         plan_id: String,
@@ -5094,6 +5957,16 @@ impl RefundManager {
         result
     }
 
+    /// Pauses subscription.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn pause_subscription(
         env: Env,
         payer: Address,
@@ -5123,6 +5996,17 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Pauses with resume date.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    /// - `resume_timestamp: u64` - Numeric resume timestamp value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidResumeTimestamp`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn pause_with_resume_date(
         env: Env,
         payer: Address,
@@ -5182,6 +6066,16 @@ impl RefundManager {
     /// * `operator`        – Oracle or settlement operator; must sign.
     /// * `subscription_id` – Subscription to charge.
     /// * `token`           – Token contract to pull payment from.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    /// - `token: Address` - Address of token participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`, `Error::SubscriptionInGracePeriod`, `Error::SubscriptionRetryExhausted`, `Error::TrialActive`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn charge_subscription(
         env: Env,
         operator: Address,
@@ -5439,6 +6333,15 @@ impl RefundManager {
     }
 
     /// Trigger a recurring subscription charge when the billing date is due.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::SubscriptionInGracePeriod`, `Error::SubscriptionRetryExhausted`, `Error::TrialActive`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`, `Self::charge_subscription`.
     pub fn process_subscription(
         env: Env,
         operator: Address,
@@ -5470,6 +6373,16 @@ impl RefundManager {
         Self::charge_subscription(env, operator, subscription_id, token)
     }
 
+    /// Resumes subscription.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn resume_subscription(
         env: Env,
         payer: Address,
@@ -5508,6 +6421,16 @@ impl RefundManager {
     /// When `refund_remaining` is true, a payment was made in the current billing
     /// period, and the admin policy `allow_prorated_refunds` is enabled, a pending
     /// refund is created for the unused portion of the period (by whole days).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer_or_merchant: Address` - Address of payer or merchant participating in the operation.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    /// - `refund_remaining: bool` - Flag indicating whether to enable or require refund remaining.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn cancel_subscription(
         env: Env,
         payer_or_merchant: Address,
@@ -5580,6 +6503,14 @@ impl RefundManager {
     }
 
     /// Admin policy: enable or disable prorated refunds on subscription cancel.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `allow: bool` - Flag indicating whether to enable or require allow.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_allow_prorated_refunds(env: Env, admin: Address, allow: bool) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -5592,6 +6523,12 @@ impl RefundManager {
     }
 
     /// Query whether prorated subscription refunds are allowed.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_allow_prorated_refunds(env: Env) -> bool {
         env.storage()
             .persistent()
@@ -5698,6 +6635,15 @@ impl RefundManager {
 
     /// Admin override to reactivate a subscription that was cancelled due to max retries.
     /// Resets retry_count to 0 and reschedules the next payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`.
     pub fn admin_reactivate_subscription(
         env: Env,
         admin: Address,
@@ -5752,6 +6698,18 @@ impl RefundManager {
     /// * `units_used`       – Number of usage units consumed this period.
     /// * `unit_price`       – Price per unit in the subscription token's smallest unit.
     /// * `token`            – Token contract address used for the charge.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    /// - `units_used: i128` - Numeric units used value used by the operation.
+    /// - `unit_price: i128` - Numeric unit price value used by the operation.
+    /// - `token: Address` - Address of token participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::InvalidStatusTransition`, `Error::PaymentNotFound`, `Error::SubscriptionInGracePeriod`, `Error::SubscriptionRetryExhausted`, `Error::TrialActive`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::get_subscription_internal`, `Self::charge_subscription`.
     pub fn submit_usage_metrics(
         env: Env,
         operator: Address,
@@ -5837,6 +6795,15 @@ impl RefundManager {
     /// recorded within `[from_timestamp, to_timestamp]` (inclusive),
     /// oldest first. Returns an empty vector if none were recorded, or if
     /// the subscription itself doesn't exist.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `subscription_id: String` - Identifier of the subscription being queried or changed.
+    /// - `from_timestamp: u64` - Numeric from timestamp value used by the operation.
+    /// - `to_timestamp: u64` - Numeric to timestamp value used by the operation.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no usage metrics match; no errors are returned.
     pub fn get_usage_metrics(
         env: Env,
         subscription_id: String,
@@ -5935,6 +6902,13 @@ impl RefundManager {
 
     /// Issue #302: Process due subscriptions - iterate ActiveSubscriptions and
     /// create a payment record for each due subscription.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn process_due_subscriptions(env: Env, operator: Address) -> Result<u32, Error> {
         operator.require_auth();
 
@@ -6161,6 +7135,15 @@ impl RefundManager {
     /// upgrade is queued as a `PendingTimelockAction` and can only be executed
     /// after the configured delay (default 48 hours) via
     /// `execute_timelocked_action`.  Returns the action ID.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `new_wasm_hash: BytesN<32>` - Value used to configure or filter new wasm hash.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentProcessor::enqueue_timelocked_action`.
     pub fn upgrade_contract(
         env: Env,
         admin: Address,
@@ -6188,6 +7171,12 @@ impl RefundManager {
 impl PaymentProcessor {
     /// Returns the current contract version string from persistent storage.
     /// Falls back to INITIAL_CONTRACT_VERSION if not set.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn version(env: Env) -> String {
         env.storage()
             .persistent()
@@ -6196,12 +7185,24 @@ impl PaymentProcessor {
     }
 
     /// Alias for version() — returns the current contract version string.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_version(env: Env) -> String {
         Self::version(env)
     }
 
     /// Issue #683: Return a summary of key contract metrics for dashboards
     /// and monitoring. No authentication required — this is a public read.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_contract_health(env: Env) -> ContractHealth {
         let version = Self::version(env.clone());
         let is_paused = Self::is_paused(env.clone());
@@ -6248,6 +7249,15 @@ impl PaymentProcessor {
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
     /// `LONG_LIVE_TTL` so metadata survives archival.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `key: Symbol` - Metadata key whose value is read or changed.
+    /// - `value: String` - Metadata value to store for the specified key.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_contract_metadata(
         env: Env,
         admin: Address,
@@ -6274,6 +7284,13 @@ impl PaymentProcessor {
 
     /// Public read of an on-chain metadata entry set via `set_contract_metadata`
     /// (issue #667). Returns `None` if the key was never set.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `key: Symbol` - Metadata key whose value is read or changed.
+    ///
+    /// # Errors
+    /// Returns `None` when no contract metadata is available; no errors are returned.
     pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
         env.storage()
             .instance()
@@ -6306,6 +7323,15 @@ impl PaymentProcessor {
         String::from_str(env, s)
     }
 
+    /// Initializes payment processor.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAddress`.
+    /// Also propagates errors from `Self::validate_init_admin`.
     pub fn initialize_payment_processor(env: Env, admin: Address) -> Result<(), Error> {
         Self::validate_init_admin(&env, admin.clone())?;
         AccessControl::initialize(&env, admin);
@@ -6353,6 +7379,15 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets merchant registry address.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `registry_address: Address` - Address of the merchant registry contract.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_merchant_registry_address(
         env: Env,
         admin: Address,
@@ -6372,6 +7407,14 @@ impl PaymentProcessor {
 
     /// Admin: configure the FX oracle used to snapshot rates during
     /// `verify_payment` (Issue #304).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `fx_oracle: Address` - Address of fx oracle participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_fx_oracle(env: Env, admin: Address, fx_oracle: Address) -> Result<(), Error> {
         admin.require_auth();
 
@@ -6395,6 +7438,14 @@ impl PaymentProcessor {
     /// # Arguments
     /// * `admin` – Must hold the admin role.
     /// * `bps`   – Fee in basis points (e.g. 100 = 1 %). Must be 0–10 000.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `bps: i128` - Fee rate in basis points.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_fee_rate(env: Env, admin: Address, bps: i128) -> Result<String, Error> {
         admin.require_auth();
 
@@ -6411,6 +7462,14 @@ impl PaymentProcessor {
     /// Admin-only: enable or disable automatic pending refund creation for overpaid payments.
     /// When enabled (default), any payment verified as Overpaid will automatically create
     /// a pending refund for the excess amount and emit a REFUND/AUTO_CREATED event.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `enabled: bool` - Flag indicating whether to enable or require enabled.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_auto_refund_overpayment(
         env: Env,
         admin: Address,
@@ -6428,6 +7487,12 @@ impl PaymentProcessor {
 
     /// Check whether automatic refund creation for overpaid payments is enabled.
     /// Defaults to true if not explicitly configured.
+    ///
+    /// # Parameters
+    /// - `env: &Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_auto_refund_overpayment(env: &Env) -> bool {
         env.storage()
             .persistent()
@@ -6437,6 +7502,14 @@ impl PaymentProcessor {
 
     /// Return the accumulated treasury balance collected via settlement fees
     /// and platform fees (when no custom fee_recipient).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `min_secs: u64` - Numeric min secs value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_min_payment_duration_secs(
         env: Env,
         admin: Address,
@@ -6458,6 +7531,15 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets max payment duration secs.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `max_secs: u64` - Numeric max secs value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_max_payment_duration_secs(
         env: Env,
         admin: Address,
@@ -6481,6 +7563,12 @@ impl PaymentProcessor {
 
     /// Return the accumulated treasury balance collected via settlement fees.
     /// Uses the default USDC token for backward compatibility.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_treasury_balance(env: Env) -> i128 {
         let usdc_token: Address = env
             .storage()
@@ -6520,6 +7608,14 @@ impl PaymentProcessor {
     }
 
     /// Return a page of treasury withdrawal history (newest-first).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no treasury withdrawal history match; no errors are returned.
     pub fn get_treasury_withdrawal_history(
         env: Env,
         offset: u32,
@@ -6580,6 +7676,14 @@ impl PaymentProcessor {
     /// entries; queries for periods older than the retained window will
     /// undercount. A follow-up should move this to time-bucketed storage
     /// (e.g. per-day accumulator keys) if long-horizon reporting is needed.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `from_ts: u64` - Numeric from ts value used by the operation.
+    /// - `to_ts: u64` - Numeric to ts value used by the operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_platform_fee_report(env: Env, from_ts: u64, to_ts: u64) -> PlatformFeeReport {
         let history: Vec<FeeCollectionRecord> = env
             .storage()
@@ -6611,6 +7715,15 @@ impl PaymentProcessor {
 
     /// Admin withdrawal of accumulated treasury fees. Emits `TREASURY/WITHDRAWN`
     /// with `(amount, destination)` and appends to the paginated history log.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    /// - `destination: Address` - Address of destination participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InsufficientTreasuryBalance`, `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn withdraw_treasury(
         env: Env,
         admin: Address,
@@ -6684,6 +7797,16 @@ impl PaymentProcessor {
     /// * `expires_at` – Unix ledger timestamp after which the code is invalid.
     /// * `max_uses` – Maximum total payments that may use this code. Must be `>= 1`
     ///   when creating a new code; may be `0` when revoking an existing one.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `code: String` - Identifier or text value used for code.
+    /// - `expires_at: u64` - Unix timestamp at which the request expires.
+    /// - `max_uses: u32` - Numeric max uses value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::Unauthorized`.
     pub fn add_fee_waiver_code(
         env: Env,
         admin: Address,
@@ -6724,6 +7847,16 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets global rate limit.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `window_secs: u64` - Numeric window secs value used by the operation.
+    /// - `max_per_window: u32` - Numeric max per window value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_global_rate_limit(
         env: Env,
         admin: Address,
@@ -6744,6 +7877,17 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets merchant rate limit.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `window_secs: u64` - Numeric window secs value used by the operation.
+    /// - `max_per_window: u32` - Numeric max per window value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_merchant_rate_limit(
         env: Env,
         admin: Address,
@@ -6765,6 +7909,16 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Grants role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn grant_role(
         env: Env,
         admin: Address,
@@ -6774,6 +7928,15 @@ impl PaymentProcessor {
         AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
+    /// Grants merchant role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn grant_merchant_role(
         env: Env,
         admin: Address,
@@ -6783,6 +7946,16 @@ impl PaymentProcessor {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Revokes role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn revoke_role(
         env: Env,
         admin: Address,
@@ -6793,6 +7966,15 @@ impl PaymentProcessor {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Revokes merchant role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn revoke_merchant_role(
         env: Env,
         admin: Address,
@@ -6803,16 +7985,40 @@ impl PaymentProcessor {
     }
 
     /// Returns whether `account` holds `role` on this contract (issue #401).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    /// - `account: Address` - Account address whose role or status is queried or changed.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         AccessControl::has_role(&env, &role, &account)
     }
 
     /// Returns all addresses currently holding `role` on this contract (issue #401).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `role: Symbol` - Role whose membership or permissions are being queried or changed.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no role members match; no errors are returned.
     pub fn get_role_members(env: Env, role: Symbol) -> Vec<Address> {
         AccessControl::get_role_members(&env, &role)
     }
 
     /// Set the global paused state (admin only). When paused, create_payment, verify_payment, and cancel_payment are blocked.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `paused: bool` - Flag indicating whether to enable or require paused.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_global_pause(
         env: Env,
         admin: Address,
@@ -6854,6 +8060,15 @@ impl PaymentProcessor {
     /// Settlement, verification, cancellation, and refund operations continue to work
     /// normally. This is narrower than `set_global_pause`, which halts all operations.
     /// Query the current state with `get_creation_pause_info`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `paused: bool` - Flag indicating whether to enable or require paused.
+    /// - `reason: String` - Reason text recorded with the request or decision.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_creation_pause(
         env: Env,
         admin: Address,
@@ -6890,6 +8105,15 @@ impl PaymentProcessor {
     }
 
     /// Legacy wrapper for set_global_pause
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `paused: bool` - Flag indicating whether to enable or require paused.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `Self::set_global_pause`.
     pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), Error> {
         let reason = if paused {
             String::from_str(&env, "Legacy pause")
@@ -6909,6 +8133,12 @@ impl PaymentProcessor {
     /// payment intake (e.g. during a maintenance window) while still allowing in-flight
     /// payments to be confirmed, settled, and refunded. Use `set_global_pause` instead when
     /// all operations need to be halted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_creation_pause_info(env: Env) -> PauseState {
         env.storage()
             .persistent()
@@ -6922,6 +8152,12 @@ impl PaymentProcessor {
     }
 
     /// Get the current consolidated pause info.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_pause_info(env: Env) -> PauseInfo {
         let empty_reason = String::from_str(&env, "");
         let default_state = PauseState {
@@ -6947,6 +8183,12 @@ impl PaymentProcessor {
     }
 
     /// Get the current global paused state.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .persistent()
@@ -7127,6 +8369,15 @@ impl PaymentProcessor {
 
     /// Set per-merchant min/max payment amount limits (merchant self-service).
     /// Pass None to clear a bound. Requires the caller to hold the MERCHANT role.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `min: Option<i128>` - Optional min value used when provided.
+    /// - `max: Option<i128>` - Optional max value used when provided.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_merchant_amount_limits(
         env: Env,
         merchant_id: Address,
@@ -7150,6 +8401,13 @@ impl PaymentProcessor {
     }
 
     /// Read per-merchant amount limits.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `None` when no merchant amount limits is available; no errors are returned.
     pub fn get_merchant_amount_limits(env: Env, merchant_id: Address) -> Option<AmountLimits> {
         env.storage()
             .persistent()
@@ -7158,6 +8416,15 @@ impl PaymentProcessor {
 
     /// Set global min/max payment amount limits (admin only).
     /// Pass None to clear a bound.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `min: Option<i128>` - Optional min value used when provided.
+    /// - `max: Option<i128>` - Optional max value used when provided.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_global_amount_limits(
         env: Env,
         admin: Address,
@@ -7181,6 +8448,12 @@ impl PaymentProcessor {
     }
 
     /// Read global amount limits.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns `None` when no global amount limits is available; no errors are returned.
     pub fn get_global_amount_limits(env: Env) -> Option<AmountLimits> {
         env.storage().persistent().get(&DataKey::GlobalAmountLimits)
     }
@@ -7210,6 +8483,15 @@ impl PaymentProcessor {
 
     /// Set the USDC token address used as the default settlement token.
     /// Also adds it to the supported tokens whitelist.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `token_address: Address` - Address of the token contract used for the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `Self::allow_token`.
     pub fn set_usdc_token(env: Env, admin: Address, token_address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -7223,6 +8505,14 @@ impl PaymentProcessor {
     }
 
     /// Allow or disallow a token address for use in payments (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `token_address: Address` - Address of the token contract used for the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn allow_token(env: Env, admin: Address, token_address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -7247,6 +8537,15 @@ impl PaymentProcessor {
     }
     /// Issue #483: Set the currency symbol for an allowed token (e.g., USDC, EURC, BRLT).
     /// Must be called after allow_token() to establish token-to-currency mapping.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `token_address: Address` - Address of the token contract used for the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`, `Error::UnsupportedToken`.
     pub fn set_token_currency(
         env: Env,
         admin: Address,
@@ -7273,6 +8572,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #301: Remove a token from the supported tokens list (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `token_address: Address` - Address of the token contract used for the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn remove_supported_token(
         env: Env,
         admin: Address,
@@ -7310,6 +8617,12 @@ impl PaymentProcessor {
     }
 
     /// Issue #301: Return the list of supported token addresses.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no supported tokens match; no errors are returned.
     pub fn get_supported_tokens(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -7318,6 +8631,15 @@ impl PaymentProcessor {
     }
 
     /// Issue #303: Set per‑tier KYC payment limits (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `tier: KycTier` - Value used to configure or filter tier.
+    /// - `max_amount: i128` - Numeric max amount value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_kyc_tier_limits(
         env: Env,
         admin: Address,
@@ -7337,6 +8659,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #303: Set the FX oracle contract address (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `oracle_address: Address` - Address of oracle participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_fx_oracle_address(
         env: Env,
         admin: Address,
@@ -7354,6 +8684,14 @@ impl PaymentProcessor {
     }
 
     /// Add an address to the global blacklist (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `address: Address` - Address whose status or configuration is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn add_to_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -7366,6 +8704,14 @@ impl PaymentProcessor {
     }
 
     /// Remove an address from the global blacklist (admin only).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `address: Address` - Address whose status or configuration is queried or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -7378,6 +8724,13 @@ impl PaymentProcessor {
     }
 
     /// Returns true when an address is globally blacklisted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `address: Address` - Address whose status or configuration is queried or changed.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn is_blacklisted(env: Env, address: Address) -> bool {
         Self::is_blacklisted_address(&env, &address)
     }
@@ -7490,6 +8843,14 @@ impl PaymentProcessor {
         }
     }
 
+    /// Returns whether a token is allowed for payment processing.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `token_address: Address` - Address of the token contract used for the operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn is_token_allowed(env: Env, token_address: Address) -> bool {
         env.storage()
             .persistent()
@@ -7498,7 +8859,31 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
+    /// Creates a payment request from the supplied payment arguments.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `args: CreatePaymentArgs` - Structured arguments that configure the payment request.
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// stellar contract invoke --id $PAYMENT_PROCESSOR_ID --network testnet --source $MERCHANT_ADDRESS -- create_payment --args '{"payment_id":"payment-001","merchant_id":"<MERCHANT_ADDRESS>","amount":1000000000,"currency":"USDC","deposit_address":"<DEPOSIT_ADDRESS>","expires_at":1900000000,"duration_secs":null,"memo":null,"memo_type":null,"token_address":null,"client_token":null,"idempotency_key":null,"metadata_hash":null,"metadata":null,"fee_waiver_code":null,"retry_of_payment_id":null,"payer_muxed_id":null,"payer":null,"allow_partial":null,"tip_enabled":false}'
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `Error::AmountAboveMax`, `Error::AmountBelowMin`, `Error::ContractPaused`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidMemoId`, `Error::InvalidMemoType`, `Error::InvalidPaymentId`, `Error::KycLimitExceeded`, `Error::MemoTooLong`, `Error::PayerNotWhitelisted`, `Error::PaymentNotFound`, `Error::RateLimitExceeded`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// Also propagates errors from `Self::require_creation_not_paused`, `Self::require_not_blacklisted`, `Self::enforce_amount_limits`, `utils::validate_metadata`, `Self::validate_memo`, `Self::enforce_create_payment_rate_limit`, `Self::get_payment_internal`.
     pub fn create_payment(env: Env, args: CreatePaymentArgs) -> Result<PaymentCharge, Error> {
+        if args.amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if let Some(expires_at) = args.expires_at {
+            if expires_at <= env.ledger().timestamp() {
+                return Err(Error::InvalidExpiry);
+            }
+        }
+
         Self::require_creation_not_paused(&env)?;
         meta_transaction::require_merchant_auth(&env, &args.merchant_id);
         Self::require_not_blacklisted(&env, &args.merchant_id)?;
@@ -7575,10 +8960,6 @@ impl PaymentProcessor {
                     return Err(Error::Unauthorized);
                 }
             }
-        }
-
-        if args.amount <= 0 {
-            return Err(Error::InvalidAmount);
         }
 
         Self::enforce_amount_limits(&env, &args.merchant_id, args.amount)?;
@@ -7665,9 +9046,6 @@ impl PaymentProcessor {
 
         let resolved_expires_at = match args.expires_at {
             Some(ts) => {
-                if ts <= now {
-                    return Err(Error::InvalidExpiry);
-                }
                 let duration = ts.saturating_sub(now);
                 if duration < min_duration || duration > max_duration {
                     return Err(Error::InvalidExpiry);
@@ -7798,6 +9176,15 @@ impl PaymentProcessor {
     /// Creates multiple payment charges in a single transaction.
     /// Reverts all if any element violates validation rules.
     #[allow(deprecated)]
+    /// Creates multiple payment requests as a batch.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `args_list: Vec<CreatePaymentArgs>` - Collection of args list values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::AmountAboveMax`, `Error::AmountBelowMin`, `Error::BatchContainsDuplicates`, `Error::BatchTooLarge`, `Error::ContractPaused`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidPaymentId`, `Error::PaymentAlreadyExists`, `Error::RateLimitExceeded`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// Also propagates errors from `Self::require_creation_not_paused`, `Self::require_not_blacklisted`, `Self::enforce_amount_limits`, `utils::validate_metadata`, `Self::enforce_create_payment_batch_rate_limit`.
     pub fn create_payments_batch(
         env: Env,
         args_list: Vec<CreatePaymentArgs>,
@@ -8077,6 +9464,16 @@ impl PaymentProcessor {
     /// Emits a single PAYMENT/BATCH_CREATED event containing all payment IDs,
     /// plus individual PAYMENT/CREATED events for each created payment.
     #[allow(deprecated)]
+    /// Creates a payment request batch.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `payments: Vec<PaymentRequest>` - Collection of payments values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::AmountAboveMax`, `Error::AmountBelowMin`, `Error::BatchContainsDuplicates`, `Error::BatchTooLarge`, `Error::ContractPaused`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidPaymentId`, `Error::PaymentAlreadyExists`, `Error::RateLimitExceeded`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// Also propagates errors from `Self::require_creation_not_paused`, `Self::require_not_blacklisted`, `Self::enforce_amount_limits`, `utils::validate_metadata`, `Self::enforce_create_payment_batch_rate_limit`.
     pub fn create_payment_batch(
         env: Env,
         merchant_id: Address,
@@ -8355,6 +9752,26 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
+    /// Verifies a payment and updates it with the confirmed deposit details.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `oracle: Address` - Address of the oracle verifying the payment.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `transaction_hash: BytesN<32>` - Hash identifying the on-chain transaction to verify.
+    /// - `payer_address: Address` - Address of the payer whose payment is being verified.
+    /// - `amount_received: i128` - Amount received on-chain for the payment.
+    /// - `payer_muxed_id: Option<u64>` - Optional muxed-account ID expected for the payer.
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// stellar contract invoke --id $PAYMENT_PROCESSOR_ID --network testnet --source $ORACLE_ADDRESS -- verify_payment --oracle $ORACLE_ADDRESS --payment_id "payment-001" --transaction_hash "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]" --payer_address $PAYER_ADDRESS --amount_received 1000000000
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::PaymentAlreadyProcessed`, `Error::PaymentExpired`, `Error::PaymentNotFound`, `Error::StaleOracleRate`, `Error::TierVolumeLimitExceeded`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_paused`, `Self::require_not_blacklisted`, `Self::get_payment_internal`, `Self::enforce_tier_volume_cap`, `payment_state_machine::transition_status`.
     pub fn verify_payment(
         env: Env,
         oracle: Address,
@@ -8743,6 +10160,19 @@ impl PaymentProcessor {
     #[allow(deprecated)]
     /// Issue #763: Alias for verify_payment matching on-chain payment confirmation convention.
     /// Rejects confirmation if current ledger timestamp exceeds payment.expires_at, returning PaymentExpired.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `oracle: Address` - Address of the oracle verifying the payment.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `transaction_hash: BytesN<32>` - Hash identifying the on-chain transaction to verify.
+    /// - `payer_address: Address` - Address of the payer whose payment is being verified.
+    /// - `amount_received: i128` - Amount received on-chain for the payment.
+    /// - `payer_muxed_id: Option<u64>` - Optional muxed-account ID expected for the payer.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::PaymentAlreadyProcessed`, `Error::PaymentExpired`, `Error::PaymentNotFound`, `Error::StaleOracleRate`, `Error::TierVolumeLimitExceeded`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::verify_payment`.
     pub fn confirm_payment(
         env: Env,
         oracle: Address,
@@ -8763,6 +10193,15 @@ impl PaymentProcessor {
         )
     }
 
+    /// Verifies a batch of payments against the supplied transaction details.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `verifications: Vec<VerifyPaymentArgs>` - Collection of verifications values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::BatchTooLarge`.
     pub fn verify_payment_batch(
         env: Env,
         operator: Address,
@@ -8791,6 +10230,15 @@ impl PaymentProcessor {
     /// Issue #471: Allow a merchant to accept a PartiallyPaid payment at the received amount.
     /// Moves the payment from PartiallyPaid to Confirmed, using the received amount as the
     /// effective payment amount. No refund is created for the difference.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::get_payment_internal`.
     pub fn accept_partial_payment(
         env: Env,
         merchant_id: Address,
@@ -8833,6 +10281,16 @@ impl PaymentProcessor {
     /// This is a declaration that the payer will send additional funds off-chain.
     /// The payment status is moved to Pending so a new verify_payment call can
     /// confirm it with the combined amount.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payer: Address` - Address of the payer associated with this operation.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `top_up_amount: i128` - Numeric top up amount value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_blacklisted`, `Self::get_payment_internal`.
     pub fn complete_partial_payment(
         env: Env,
         payer: Address,
@@ -8875,6 +10333,16 @@ impl PaymentProcessor {
     /// Issue #482: Create a retry payment for an expired or failed original payment.
     /// Returns the payment_id of the newly created payment, linked to the original.
     /// Maximum retry chain depth is 3.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `original_payment_id: String` - Identifier of the original payment associated with this operation.
+    /// - `new_expires_at: u64` - Numeric new expires at value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::InvalidExpiry`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::RetryChainTooDeep`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_creation_not_paused`, `Self::require_not_blacklisted`, `Self::get_payment_internal`.
     pub fn retry_payment(
         env: Env,
         merchant_id: Address,
@@ -8983,12 +10451,30 @@ impl PaymentProcessor {
         Ok(new_payment_id)
     }
 
+    /// Returns the payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_payment_internal`.
     pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, Error> {
         let payment = Self::get_payment_internal(&env, &payment_id)?;
         Self::extend_payment_ttl(&env, &payment_id, &payment.status);
         Ok(payment)
     }
 
+    /// Returns the payment status history.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_payment_internal`.
     pub fn get_payment_status_history(
         env: Env,
         payment_id: String,
@@ -9002,6 +10488,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #489: Reverse lookup payment by metadata_hash for order reconciliation.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `metadata_hash: BytesN<32>` - Optional hash committing to payment metadata.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_payment`.
     pub fn get_payment_by_metadata_hash(
         env: Env,
         metadata_hash: BytesN<32>,
@@ -9015,6 +10509,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #492: Get customer profile for merchant and customer pair.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `customer_id: Address` - Identifier of the customer associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
     pub fn get_customer(
         env: Env,
         merchant_id: Address,
@@ -9027,6 +10529,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #492: Get top customers for a merchant sorted by total_spent (descending).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no top customers match; no errors are returned.
     pub fn get_top_customers(env: Env, merchant_id: Address, limit: u32) -> Vec<CustomerProfile> {
         let all_payments = Self::get_merchant_payments_internal(&env, &merchant_id);
         let mut customers: Map<Address, CustomerProfile> = map![&env];
@@ -9114,6 +10624,13 @@ impl PaymentProcessor {
     /// indexes plus the `TrackedMerchants` list — it never iterates payment
     /// records. `limit` is capped at [`TOP_MERCHANTS_MAX_LIMIT`] (100); a
     /// `limit` of 0 is treated as the cap.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no top merchants match; no errors are returned.
     pub fn get_top_merchants(env: Env, limit: u32) -> Vec<MerchantRanking> {
         let capped_limit = if limit == 0 {
             TOP_MERCHANTS_MAX_LIMIT
@@ -9175,6 +10692,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #768: Permissionless function to allow anyone to extend a payment's TTL before it lapses.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_payment_internal`.
     pub fn bump_payment_ttl(env: Env, payment_id: String) -> Result<(), Error> {
         let payment = Self::get_payment_internal(&env, &payment_id)?;
         Self::extend_payment_ttl(&env, &payment_id, &payment.status);
@@ -9182,11 +10707,26 @@ impl PaymentProcessor {
     }
 
     /// Issue #488: Permissionless public entry point for TTL maintenance.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::bump_payment_ttl`.
     pub fn bump_payment_ttl_public(env: Env, payment_id: String) -> Result<(), Error> {
         Self::bump_payment_ttl(env, payment_id)
     }
 
     /// Issue #488: Bulk bump payment TTLs for efficient maintenance sweeps (max 50).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_ids: Vec<String>` - Collection of payment ids values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::BatchTooLarge`.
     pub fn bulk_bump_payment_ttls(env: Env, payment_ids: Vec<String>) -> Result<u32, Error> {
         if payment_ids.len() > 50 {
             return Err(Error::BatchTooLarge);
@@ -9202,10 +10742,29 @@ impl PaymentProcessor {
         Ok(bumped)
     }
 
+    /// Returns the merchant payments.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no merchant payments match; no errors are returned.
     pub fn get_merchant_payments(env: Env, merchant_id: Address) -> Vec<String> {
         Self::get_merchant_payments_internal(&env, &merchant_id)
     }
 
+    /// Returns the merchant payments paginated.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    /// - `status_filter: Option<PaymentStatus>` - Optional status filter value used when provided.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no merchant payments paginated match; no errors are returned.
     pub fn get_merchant_payments_paginated(
         env: Env,
         merchant_id: Address,
@@ -9262,6 +10821,17 @@ impl PaymentProcessor {
     /// * `to_ts` - End timestamp (inclusive)
     /// * `offset` - Pagination offset (number of payments to skip)
     /// * `limit` - Maximum number of payments to include (max 100)
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `from_ts: u64` - Numeric from ts value used by the operation.
+    /// - `to_ts: u64` - Numeric to ts value used by the operation.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidExpiry`.
     pub fn generate_reconciliation_report(
         env: Env,
         merchant_id: Address,
@@ -9395,6 +10965,19 @@ impl PaymentProcessor {
         })
     }
 
+    /// Returns a page of reconciliation report entries.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `from_ts: u64` - Numeric from ts value used by the operation.
+    /// - `to_ts: u64` - Numeric to ts value used by the operation.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidExpiry`.
+    /// Also propagates errors from `Self::generate_reconciliation_report`.
     pub fn reconciliation_report_page(
         env: Env,
         merchant_id: Address,
@@ -9427,6 +11010,16 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
+    /// Cancels payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `authority: Address` - Address of authority participating in the operation.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_paused`, `Self::get_payment_internal`, `payment_state_machine::transition_status`.
     pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
 
@@ -9489,6 +11082,15 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
+    /// Expires payment.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentExpired`, `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_payment_internal`, `payment_state_machine::transition_status`.
     pub fn expire_payment(env: Env, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
@@ -9562,6 +11164,15 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Processes expire payments.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_ids: Vec<String>` - Collection of payment ids values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`.
+    /// Also propagates errors from `Self::require_not_paused`.
     pub fn batch_expire_payments(env: Env, payment_ids: Vec<String>) -> Result<u32, Error> {
         Self::require_not_paused(&env)?;
 
@@ -9609,6 +11220,23 @@ impl PaymentProcessor {
     }
 
     #[allow(clippy::type_complexity)]
+    /// Settles a confirmed payment using the specified recipient splits.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `splits: Vec<SettlementSplit>` - Recipient addresses and amounts for splitting the settlement.
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// stellar contract invoke --id $PAYMENT_PROCESSOR_ID --network testnet --source $OPERATOR_ADDRESS -- settle_payment --operator $OPERATOR_ADDRESS --payment_id "payment-001" --splits '[]'
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `Error::ContractPaused`, `Error::InvalidSettlement`, `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Reentrancy`, `Error::Unauthorized`.
+    /// Also propagates errors from `Self::require_not_paused`, `Self::get_payment_internal`, `payment_state_machine::transition_status`.
     pub fn settle_payment(
         env: Env,
         operator: Address,
@@ -10160,6 +11788,14 @@ impl PaymentProcessor {
     /// For `Daily` and `Weekly` schedules, enforces a minimum time since the
     /// last settlement. For `Manual`, settles immediately as long as the pending
     /// balance exceeds `SETTLEMENT_MIN_AMOUNT`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAddress`, `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn trigger_settlement(
         env: Env,
         operator: Address,
@@ -10247,6 +11883,15 @@ impl PaymentProcessor {
         Ok(pending)
     }
 
+    /// Removes expired payment records that are no longer needed.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `payment_ids: Vec<String>` - Collection of payment ids values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn prune_expired_payments(
         env: Env,
         operator: Address,
@@ -10277,6 +11922,15 @@ impl PaymentProcessor {
         Ok(pruned_count)
     }
 
+    /// Removes expired invoice records that are no longer needed.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `operator: Address` - Address invoking the operation as an operator.
+    /// - `invoice_ids: Vec<String>` - Collection of invoice ids values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn prune_expired_invoices(
         env: Env,
         operator: Address,
@@ -10416,6 +12070,14 @@ impl PaymentProcessor {
     /// # Returns
     /// The created PaymentCharge on success
     /// Add a router address to the allowlist (issue #437).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `router: Address` - Address of router participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn add_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -10445,6 +12107,14 @@ impl PaymentProcessor {
     }
 
     /// Remove a router address from the allowlist (issue #437).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `router: Address` - Address of router participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn remove_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -10478,6 +12148,13 @@ impl PaymentProcessor {
     }
 
     /// Check if a DEX router is allowed (issue #437).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `router: Address` - Address of router participating in the operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn is_router_allowed(env: Env, router: Address) -> bool {
         env.storage()
             .persistent()
@@ -10486,6 +12163,12 @@ impl PaymentProcessor {
     }
 
     /// Get all allowlisted DEX router addresses (issue #437).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no allowed routers match; no errors are returned.
     pub fn get_allowed_routers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -10494,6 +12177,14 @@ impl PaymentProcessor {
     }
 
     /// Set the Wrapped XLM (WXLM) token contract address (issue #434).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `wxlm: Address` - Address of wxlm participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_wrapped_xlm_contract(env: Env, admin: Address, wxlm: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -10506,12 +12197,27 @@ impl PaymentProcessor {
     }
 
     /// Get the Wrapped XLM (WXLM) token contract address (issue #434).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns `None` when no wrapped xlm contract is available; no errors are returned.
     pub fn get_wrapped_xlm_contract(env: Env) -> Option<Address> {
         env.storage().persistent().get(&DataKey::WrappedXlmContract)
     }
 
     /// Swaps tokens via a DEX router and executes a payment (issue #434, #437).
     #[allow(clippy::too_many_arguments)]
+    /// Creates a payment by swapping tokens into the required payment token.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `args: SwapAndPayArgs` - Structured arguments that configure the payment request.
+    ///
+    /// # Errors
+    /// Returns `Error::AmountAboveMax`, `Error::AmountBelowMin`, `Error::ArbitrageDetected`, `Error::ContractPaused`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidMemoId`, `Error::InvalidMemoType`, `Error::InvalidPaymentId`, `Error::KycLimitExceeded`, `Error::MemoTooLong`, `Error::OraclePriceDeviation`, `Error::PayerNotWhitelisted`, `Error::PaymentNotFound`, `Error::RateLimitExceeded`, `Error::RouterNotAllowed`, `Error::SwapPathInvalid`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// Also propagates errors from `Self::require_creation_not_paused`, `Self::enforce_create_payment_rate_limit_for_payer`, `Self::validate_path_returns`, `Self::validate_oracle_swap_rate`, `Self::create_payment`.
     pub fn swap_and_pay(env: Env, args: SwapAndPayArgs) -> Result<PaymentCharge, Error> {
         args.payer.require_auth();
         Self::require_creation_not_paused(&env)?;
@@ -10647,6 +12353,16 @@ impl PaymentProcessor {
     }
 
     /// Issue #436: Multi-DEX route splitting / aggregation.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `args: SwapAndPayArgs` - Structured arguments that configure the payment request.
+    /// - `routes: Vec<SwapRoute>` - Collection of routes values to process or return.
+    /// - `min_output_amount: i128` - Numeric min output amount value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AmountAboveMax`, `Error::AmountBelowMin`, `Error::ContractPaused`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidMemoId`, `Error::InvalidMemoType`, `Error::InvalidPaymentId`, `Error::KycLimitExceeded`, `Error::MemoTooLong`, `Error::PayerNotWhitelisted`, `Error::PaymentNotFound`, `Error::RateLimitExceeded`, `Error::RouteOutputInsufficient`, `Error::RouterNotAllowed`, `Error::SwapPathInvalid`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// Also propagates errors from `Self::require_creation_not_paused`, `Self::create_payment`.
     pub fn swap_and_pay_multi_route(
         env: Env,
         args: SwapAndPayArgs,
@@ -10927,6 +12643,14 @@ impl PaymentProcessor {
             .unwrap_or_else(|| vec![env])
     }
 
+    /// Returns the merchant dispute count.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
         env.storage()
             .persistent()
@@ -11018,6 +12742,13 @@ impl PaymentProcessor {
     /// Issue #396: Returns the total number of payment IDs stored for a merchant.
     /// Used by pagination UIs alongside `get_merchant_payments_full`.
     /// Issue #396: Get merchant payment count for dashboard pagination (O(1) via counter).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_payment_count(env: Env, merchant_id: Address) -> u32 {
         let count: u64 = env
             .storage()
@@ -11027,6 +12758,14 @@ impl PaymentProcessor {
         count as u32
     }
 
+    /// Returns the merchant payment count dash.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_payment_count_dash(env: Env, merchant_id: Address) -> u32 {
         let count: u64 = env
             .storage()
@@ -11041,6 +12780,17 @@ impl PaymentProcessor {
     /// Returns an empty vec (not an error) when `offset` exceeds the total count.
     /// When `token_address` is provided, returns only payments matching that token.
     #[allow(deprecated)]
+    /// Returns the merchant payments full.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    /// - `token_address: Option<Address>` - Address of the token contract used for the operation.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no merchant payments full match; no errors are returned.
     pub fn get_merchant_payments_full(
         env: Env,
         merchant_id: Address,
@@ -11092,6 +12842,15 @@ impl PaymentProcessor {
     /// avg_payment_amount, dispute_count, refund_count, net_settled_volume.
     /// Issue #678: When from_ts/to_ts are provided, uses the DailyPaymentIndex
     /// to scan only the relevant day buckets (O(days) ledger reads).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `from_ts: u64` - Numeric from ts value used by the operation.
+    /// - `to_ts: u64` - Numeric to ts value used by the operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_analytics(
         env: Env,
         merchant_id: Address,
@@ -11280,6 +13039,18 @@ impl PaymentProcessor {
 
     /// Customer grants a merchant permission to pull up to `limit_per_period`
     /// tokens per `period_secs`-second window.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `customer: Address` - Address of customer participating in the operation.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `token: Address` - Address of token participating in the operation.
+    /// - `limit_per_period: i128` - Numeric limit per period value used by the operation.
+    /// - `period_secs: u64` - Numeric period secs value used by the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::pre_authorize_merchant`.
     pub fn pre_authorize_merchant(
         env: Env,
         customer: Address,
@@ -11299,6 +13070,15 @@ impl PaymentProcessor {
     }
 
     /// Customer revokes a previously granted merchant authorization.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `customer: Address` - Address of customer participating in the operation.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::revoke_authorization`.
     pub fn revoke_merchant_authorization(
         env: Env,
         customer: Address,
@@ -11309,6 +13089,16 @@ impl PaymentProcessor {
 
     /// Merchant pulls `amount` tokens from the customer's account against
     /// an existing pre-authorization.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `customer: Address` - Address of customer participating in the operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::pull_payment`.
     pub fn pull_payment(
         env: Env,
         merchant: Address,
@@ -11319,6 +13109,15 @@ impl PaymentProcessor {
     }
 
     /// Return the stored authorization for a (customer, merchant) pair.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `customer: Address` - Address of customer participating in the operation.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::get_authorization`.
     pub fn get_merchant_authorization(
         env: Env,
         customer: Address,
@@ -11328,6 +13127,15 @@ impl PaymentProcessor {
     }
 
     /// Return the remaining pull budget for the current period.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `customer: Address` - Address of customer participating in the operation.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::remaining_limit`.
     pub fn merchant_authorization_remaining(
         env: Env,
         customer: Address,
@@ -11337,6 +13145,16 @@ impl PaymentProcessor {
     }
 
     /// Issue #854: Merchant creates a scoped API key.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `key_hash: BytesN<32>` - Hash of the key being registered or rotated.
+    /// - `scopes: Vec<String>` - Collection of scopes values to process or return.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::create_api_key`.
     pub fn create_api_key(
         env: Env,
         merchant: Address,
@@ -11347,11 +13165,28 @@ impl PaymentProcessor {
     }
 
     /// Issue #854: Retrieve an API key record by its key hash.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `key_hash: BytesN<32>` - Hash of the key being registered or rotated.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::get_api_key`.
     pub fn get_api_key(env: Env, key_hash: BytesN<32>) -> Result<ApiKeyRecord, MerchantAuthError> {
         MerchantPreAuth::get_api_key(env, key_hash)
     }
 
     /// Issue #854: Merchant revokes an active API key.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `key_hash: BytesN<32>` - Hash of the key being registered or rotated.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `MerchantPreAuth::revoke_api_key`.
     pub fn revoke_api_key(
         env: Env,
         merchant: Address,
@@ -11360,6 +13195,16 @@ impl PaymentProcessor {
         MerchantPreAuth::revoke_api_key(env, merchant, key_hash)
     }
 
+    /// Cancels stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::cancel_stream`.
     pub fn cancel_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         if Self::is_blacklisted_address(&env, &sender) {
             return Err(StreamError::Unauthorized);
@@ -11367,6 +13212,16 @@ impl PaymentProcessor {
         PaymentStreaming::cancel_stream(env, sender, stream_id)
     }
 
+    /// Pauses stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::pause_stream`.
     pub fn pause_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         if Self::is_blacklisted_address(&env, &sender) {
             return Err(StreamError::Unauthorized);
@@ -11374,12 +13229,32 @@ impl PaymentProcessor {
         PaymentStreaming::pause_stream(env, sender, stream_id)
     }
 
+    /// Resumes stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::resume_stream`.
     pub fn resume_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         if Self::is_blacklisted_address(&env, &sender) {
             return Err(StreamError::Unauthorized);
         }
         PaymentStreaming::resume_stream(env, sender, stream_id)
     }
+    /// Cancels multiple streams.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_ids: Vec<String>` - Collection of stream ids values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::cancel_multiple_streams`.
     pub fn cancel_multiple_streams(
         env: Env,
         sender: Address,
@@ -11391,6 +13266,16 @@ impl PaymentProcessor {
         PaymentStreaming::cancel_multiple_streams(env, sender, stream_ids)
     }
 
+    /// Processes cancel streams.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_ids: Vec<String>` - Collection of stream ids values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::batch_cancel_streams`.
     pub fn batch_cancel_streams(
         env: Env,
         sender: Address,
@@ -11402,6 +13287,16 @@ impl PaymentProcessor {
         PaymentStreaming::batch_cancel_streams(env, sender, stream_ids)
     }
 
+    /// Processes withdraw to.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `recipient: Address` - Address that receives the configured payment or fee.
+    /// - `withdrawals: Vec<WithdrawalRecipient>` - Collection of withdrawals values to process or return.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::batch_withdraw_to`.
     pub fn batch_withdraw_to(
         env: Env,
         recipient: Address,
@@ -11413,6 +13308,16 @@ impl PaymentProcessor {
         PaymentStreaming::batch_withdraw_to(env, recipient, withdrawals)
     }
 
+    /// Withdraws all for recipient.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `recipient: Address` - Address that receives the configured payment or fee.
+    /// - `max_streams: u32` - Numeric max streams value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::withdraw_all_for_recipient`.
     pub fn withdraw_all_for_recipient(
         env: Env,
         recipient: Address,
@@ -11424,6 +13329,15 @@ impl PaymentProcessor {
         PaymentStreaming::withdraw_all_for_recipient(env, recipient, max_streams)
     }
 
+    /// Executes a withdrawal for an eligible stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::trigger_withdrawal`.
     pub fn trigger_withdrawal(env: Env, stream_id: String) -> Result<String, StreamError> {
         PaymentStreaming::trigger_withdrawal(env, stream_id)
     }
@@ -11432,10 +13346,29 @@ impl PaymentProcessor {
     /// (permissionless). Delegates to `PaymentStreaming::bulk_bump_stream_ttls`;
     /// non-existent stream IDs are silently skipped and the count of bumped
     /// streams is returned.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `stream_ids: Vec<String>` - Collection of stream ids values to process or return.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::bulk_bump_stream_ttls`.
     pub fn bulk_bump_stream_ttls(env: Env, stream_ids: Vec<String>) -> Result<u32, StreamError> {
         PaymentStreaming::bulk_bump_stream_ttls(env, stream_ids)
     }
 
+    /// Sets stream destination.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `recipient: Address` - Address that receives the configured payment or fee.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    /// - `destination: Address` - Address of destination participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::set_stream_destination`.
     pub fn set_stream_destination(
         env: Env,
         recipient: Address,
@@ -11451,6 +13384,15 @@ impl PaymentProcessor {
     }
 
     /// Sender approves milestones for a stream, unlocking withdrawals.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::approve_stream_milestone`.
     pub fn approve_stream_milestone(
         env: Env,
         sender: Address,
@@ -11460,6 +13402,15 @@ impl PaymentProcessor {
     }
 
     /// Sender revokes a previous milestone approval, re-locking withdrawals.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::revoke_stream_milestone`.
     pub fn revoke_stream_milestone(
         env: Env,
         sender: Address,
@@ -11469,6 +13420,16 @@ impl PaymentProcessor {
     }
 
     /// Sender sets a floor for `decrease_rate_per_second` on this stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    /// - `min_rate_per_second: i128` - Numeric min rate per second value used by the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::set_stream_min_rate`.
     pub fn set_stream_min_rate(
         env: Env,
         sender: Address,
@@ -11479,6 +13440,16 @@ impl PaymentProcessor {
     }
 
     /// Reduce the flow rate of an active stream, refunding surplus deposit.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    /// - `new_rate: i128` - Numeric new rate value used by the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::decrease_rate_per_second`.
     pub fn decrease_rate_per_second(
         env: Env,
         sender: Address,
@@ -11488,6 +13459,16 @@ impl PaymentProcessor {
         PaymentStreaming::decrease_rate_per_second(env, sender, stream_id, new_rate)
     }
 
+    /// Returns the sender streams.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `page: u32` - Numeric page value used by the operation.
+    /// - `page_size: u32` - Numeric page size value used by the operation.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no sender streams match; no errors are returned.
     pub fn get_sender_streams(
         env: Env,
         sender: Address,
@@ -11497,11 +13478,33 @@ impl PaymentProcessor {
         PaymentStreaming::get_sender_streams(env, sender, page, page_size)
     }
 
+    /// Returns the stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::get_stream`.
     pub fn get_stream(env: Env, stream_id: String) -> Result<PaymentStream, StreamError> {
         PaymentStreaming::get_stream(env, stream_id)
     }
 
     /// Create a new payment stream. Tokens are pulled from `sender` into the contract.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `receiver: Address` - Address of receiver participating in the operation.
+    /// - `token: Address` - Address of token participating in the operation.
+    /// - `rate_per_second: i128` - Numeric rate per second value used by the operation.
+    /// - `deposit: i128` - Numeric deposit value used by the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::create_stream`.
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -11529,6 +13532,20 @@ impl PaymentProcessor {
     }
 
     /// Create a vesting stream whose accrued tokens are locked until `cliff_at`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `receiver: Address` - Address of receiver participating in the operation.
+    /// - `token: Address` - Address of token participating in the operation.
+    /// - `rate_per_second: i128` - Numeric rate per second value used by the operation.
+    /// - `deposit: i128` - Numeric deposit value used by the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    /// - `cliff_at: u64` - Numeric cliff at value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::create_stream_with_cliff`.
     pub fn create_vesting_stream(
         env: Env,
         sender: Address,
@@ -11557,6 +13574,17 @@ impl PaymentProcessor {
         )
     }
 
+    /// Adds funds to a payment stream.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `caller: Address` - Address making the call; it is checked against the function?s authorization rules.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    /// - `amount: i128` - Payment, dispute, or configuration amount used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
+    /// Also propagates errors from `PaymentStreaming::top_up_stream`.
     pub fn top_up_stream(
         env: Env,
         caller: Address,
@@ -11569,6 +13597,16 @@ impl PaymentProcessor {
         PaymentStreaming::top_up_stream(env, caller, stream_id, amount)
     }
 
+    /// Adds funds to multiple payment streams.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `top_ups: Vec<(String, i128)>` - Collection of top ups values to process or return.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::top_up_multiple_streams`.
     pub fn top_up_multiple_streams(
         env: Env,
         sender: Address,
@@ -11578,6 +13616,16 @@ impl PaymentProcessor {
     }
 
     /// Update the flow rate of an active stream (increase or decrease).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `sender: Address` - Address of sender participating in the operation.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    /// - `new_rate: i128` - Numeric new rate value used by the operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::update_stream_rate`.
     pub fn update_stream_rate(
         env: Env,
         sender: Address,
@@ -11588,12 +13636,28 @@ impl PaymentProcessor {
     }
 
     /// Close a terminal (Exhausted/Cancelled) stream and remove its storage entry.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `stream_id: String` - Identifier of the stream associated with this operation.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `PaymentStreaming::close_expired_stream`.
     pub fn close_expired_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
         PaymentStreaming::close_expired_stream(env, stream_id)
     }
 
     /// Set the platform fee in basis points applied to stream withdrawals.
     /// Only the admin may call this.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `fee_bps: i128` - Numeric fee bps value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn set_stream_fee_bps(env: Env, admin: Address, fee_bps: i128) -> Result<(), Error> {
         admin.require_auth();
         if AccessControl::get_admin(&env) != Some(admin) {
@@ -11603,10 +13667,26 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Returns the stream fee bps.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_stream_fee_bps(env: Env) -> i128 {
         PaymentStreaming::get_stream_fee_bps(env)
     }
 
+    /// Sets stream fee recipient.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `recipient: Address` - Address that receives the configured payment or fee.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn set_stream_fee_recipient(
         env: Env,
         admin: Address,
@@ -11620,6 +13700,13 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Returns the stream fee recipient.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns `None` when no stream fee recipient is available; no errors are returned.
     pub fn get_stream_fee_recipient(env: Env) -> Option<Address> {
         PaymentStreaming::get_stream_fee_recipient(env)
     }
@@ -11628,6 +13715,14 @@ impl PaymentProcessor {
     ///
     /// Issue #624: The upgrade is now queued via the timelock instead of
     /// executing immediately.  Returns the action ID of the pending action.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `new_wasm_hash: BytesN<32>` - Value used to configure or filter new wasm hash.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn upgrade_contract(
         env: Env,
         admin: Address,
@@ -11651,6 +13746,14 @@ impl PaymentProcessor {
     /// Set the timelock delay applied to critical admin operations.
     ///
     /// Default is 48 hours.  Only the admin may call this.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `secs: u64` - Duration in seconds for the configured expiry or interval.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_timelock_delay(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -11663,6 +13766,12 @@ impl PaymentProcessor {
     }
 
     /// Return the current timelock delay in seconds.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_timelock_delay(env: Env) -> u64 {
         env.storage()
             .persistent()
@@ -11674,6 +13783,12 @@ impl PaymentProcessor {
     ///
     /// Any actor may call this to inspect queued operations and their
     /// `execute_after` timestamps.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no pending admin actions match; no errors are returned.
     pub fn get_pending_admin_actions(env: Env) -> Vec<PendingTimelockAction> {
         let counter: u64 = env
             .storage()
@@ -11699,6 +13814,14 @@ impl PaymentProcessor {
     ///
     /// Reverts with `TimelockNotExpired` if called before `execute_after`.
     /// Only the admin may execute.  Removes the action from the queue on success.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `action_id: String` - Identifier of the action associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`, `Error::TimelockNotExpired`, `Error::Unauthorized`.
     pub fn execute_timelocked_action(
         env: Env,
         admin: Address,
@@ -11823,6 +13946,15 @@ impl PaymentProcessor {
 
     /// Configure the multi-sig threshold and signer set.
     /// Only the current admin may call this.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `threshold: u32` - Numeric threshold value used by the operation.
+    /// - `signers: Vec<Address>` - Address of signers participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn set_multisig_config(
         env: Env,
         admin: Address,
@@ -11834,6 +13966,12 @@ impl PaymentProcessor {
     }
 
     /// Returns the current multi-sig (threshold, signers) configuration.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_multisig_config(env: Env) -> (u32, Vec<Address>) {
         AccessControl::get_multisig_config(&env)
     }
@@ -11841,6 +13979,14 @@ impl PaymentProcessor {
     /// Create a new admin proposal for a contract parameter change.
     /// The calling signer must be in the multisig signer set.
     /// Returns the proposal nonce.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `signer: Address` - Address of signer participating in the operation.
+    /// - `action: AdminAction` - Value used to configure or filter action.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn create_proposal(env: Env, signer: Address, action: AdminAction) -> Result<u64, Error> {
         AccessControl::create_proposal(&env, signer, action).map_err(|_| Error::AccessControlError)
     }
@@ -11848,6 +13994,14 @@ impl PaymentProcessor {
     /// Vote to approve an existing proposal.
     /// The calling signer must be in the multisig signer set and must not have
     /// already voted on this proposal.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `signer: Address` - Address of signer participating in the operation.
+    /// - `nonce: u64` - Numeric nonce value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`.
     pub fn vote_proposal(env: Env, signer: Address, nonce: u64) -> Result<(), Error> {
         AccessControl::vote_proposal(&env, signer, nonce).map_err(|_| Error::AccessControlError)
     }
@@ -11858,6 +14012,14 @@ impl PaymentProcessor {
     /// * For parameter-change actions (`SetDisputeBond`, `SetVolumeCap`,
     ///   `SetRefundFeeBps`, `SetRateLimit`) the new value is written to
     ///   persistent storage and a `ADMIN/PROPOSAL_EXECUTED` event is emitted.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `executor: Address` - Address of executor participating in the operation.
+    /// - `nonce: u64` - Numeric nonce value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::AccessControlError`, `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn execute_proposal(env: Env, executor: Address, nonce: u64) -> Result<(), Error> {
         executor.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &executor) {
@@ -11940,12 +14102,25 @@ impl PaymentProcessor {
     }
 
     /// Retrieve a pending proposal by nonce.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `nonce: u64` - Numeric nonce value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `None` when no proposal is available; no errors are returned.
     pub fn get_proposal(env: Env, nonce: u64) -> Option<AdminProposal> {
         AccessControl::get_proposal(&env, nonce)
     }
 
     /// Read the effective dispute bond amount (configurable via multi-sig proposal).
     /// Falls back to the compile-time constant if not set via proposal.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_dispute_bond_amount(env: Env) -> i128 {
         env.storage()
             .persistent()
@@ -11955,6 +14130,13 @@ impl PaymentProcessor {
 
     /// Read the effective monthly volume cap for a KYC tier.
     /// Falls back to compile-time constants if not overridden by a proposal.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `tier: KycTier` - Value used to configure or filter tier.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_tier_volume_cap(env: Env, tier: KycTier) -> i128 {
         if let Some(cap) = env
             .storage()
@@ -11973,6 +14155,12 @@ impl PaymentProcessor {
 
     /// Read the effective refund fee in basis points from instance storage.
     /// Falls back to the compile-time default (100 bps) if not yet configured.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_refund_fee_bps(env: Env) -> i128 {
         Self::get_refund_fee_bps_internal(&env)
     }
@@ -11986,6 +14174,14 @@ impl PaymentProcessor {
 
     /// Set the refund cooldown period in seconds (overrides REFUND_COOLDOWN_SECS constant).
     /// Admin-only operation.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `secs: u64` - Duration in seconds for the configured expiry or interval.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_refund_cooldown(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
         admin.require_auth();
 
@@ -12012,6 +14208,13 @@ impl PaymentProcessor {
     /// Migration function: recompute all merchant payment counts from payment vector.
     /// Scans all merchants and rebuilds the persistent payment count index.
     /// Admin-only operation. Use this after upgrading from older contract versions.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn recompute_merchant_payment_count(env: Env, admin: Address) -> Result<u64, Error> {
         admin.require_auth();
 
@@ -12031,6 +14234,19 @@ impl PaymentProcessor {
         Ok(merchants_processed)
     }
 
+    /// Creates invoice.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `customer_email: String` - Identifier or text value used for customer email.
+    /// - `line_items: Vec<LineItem>` - Collection of line items values to process or return.
+    /// - `total_amount: i128` - Numeric total amount value used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    /// - `due_date: u64` - Numeric due date value used by the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`.
     pub fn create_invoice(
         env: Env,
         merchant_id: Address,
@@ -12088,6 +14304,20 @@ impl PaymentProcessor {
     /// call returns an error and the invoice is never persisted; if any later
     /// step fails the whole transaction reverts, so the two records are always
     /// created together or not at all.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `link_manager: Address` - Address of link manager participating in the operation.
+    /// - `customer_email: String` - Identifier or text value used for customer email.
+    /// - `line_items: Vec<LineItem>` - Collection of line items values to process or return.
+    /// - `total_amount: i128` - Numeric total amount value used by the operation.
+    /// - `currency: Symbol` - Symbol identifying currency.
+    /// - `due_date: u64` - Numeric due date value used by the operation.
+    /// - `link_args: CreateLinkArgs` - Value used to configure or filter link args.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidAmount`, `Error::InvalidPaymentId`, `Error::PaymentNotFound`, `Error::Unauthorized`.
     pub fn create_payment_link_invoice(
         env: Env,
         merchant_id: Address,
@@ -12189,6 +14419,14 @@ impl PaymentProcessor {
         Ok((invoice, payment_link))
     }
 
+    /// Marks an invoice as paid.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `invoice_id: String` - Identifier of the invoice associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`.
     pub fn mark_invoice_paid(env: Env, invoice_id: String) -> Result<(), Error> {
         let mut invoice: Invoice = env
             .storage()
@@ -12219,6 +14457,14 @@ impl PaymentProcessor {
     }
 
     /// Admin-configurable invoice overdue grace period in seconds (Issue #607).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `secs: u64` - Duration in seconds for the configured expiry or interval.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn set_invoice_grace_period(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -12233,6 +14479,12 @@ impl PaymentProcessor {
     }
 
     /// Returns the configured invoice overdue grace period in seconds (default: 0).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_invoice_grace_period(env: Env) -> u64 {
         env.storage()
             .persistent()
@@ -12240,6 +14492,14 @@ impl PaymentProcessor {
             .unwrap_or(0)
     }
 
+    /// Returns the invoice.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `invoice_id: String` - Identifier of the invoice associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
     pub fn get_invoice(env: Env, invoice_id: String) -> Result<Invoice, Error> {
         let mut invoice: Invoice = env
             .storage()
@@ -12257,6 +14517,14 @@ impl PaymentProcessor {
         Ok(invoice)
     }
 
+    /// Returns the merchant invoices.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no merchant invoices match; no errors are returned.
     pub fn get_merchant_invoices(env: Env, merchant_id: Address) -> Vec<String> {
         let internal = Self::get_merchant_invoices_internal(&env, &merchant_id);
         let mut result = vec![&env];
@@ -12292,6 +14560,14 @@ impl PaymentProcessor {
     /// Issue #1067: Void an invoice (merchant must sign).
     /// Transitions Created (Pending) or Overdue → Voided (soft-delete).
     /// Paid invoices cannot be voided.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant_id: Address` - Address identifying the merchant associated with this operation.
+    /// - `invoice_id: String` - Identifier of the invoice associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
     pub fn void_invoice(env: Env, merchant_id: Address, invoice_id: String) -> Result<(), Error> {
         merchant_id.require_auth();
 
@@ -12329,6 +14605,13 @@ impl PaymentProcessor {
 
     /// Issue #1067: Mark a past-due invoice as Overdue.
     /// Permissionless — anyone may call once `now > invoice.due_date`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `invoice_id: String` - Identifier of the invoice associated with this operation.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidExpiry`, `Error::PaymentNotFound`.
     pub fn mark_invoice_overdue(env: Env, invoice_id: String) -> Result<(), Error> {
         let mut invoice: Invoice = env
             .storage()
@@ -12364,6 +14647,15 @@ impl PaymentProcessor {
     /// `metadata_hash` stored on a payment.
     /// Returns `true` on match, `false` when no hash was stored or hash differs.
     /// Returns `Error::PaymentNotFound` when the payment does not exist.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    /// - `preimage: Bytes` - Value used to configure or filter preimage.
+    ///
+    /// # Errors
+    /// Returns `Error::PaymentNotFound`.
+    /// Also propagates errors from `Self::get_payment_internal`.
     pub fn verify_metadata_hash(
         env: Env,
         payment_id: String,
@@ -12428,6 +14720,14 @@ impl PaymentProcessor {
 
     /// Issue #1066: Return a paginated slice of fee collection records
     /// (newest first). `limit` is capped at 200 per call.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `offset: u32` - Number of entries to skip before returning results.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no fee collection history match; no errors are returned.
     pub fn get_fee_collection_history(
         env: Env,
         offset: u32,
@@ -12460,6 +14760,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #1066: Admin-only — lifetime total fees collected for a token.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `admin: Address` - Administrator address that authorizes or configures this operation.
+    /// - `token: Address` - Address of token participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `Error::Unauthorized`.
     pub fn get_total_fees_collected(
         env: Env,
         admin: Address,
@@ -12490,6 +14798,13 @@ impl PaymentProcessor {
     /// Issue #1064: Return top merchants sorted by cumulative score descending,
     /// enriched with KYC tier. Suspended merchants are excluded.
     /// `limit` is capped at TOP_MERCHANTS_MAX_LIMIT (100).
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `limit: u32` - Maximum number of entries to return or process.
+    ///
+    /// # Errors
+    /// Returns an empty vector when no top merchants v2 match; no errors are returned.
     pub fn get_top_merchants_v2(env: Env, limit: u32) -> Vec<MerchantRankEntry> {
         let capped_limit = if limit == 0 {
             TOP_MERCHANTS_MAX_LIMIT
@@ -12576,6 +14891,16 @@ impl PaymentProcessor {
     }
 
     /// Submit a merchant-signed meta-transaction. The relayer pays the fee.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `relayer: Address` - Address of relayer participating in the operation.
+    /// - `payload: meta_transaction::MetaTransactionPayload` - Value used to configure or filter payload.
+    /// - `signature: BytesN<64>` - Value used to configure or filter signature.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `meta_transaction::execute`.
     pub fn execute_meta_transaction(
         env: Env,
         relayer: Address,
@@ -12587,16 +14912,41 @@ impl PaymentProcessor {
 
     /// Rotate the merchant's webhook signing key. The merchant must authorize
     /// the call directly, or via `execute_meta_transaction`.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `key_hash: BytesN<32>` - Hash of the key being registered or rotated.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn rotate_webhook_key(env: Env, merchant: Address, key_hash: BytesN<32>) {
         meta_transaction::rotate_webhook_key(&env, &merchant, key_hash);
     }
 
     /// Set the address that receives this merchant's fees.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `recipient: Address` - Address that receives the configured payment or fee.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn set_fee_recipient(env: Env, merchant: Address, recipient: Address) {
         meta_transaction::set_fee_recipient(&env, &merchant, recipient);
     }
 
     /// Record the merchant's authorization of a refund.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `request: meta_transaction::RefundAuthRequest` - Value used to configure or filter request.
+    ///
+    /// # Errors
+    /// Propagates errors from the helpers listed below.
+    /// Also propagates errors from `meta_transaction::authorize_refund`.
     pub fn authorize_refund(
         env: Env,
         merchant: Address,
@@ -12605,22 +14955,62 @@ impl PaymentProcessor {
         meta_transaction::authorize_refund(&env, &merchant, request)
     }
 
+    /// Returns the domain separator.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_domain_separator(env: Env) -> BytesN<32> {
         meta_transaction::domain_separator(&env)
     }
 
+    /// Returns the merchant nonce.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn get_merchant_nonce(env: Env, merchant: Address) -> u64 {
         meta_transaction::expected_nonce(&env, &merchant)
     }
 
+    /// Returns the webhook key.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `None` when no webhook key is available; no errors are returned.
     pub fn get_webhook_key(env: Env, merchant: Address) -> Option<BytesN<32>> {
         meta_transaction::get_webhook_key(&env, &merchant)
     }
 
+    /// Returns the fee recipient.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    ///
+    /// # Errors
+    /// Returns `None` when no fee recipient is available; no errors are returned.
     pub fn get_fee_recipient(env: Env, merchant: Address) -> Option<Address> {
         meta_transaction::get_fee_recipient(&env, &merchant)
     }
 
+    /// Returns the refund authorization.
+    ///
+    /// # Parameters
+    /// - `env: Env` - Soroban environment used to access contract storage, ledger data, and events.
+    /// - `merchant: Address` - Merchant account participating in the operation.
+    /// - `payment_id: String` - Identifier of the payment being created, queried, or changed.
+    ///
+    /// # Errors
+    /// Returns `None` when no refund authorization is available; no errors are returned.
     pub fn get_refund_authorization(
         env: Env,
         merchant: Address,

@@ -32,7 +32,7 @@ document on every CI run to catch drift between them.
 | 20 | `UnsupportedToken` | The token address is not an accepted asset. | Using a token not configured for this deployment. | Use one of the supported token addresses for this environment. |
 | 21 | `AmountBelowMin` | Amount is below the configured minimum. | Payment/stake amount too small. | Increase the amount to at least the configured minimum. |
 | 22 | `AmountAboveMax` | Amount exceeds the configured maximum. | Payment/stake amount too large. | Reduce the amount, or split into multiple payments. |
-| 23 | `InvalidExpiry` | `expires_at` is invalid (e.g. in the past, or before `start_time`). | Passing a stale or malformed timestamp. | Pass a future Unix timestamp greater than "now". |
+| 23 | `InvalidExpiry` | `expires_at` is not later than the current ledger time, or is outside the allowed payment duration. | Creating a payment with an expired/too-near/too-distant expiry. | Pass a future expiry within the configured payment duration limits. |
 | 24 | `InvalidSettlement` | Settlement parameters/signatures failed validation. | Malformed or mismatched collaborative-settlement data. | Re-derive settlement data per `docs/` settlement guide and retry. |
 | 25 | `DuplicateIdempotencyKey` | `client_token` was already used for a different payment. | Retrying a request with the same idempotency key but different params. | Reuse the key only for byte-identical retries, or mint a new key. |
 | 26 | `InvalidAddress` | An address argument failed validation. | Passing a malformed or zero address. | Pass a valid Stellar/Soroban `Address`. |
@@ -152,7 +152,19 @@ document on every CI run to catch drift between them.
 | 6 | `PayoutAddressNotWhitelisted` | Payout address is not on the merchant's approved list. | Withdrawing to an address that wasn't whitelisted. | Whitelist the payout address before withdrawing to it. |
 | 7 | `WhitelistModeRequiresBusinessTier` | Only Business-tier merchants may enable whitelist mode. | Enabling customer whitelist mode below Business tier. | Upgrade the merchant to Business tier first. |
 | 8 | `PayerNotWhitelisted` | Payer is not in the merchant's customer whitelist. | Whitelist mode is on and the payer isn't listed. | Merchant must add the payer to the whitelist. |
+| 9 | `ProposalNotFound` | No suspension proposal exists with the given ID. | Voting, executing, or releasing stake for an unknown proposal. | Verify the proposal ID. |
+| 10 | `ProposalExpired` | The suspension proposal's voting window has closed. | Voting or executing after its expiry. | Create a new proposal. |
+| 11 | `DuplicateVote` | Voter has already voted on this suspension proposal. | Casting a second vote for the same proposal. | Each voter may vote once per proposal. |
 | 12 | `KycLimitExceeded` | Single payment or cumulative monthly volume exceeds merchant's KYC tier cap. | Merchant at tier 0 or tier 1 breached per-payment or monthly limit. | Upgrade merchant KYC tier. |
+| 13 | `PageSizeTooLarge` | Merchant query requested a page larger than the supported maximum. | Passing an excessive pagination limit. | Use a smaller page size. |
+| 14 | `ProposalAlreadyExecuted` | Suspension proposal has already been executed. | Re-executing a completed suspension. | No action is needed; the merchant is already suspended by this proposal. |
+| 15 | `ProposalThresholdNotMet` | Approval stake has not reached the proposal's configured quorum. | Executing before enough stake votes approve. | Wait for more eligible stake to vote in favour. |
+| 16 | `SuspensionStakeNotFound` | Voter has not locked stake for this proposal. | Voting without first locking governance tokens. | Lock the configured governance token before voting. |
+| 17 | `InvalidStakeAmount` | Stake is below the minimum or cannot be represented safely. | Locking less than the minimum stake. | Lock at least `MIN_ARBITRATOR_STAKE`. |
+| 18 | `InvalidSuspensionConfiguration` | Quorum or proposal lifetime is outside the allowed range. | Setting quorum outside 1–10,000 bps or a zero lifetime. | Use a quorum from 1–10,000 bps and a positive lifetime. |
+| 19 | `GovernanceTokenNotConfigured` | No governance token has been configured for suspension voting. | Creating a proposal before token setup. | Configure the governance token as admin before proposing. |
+| 20 | `SuspensionVotingStarted` | Stake registration is closed after the first vote. | Locking stake after voting began. | Lock eligible stake before the first vote. |
+| 21 | `ProposalNotFinalized` | Stake cannot be released while the proposal remains open. | Releasing stake before execution or expiry. | Execute the approved proposal or wait for expiry. |
 
 ## `MerchantAuthError` (`fluxapay/src/merchant_auth.rs`)
 

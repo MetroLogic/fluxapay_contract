@@ -35,6 +35,8 @@ const FEE_PER_LEDGER_READ: i64 = 6_250;
 const FEE_PER_LEDGER_WRITE: i64 = 10_000;
 /// Stroops per emitted contract event.
 const FEE_PER_EVENT: i64 = 250;
+/// Placeholder balance while the estimator's token balance lookup is not wired.
+const TOKEN_BALANCE_UNAVAILABLE: i128 = 0;
 
 // ---------------------------------------------------------------------------
 // Per-operation resource profiles (upper-bound estimates)
@@ -391,7 +393,7 @@ impl GasEstimator {
     fn fetch_token_balance(_env: &Env) -> i128 {
         // The token client is resolved by the caller's environment; the
         // estimator only needs the value for liquidity assessment.
-        0
+        TOKEN_BALANCE_UNAVAILABLE
     }
 
     /// Human-readable name for an operation (display helpers).
@@ -415,5 +417,21 @@ impl GasEstimator {
             Operation::WithdrawStream => Symbol::new(&env, "WithdrawStream"),
             Operation::CancelStream => Symbol::new(&env, "CancelStream"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gas_estimator_create_payment_estimate_preserves_fee_profile() {
+        let estimate = GasEstimator::estimate_unchecked(Operation::CreatePayment);
+
+        assert_eq!(estimate.instructions, 50);
+        assert_eq!(estimate.ledger_reads, 5);
+        assert_eq!(estimate.ledger_writes, 4);
+        assert_eq!(estimate.events, 1);
+        assert_eq!(estimate.resource_fee_stroops, 76_500);
     }
 }
