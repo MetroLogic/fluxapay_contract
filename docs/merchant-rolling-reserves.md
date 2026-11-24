@@ -1,5 +1,32 @@
 # Merchant Rolling Reserves
 
+> **Issue #1017 — current implementation note:** the sections below describe an
+> aspirational, fully-automatic tier-based design (ledger-based holding
+> windows, per-tier default policies) that did not have a corresponding
+> implementation. What actually ships today is a simpler, explicit,
+> admin-managed policy:
+>
+> - `MerchantRegistry::set_reserve_policy(admin, merchant_id, Option<RollingReservePolicy>)`
+>   sets, updates, or clears (`None`) a merchant's reserve policy. There is no
+>   automatic per-KYC-tier default — every merchant starts with `None` (no
+>   reserve withheld) until an admin configures one.
+> - `RollingReservePolicy { reserve_bps: u32, holding_period_secs: u64 }` —
+>   holding periods are wall-clock seconds, not ledger counts.
+> - `PaymentProcessor::settle_payment` withholds `reserve_bps` of the net
+>   merchant amount into a reserve bucket (`MerchantRegistry::lock_reserve`,
+>   called cross-contract) instead of crediting it to pending settlement, and
+>   emits `PAYMENT/RESERVE_HELD` with the withheld amount and unlock timestamp.
+> - `PaymentProcessor::release_merchant_reserve(operator, merchant_id)` (role:
+>   `SETTLEMENT_OPERATOR`) sweeps every matured bucket (`unlock_at <= now`)
+>   back into the merchant's pending settlement balance, ready for the next
+>   `trigger_settlement` sweep.
+> - `MerchantRegistry::get_reserve_policy` / `get_locked_reserve` are the
+>   read-only queries; there is no separate `ReserveVault` contract/struct.
+>
+> See `fluxapay/src/merchant_reserve_test.rs` for working examples of the
+> actual API. The rest of this document is kept for the original design
+> intent but should not be read as a description of shipped behavior.
+
 This document describes the tier-based rolling reserve system implemented in the
 FluxaPay `MerchantRegistry` and its integration with `PaymentProcessor` settlement.
 

@@ -3,11 +3,12 @@ use crate::{
     merchant_registry::{KycTier, MerchantRegistry, MerchantRegistryClient},
     AdminAction, ArbitratorVoteChoice, DataKey, DisputeStatus, Error, PaymentProcessor,
     PaymentProcessorClient, PaymentStatus, RefundManager, RefundManagerClient, RefundStatus,
-    SettlementSplit,
+    SettlementSplit, TIER_UPGRADE_THRESHOLD_BASIC, TIER_UPGRADE_THRESHOLD_BUSINESS,
+    TIER_UPGRADE_THRESHOLD_FULL,
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
-    token, vec, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
 
 fn setup_integration(
@@ -1607,6 +1608,241 @@ fn test_dispute_escalation_past_deadline() {
     let event_count_before = env.events().all().len();
     refund_client.check_dispute_deadline(&dispute_id);
     assert_eq!(env.events().all().len(), event_count_before);
+}
+
+// -----------------------------------------------------------------------------
+// Issue #1015: Automatic KYC tier upgrade based on cumulative payment volume
+// -----------------------------------------------------------------------------
+
+/// Wires PaymentProcessor <-> MerchantRegistry for tier-upgrade auth (both
+/// directions are required: PaymentProcessor needs the registry address to
+/// look merchants up, and the registry needs PaymentProcessor's address to
+/// authorize `auto_upgrade_kyc_tier` calls), registers one merchant at
+/// `initial_tier`, and grants the roles needed to create + verify payments.
+fn setup_tier_upgrade_env<'a>(
+    env: &'a Env,
+    initial_tier: &KycTier,
+) -> (
+    Address,
+    PaymentProcessorClient<'a>,
+    MerchantRegistryClient<'a>,
+    Address,
+    Address,
+) {
+    let (admin, payment_client, _refund_client, merchant_client) = setup_integration(env);
+
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+    merchant_client.set_payment_processor_address(&admin, &payment_client.address);
+
+    let merchant = Address::generate(env);
+    payment_client.grant_role(&admin, &Symbol::new(env, "MERCHANT"), &merchant);
+
+    merchant_client.register_merchant(
+        &merchant,
+        &String::from_str(env, "Tier Upgrade Test Merchant"),
+        &String::from_str(env, "USDC"),
+        &None::<Address>,
+        &None::<String>,
+        &None,
+    );
+    merchant_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        initial_tier,
+        &Some(String::from_str(env, "sig")),
+    );
+
+    let oracle = Address::generate(env);
+    payment_client.grant_role(&admin, &Symbol::new(env, "ORACLE"), &oracle);
+
+    (admin, payment_client, merchant_client, merchant, oracle)
+}
+
+/// Reads back the most recently emitted `MERCHANT/TIER_UPGRADED` event's
+/// `(merchant_id, old_tier, new_tier)` payload.
+fn last_tier_upgraded_event(env: &Env) -> (Address, KycTier, KycTier) {
+    let events = env.events().all();
+    let found = events
+        .iter()
+        .rev()
+        .find(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 {
+                return false;
+            }
+            let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(env);
+            let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(env);
+            matches!(
+                (t0, t1),
+                (Ok(a), Ok(b))
+                    if a == Symbol::new(env, "MERCHANT") && b == Symbol::new(env, "TIER_UPGRADED")
+            )
+        })
+        .expect("expected a MERCHANT/TIER_UPGRADED event");
+
+    found.2.clone().try_into_val(env).unwrap()
+}
+
+/// The create_payment KYC gate rejects Unverified merchants outright (see
+/// the tier check in `create_payment`), so an Unverified merchant can never
+/// originate the payment that would carry it across the upgrade threshold.
+/// To exercise the Unverified -> Basic boundary in `maybe_upgrade_kyc_tier`
+/// without violating that gate, the payment is created while the merchant
+/// is still Basic-or-above and the merchant is demoted back to Unverified
+/// (an admin-only, always-available action) before the oracle verifies it —
+/// modeling a merchant placed back on probation while a payment is in
+/// flight.
+#[test]
+fn test_verify_payment_auto_upgrades_unverified_to_basic_at_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant, oracle) =
+        setup_tier_upgrade_env(&env, &KycTier::Basic);
+
+    let amount = TIER_UPGRADE_THRESHOLD_BASIC;
+    let payment_id = String::from_str(&env, "tier_upgrade_unverified_to_basic");
+    let args = integration_payment_args(&env, "tier_upgrade_unverified_to_basic", &merchant);
+    let args = crate::CreatePaymentArgs { amount, ..args };
+    payment_client.create_payment(&args);
+
+    merchant_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Unverified,
+        &Some(String::from_str(&env, "sig")),
+    );
+
+    let payer = Address::generate(&env);
+    let tx_hash = BytesN::<32>::random(&env);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &payer, &amount, &None::<u64>);
+
+    let merchant_record = merchant_client.get_merchant(&merchant);
+    assert_eq!(merchant_record.kyc_tier, KycTier::Basic);
+
+    let (event_merchant, old_tier, new_tier) = last_tier_upgraded_event(&env);
+    assert_eq!(event_merchant, merchant);
+    assert_eq!(old_tier, KycTier::Unverified);
+    assert_eq!(new_tier, KycTier::Basic);
+}
+
+#[test]
+fn test_verify_payment_does_not_upgrade_tier_below_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant, oracle) =
+        setup_tier_upgrade_env(&env, &KycTier::Basic);
+
+    let amount = TIER_UPGRADE_THRESHOLD_BASIC - 1;
+    let payment_id = String::from_str(&env, "tier_no_upgrade_below_threshold");
+    let args = integration_payment_args(&env, "tier_no_upgrade_below_threshold", &merchant);
+    let args = crate::CreatePaymentArgs { amount, ..args };
+    payment_client.create_payment(&args);
+
+    merchant_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Unverified,
+        &Some(String::from_str(&env, "sig")),
+    );
+
+    let payer = Address::generate(&env);
+    let tx_hash = BytesN::<32>::random(&env);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &payer, &amount, &None::<u64>);
+
+    let merchant_record = merchant_client.get_merchant(&merchant);
+    assert_eq!(
+        merchant_record.kyc_tier,
+        KycTier::Unverified,
+        "one unit below the threshold must not trigger an upgrade"
+    );
+}
+
+#[test]
+fn test_verify_payment_auto_upgrades_basic_to_full_at_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, payment_client, merchant_client, merchant, oracle) =
+        setup_tier_upgrade_env(&env, &KycTier::Basic);
+
+    // Pre-seed cumulative volume just under the Basic -> Full threshold so a
+    // small final confirmed payment lands exactly on the boundary.
+    let remaining = 1_000i128;
+    env.as_contract(&payment_client.address, || {
+        env.storage().persistent().set(
+            &DataKey::MerchantCumulativeVolume(merchant.clone()),
+            &(TIER_UPGRADE_THRESHOLD_FULL - remaining),
+        );
+    });
+
+    let payment_id = String::from_str(&env, "tier_upgrade_basic_to_full");
+    let args = integration_payment_args(&env, "tier_upgrade_basic_to_full", &merchant);
+    let args = crate::CreatePaymentArgs {
+        amount: remaining,
+        ..args
+    };
+    payment_client.create_payment(&args);
+
+    let payer = Address::generate(&env);
+    let tx_hash = BytesN::<32>::random(&env);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &payer, &remaining, &None::<u64>);
+
+    let merchant_record = merchant_client.get_merchant(&merchant);
+    assert_eq!(merchant_record.kyc_tier, KycTier::Full);
+
+    let (_event_merchant, old_tier, new_tier) = last_tier_upgraded_event(&env);
+    assert_eq!(old_tier, KycTier::Basic);
+    assert_eq!(new_tier, KycTier::Full);
+}
+
+#[test]
+fn test_verify_payment_auto_upgrades_full_to_business_at_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, payment_client, merchant_client, merchant, oracle) =
+        setup_tier_upgrade_env(&env, &KycTier::Full);
+
+    let remaining = 1_000i128;
+    env.as_contract(&payment_client.address, || {
+        env.storage().persistent().set(
+            &DataKey::MerchantCumulativeVolume(merchant.clone()),
+            &(TIER_UPGRADE_THRESHOLD_BUSINESS - remaining),
+        );
+    });
+
+    let payment_id = String::from_str(&env, "tier_upgrade_full_to_business");
+    let args = integration_payment_args(&env, "tier_upgrade_full_to_business", &merchant);
+    let args = crate::CreatePaymentArgs {
+        amount: remaining,
+        ..args
+    };
+    payment_client.create_payment(&args);
+
+    let payer = Address::generate(&env);
+    let tx_hash = BytesN::<32>::random(&env);
+    payment_client.verify_payment(&oracle, &payment_id, &tx_hash, &payer, &remaining, &None::<u64>);
+
+    let merchant_record = merchant_client.get_merchant(&merchant);
+    assert_eq!(merchant_record.kyc_tier, KycTier::Business);
+
+    let (_event_merchant, old_tier, new_tier) = last_tier_upgraded_event(&env);
+    assert_eq!(old_tier, KycTier::Full);
+    assert_eq!(new_tier, KycTier::Business);
+}
+
+/// Admin can always manually set a merchant's tier directly (including a
+/// downgrade), independent of the auto-upgrade volume thresholds above.
+#[test]
+fn test_admin_can_manually_set_any_tier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, merchant_client, merchant, _oracle) =
+        setup_tier_upgrade_env(&env, &KycTier::Business);
+
+    merchant_client.set_kyc_tier(&admin, &merchant, &KycTier::Unverified);
+    assert_eq!(
+        merchant_client.get_merchant(&merchant).kyc_tier,
+        KycTier::Unverified
+    );
 }
 
 // =============================================================================

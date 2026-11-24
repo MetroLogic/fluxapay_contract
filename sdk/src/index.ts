@@ -227,6 +227,9 @@ export interface CreatePaymentParams {
   /**
    * Issue #844: When true, checkout may collect an optional tip via
    * `confirmPayment({ tipAmount })`.
+   * Issue #1025 makes this enforceable: `verifyPayment`'s `tipAmount` is
+   * validated against `MAX_TIP_BPS` (20%) of `amount` and stored
+   * separately from the base amount. Defaults to `false` when omitted.
    */
   tipEnabled?: boolean;
 }
@@ -754,6 +757,22 @@ export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
   83: "TrialTooLong",
   84: "InvalidPaymentLink",
   85: "KycLimitExceeded",
+  88: "OracleStale",
+  89: "DepositAddressInUse",
+  86: "LinkAlreadyUsed",
+  87: "InvalidMerkleLeafCount",
+  88: "MerkleDistributionNotFound",
+  89: "MerkleAlreadyClaimed",
+  90: "InvalidMerkleProof",
+  91: "MerkleDistributionExpired",
+  92: "MerkleDistributionNotExpired",
+  93: "MerkleDistributionAlreadyDefunded",
+  94: "TreasuryExceedsSingleAdminThreshold",
+  95: "ExceedsTierSingleLimit",
+  96: "ExceedsTierMonthlyLimit",
+  87: "InvalidVersion",
+  88: "InvalidRetryTarget",
+  89: "TipExceedsMax",
   404: "PaymentNotFound",
   405: "RefundNotFound",
   406: "InvalidAmount",
@@ -1166,14 +1185,14 @@ export class FluxapayClient {
   }
 
   private getMerchantRegistry(): MerchantRegistryClient {
+    const profile = this.networkSwitcher.getProfile();
     const contractId = resolveContractId(
       this.config.merchantRegistryContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].merchantRegistry,
+      FLUXAPAY_CONTRACT_IDS[profile.environment].merchantRegistry,
       "merchantRegistryContractId",
     );
 
     if (!this.merchantRegistryClient) {
-      const profile = this.networkSwitcher.getProfile();
       this.merchantRegistryClient = new MerchantRegistryClient({
         network: profile.environment,
         rpcUrl: this.config.rpcUrl || profile.rpcUrl,
@@ -1190,14 +1209,14 @@ export class FluxapayClient {
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   fxOracle(): FxOracleClient {
+    const profile = this.networkSwitcher.getProfile();
     const oracleContractId = resolveContractId(
       this.config.oracleContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].fxOracle,
+      FLUXAPAY_CONTRACT_IDS[profile.environment].fxOracle,
       "oracleContractId",
     );
 
     if (!this.fxOracleClient) {
-      const profile = this.networkSwitcher.getProfile();
       this.fxOracleClient = new FxOracleClient({
         network: profile.environment,
         rpcUrl: this.config.rpcUrl || profile.rpcUrl,
@@ -1431,6 +1450,12 @@ export class FluxapayClient {
     transactionHash: Buffer;
     payerAddress: string;
     amountReceived: bigint;
+    /**
+     * Issue #1025: Tip/gratuity portion of `amountReceived`, reported
+     * separately. Only honored when the payment was created with
+     * `tipEnabled: true`; otherwise ignored on-chain.
+     */
+    tipAmount?: bigint;
   }) {
     return withMappedContractError(() =>
       this.contract.verify_payment({
@@ -1439,6 +1464,7 @@ export class FluxapayClient {
         transaction_hash: params.transactionHash,
         payer_address: params.payerAddress,
         amount_received: params.amountReceived,
+        tip_amount: params.tipAmount,
       }),
     );
   }
@@ -1555,6 +1581,28 @@ export class FluxapayClient {
 
     return withMappedContractError(() =>
       this.contract.get_merchant({
+        merchant_id: merchantId,
+      }),
+    );
+  }
+
+  /**
+   * Get the merchant's accumulated pending settlement balance.
+   *
+   * Delegates to `MerchantRegistryClient.getPendingSettlement` when the
+   * merchant registry contract ID is configured; falls back to calling
+   * `get_pending_settlement` on the main contract (embedded MerchantRegistry
+   * path).
+   *
+   * Backs the `useMerchantBalance` React hook.
+   */
+  async getMerchantBalance(merchantId: string): Promise<bigint> {
+    if (this.config.merchantRegistryContractId) {
+      return this.getMerchantRegistry().getPendingSettlement(merchantId);
+    }
+
+    return withMappedContractError(() =>
+      this.contract.get_pending_settlement({
         merchant_id: merchantId,
       }),
     );
@@ -2439,6 +2487,20 @@ export class FluxapayClient {
   }
 
   /**
+   * Get a payment stream's full on-chain record (sender, receiver, rate,
+   * remaining deposit, last checkpoint, status, etc).
+   *
+   * Backs the `useStreamAccrual` React hook: the hook polls this on an
+   * interval and extrapolates the live accrued amount between polls using
+   * `computeTotalAccrued`, mirroring the contract's lazy accrual formula.
+   */
+  async getStream(streamId: string) {
+    return withMappedContractError(() =>
+      this.contract.get_stream({ stream_id: streamId }),
+    );
+  }
+
+  /**
    * Issue #492: Get customer profile for a merchant.
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
@@ -2846,14 +2908,14 @@ export class FluxapayClient {
   }
 
   private getPaymentLinkManager(): PaymentLinkManagerClient {
+    const profile = this.networkSwitcher.getProfile();
     const contractId = resolveContractId(
       this.config.paymentLinkContractId,
-      FLUXAPAY_CONTRACT_IDS[this.config.network].paymentLinkManager,
+      FLUXAPAY_CONTRACT_IDS[profile.environment].paymentLinkManager,
       "paymentLinkContractId",
     );
 
     if (!this.paymentLinkManagerClient) {
-      const profile = this.networkSwitcher.getProfile();
       this.paymentLinkManagerClient = new PaymentLinkManagerClient({
         network: profile.environment,
         rpcUrl: this.config.rpcUrl || profile.rpcUrl,
@@ -3715,6 +3777,7 @@ export {
   type CreatePaymentLinkResult,
 } from "./contracts/payment-link-manager.js";
 export { SEP10Authenticator, type SEP10ChallengeResponse, type SEP10AuthenticatedResponse } from "./sep10.js";
+export { computeTotalAccrued, computeRemainingAfterWithdraw } from "./stream-utils.js";
 export {
   GasEstimatorClient,
   type GasEstimatorConfig,
@@ -3869,6 +3932,5 @@ export {
   type SwapExecutedPayload,
   type UnknownFluxapayEvent,
 } from "./events.js";
-
 
 

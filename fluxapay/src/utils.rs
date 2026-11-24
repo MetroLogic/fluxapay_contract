@@ -1,4 +1,63 @@
-use soroban_sdk::{Bytes, Env, Map, String};
+use soroban_sdk::{Address, Bytes, Env, Executable, Map, String};
+
+/// Issue #1171: The kind of address a public entrypoint expects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressExpectation {
+    /// Any non-default address.
+    Any,
+    /// A deployed contract address (token, DEX router, oracle, ...).
+    Contract,
+    /// A contract address, allowing the all-zero native-XLM sentinel used by
+    /// `swap_and_pay` (`ZERO_CONTRACT_STRKEY`).
+    ContractOrNativeSentinel,
+    /// An account-style address. Unresolved (mock/test) addresses are allowed;
+    /// a *deployed* contract is rejected to catch misrouted calls.
+    Account,
+}
+
+/// Issue #1171: Validate an address at a public trust boundary.
+///
+/// Rejects the all-zero default/sentinel address for every expectation except
+/// `ContractOrNativeSentinel`, enforces the contract-vs-account shape, and
+/// rejects a deployed contract where an account is expected.
+pub fn validate_address_input(
+    env: &Env,
+    address: &Address,
+    expected: AddressExpectation,
+) -> Result<(), crate::Error> {
+    let zero_address = Address::from_str(env, crate::ZERO_CONTRACT_STRKEY);
+    if address == &zero_address && expected != AddressExpectation::ContractOrNativeSentinel {
+        return Err(crate::Error::InvalidAddress);
+    }
+
+    // Soroban strkeys start with 'C' for contracts and 'G'/'M' for accounts.
+    let strkey = address.to_string();
+    let mut prefix = [0u8; 1];
+    strkey.copy_into_slice(&mut prefix);
+    let is_contract_shape = prefix[0] == b'C';
+
+    match expected {
+        AddressExpectation::Any => Ok(()),
+        AddressExpectation::Contract | AddressExpectation::ContractOrNativeSentinel => {
+            if is_contract_shape {
+                Ok(())
+            } else {
+                Err(crate::Error::InvalidAddress)
+            }
+        }
+        AddressExpectation::Account => {
+            let deployed_contract = matches!(
+                address.executable(),
+                Some(Executable::Wasm(_)) | Some(Executable::StellarAsset)
+            );
+            if is_contract_shape && deployed_contract {
+                Err(crate::Error::InvalidAddress)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
 
 /// Maximum number of key/value pairs allowed in payment/link metadata.
 pub const MAX_METADATA_KEYS: u32 = 20;
@@ -6,6 +65,31 @@ pub const MAX_METADATA_KEYS: u32 = 20;
 pub const MAX_METADATA_KEY_LEN: u32 = 64;
 /// Maximum length of a metadata value (characters).
 pub const MAX_METADATA_VALUE_LEN: u32 = 256;
+pub const MAX_CONTRACT_VERSION_LEN: u32 = 32;
+
+/// Validate a numeric `x.y.z` contract version with non-empty components.
+pub fn is_valid_contract_version(version: &String) -> bool {
+    let bytes = version.to_bytes();
+    let len = bytes.len();
+    if len == 0 || len > MAX_CONTRACT_VERSION_LEN {
+        return false;
+    }
+
+    let mut component_len = 0u32;
+    let mut separators = 0u32;
+    for i in 0..len {
+        match bytes.get(i) {
+            Some(b'0'..=b'9') => component_len += 1,
+            Some(b'.') if component_len > 0 && separators < 2 => {
+                separators += 1;
+                component_len = 0;
+            }
+            _ => return false,
+        }
+    }
+
+    separators == 2 && component_len > 0
+}
 
 /// Validate metadata map size and key/value length limits.
 ///
@@ -161,7 +245,46 @@ pub fn concat_strings(env: &Env, parts: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::{Address as _, MuxedAddress as _};
     use soroban_sdk::Env;
+
+    #[test]
+    fn address_validation_rejects_default_address() {
+        let env = Env::default();
+        let zero = Address::from_str(&env, crate::ZERO_CONTRACT_STRKEY);
+        for expectation in [
+            AddressExpectation::Any,
+            AddressExpectation::Contract,
+            AddressExpectation::Account,
+        ] {
+            assert_eq!(
+                validate_address_input(&env, &zero, expectation),
+                Err(crate::Error::InvalidAddress)
+            );
+        }
+        // Native XLM is deliberately represented by the zero contract strkey.
+        assert!(validate_address_input(
+            &env,
+            &zero,
+            AddressExpectation::ContractOrNativeSentinel
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn address_validation_enforces_contract_vs_account_shape() {
+        let env = Env::default();
+        let account = soroban_sdk::testutils::MuxedAddress::generate(&env).address();
+        assert_eq!(
+            validate_address_input(&env, &account, AddressExpectation::Contract),
+            Err(crate::Error::InvalidAddress)
+        );
+        assert!(validate_address_input(&env, &account, AddressExpectation::Account).is_ok());
+
+        let mock_contract = Address::generate(&env);
+        assert!(validate_address_input(&env, &mock_contract, AddressExpectation::Contract).is_ok());
+        assert!(validate_address_input(&env, &mock_contract, AddressExpectation::Account).is_ok());
+    }
 
     fn id_str<'a>(_env: &Env, s: &String, buf: &'a mut [u8; 64]) -> &'a str {
         let len = s.len() as usize;

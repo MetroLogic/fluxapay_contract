@@ -1,6 +1,7 @@
 //! Data keys for persistent storage in FluxaPay.
 
 use crate::merchant_registry::KycTier;
+use crate::types::PauseScope;
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol};
 
 /// Converts a payment ID String into a 32-byte hash key for storage.
@@ -16,7 +17,63 @@ pub fn payment_id_str_to_key(env: &Env, payment_id: &str) -> BytesN<32> {
         .to_bytes()
 }
 
-#[contracttpe]
+// ---------------------------------------------------------------------------
+// Issue #1210: hash additional high-volume DataKey variants to BytesN<32>.
+//
+// Cardinality audit (variable-length `String`-keyed `DataKey` variants, ranked
+// by expected record count at scale):
+//   - `IdempotencyKey(String)`  — one entry per `client_token` ever submitted
+//     to `create_payment`/batch creation; grows 1:1 with payment volume and is
+//     retained for the full payment-expiry TTL. High volume. Hashed below.
+//   - `Subscription(String)`    — one entry per subscription; long-lived
+//     (recurring billing), grows with active + historical subscription count.
+//     High volume. Hashed below.
+//   - `Dispute(String)`         — one entry per filed dispute, holding the
+//     full `Dispute` record (reason/evidence strings already dominate this
+//     entry's size, but the variable-length String key itself still adds
+//     unbounded overhead on every read/write/has call). High volume relative
+//     to disputes filed. Hashed below.
+//   - `SubscriptionPlan(String)` — one entry per merchant-defined plan.
+//     Cardinality is bounded by (merchants × plans-per-merchant), typically
+//     orders of magnitude smaller than the subscriptions created against those
+//     plans. Left as `String` for this pass.
+//   - `Refund(String)` / `PaymentRefunds(String)` / `FeeWaiverCode(String)` /
+//     `Invoice(String)` / dispute-vote/stake/note variants keyed by
+//     `(String, Address)` — reviewed, but each of these either has lower
+//     expected cardinality than the three above, or (for the `(String,
+//     Address)` composite keys) the `Address` component already dominates
+//     storage key size, so the marginal rent savings from hashing the String
+//     half is smaller. Deferred to a follow-up to keep this change reviewable.
+//
+// Migration note: this is a forward-only change to the storage key shape.
+// Existing persistent entries written under the old `DataKey::IdempotencyKey
+// (String)` / `DataKey::Subscription(String)` / `DataKey::Dispute(String)`
+// discriminants are keyed differently than entries written after this change
+// (a String payload serializes differently than a BytesN<32> payload), so any
+// already-deployed contract instance would need a one-off re-key pass (read
+// every live id under the old key shape, write it back under
+// `*_id_to_key(..)`) before upgrading. For a fresh deployment (no prior
+// production data under the old key shape) no migration step is required.
+
+/// Converts an idempotency `client_token` String into a 32-byte hash key for
+/// storage (Issue #1210). Mirrors `payment_id_to_key`.
+pub fn idempotency_key_to_key(env: &Env, token: &String) -> BytesN<32> {
+    env.crypto().sha256(&token.to_bytes()).to_bytes()
+}
+
+/// Converts a subscription ID String into a 32-byte hash key for storage
+/// (Issue #1210). Mirrors `payment_id_to_key`.
+pub fn subscription_id_to_key(env: &Env, subscription_id: &String) -> BytesN<32> {
+    env.crypto().sha256(&subscription_id.to_bytes()).to_bytes()
+}
+
+/// Converts a dispute ID String into a 32-byte hash key for storage
+/// (Issue #1210). Mirrors `payment_id_to_key`.
+pub fn dispute_id_to_key(env: &Env, dispute_id: &String) -> BytesN<32> {
+    env.crypto().sha256(&dispute_id.to_bytes()).to_bytes()
+}
+
+#[contracttype]
 pub enum DataKey {
     Payment(BytesN<32>),
     PaymentStatusHistory(String),
@@ -25,7 +82,9 @@ pub enum DataKey {
     Refund(String),
     PaymentRefunds(String),
     RefundCounter,
-    Dispute(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `dispute_id_to_key`.
+    Dispute(BytesN<32>),
     PaymentDisputes(String),
     DisputeCounter,
     /// Global append-only index of all dispute IDs, for paginated cross-merchant
@@ -33,6 +92,7 @@ pub enum DataKey {
     DisputeIndex,
     Stream(String),
     TreasuryBalance,
+    TreasuryBalanceByToken(Address),
     UsdcToken,
     Paused,
     CreationPaused,
@@ -41,9 +101,13 @@ pub enum DataKey {
     Blacklisted(Address),
     MerchantAmountLimits(Address),
     GlobalAmountLimits,
-    IdempotencyKey(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `idempotency_key_to_key`.
+    IdempotencyKey(BytesN<32>),
     SubscriptionPlan(String),
-    Subscription(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `subscription_id_to_key`.
+    Subscription(BytesN<32>),
     PayerSubscriptions(Address),
     SubscriptionCounter,
     StreamCounter,
@@ -147,6 +211,7 @@ pub enum DataKey {
     TreasuryWithdrawalProposal(String),
     /// Per-token treasury balance for multi-token support.
     TokenTreasuryBalance(Address),
+    /// Per-token treasury balance keyed by token address (issue: RefundManager.TreasuryBalance).
     /// Issue #485: Marks a payment as created from a direct_transfer payment link.
     /// Prevents future disputes from being created for this payment.
     DirectTransferPayment(String),
@@ -212,4 +277,24 @@ pub enum DataKey {
     AutoRefundQueue,
     /// Global append-only index of all refund IDs for paginated enumeration.
     RefundIndex,
+    /// Pause state keyed by operation scope. Appended to preserve existing storage keys.
+    PauseScope(PauseScope),
+    /// Issue #1033: Admin-configurable override (in seconds) for
+    /// `MAX_ORACLE_STALENESS_SECS`, enforced in `confirm_payment` independently
+    /// of the FX oracle's own internal staleness threshold.
+    OracleStalenessThreshold,
+    /// Issue #1032: Maps a `deposit_address` to the `payment_id` currently
+    /// holding it while that payment is `Pending`, so a new `create_payment`
+    /// can detect and reject concurrent reuse of the same address.
+    DepositAddressPending(Address),
+    /// Issues #1026 / #1027: Counter for Merkle batch distribution IDs.
+    MerkleDistributionCounter,
+    /// Issues #1026 / #1027: Merkle batch distribution record keyed by distribution_id.
+    MerkleDistribution(u64),
+    /// Issue #1013: Configurable amount below which `withdraw_treasury` may be
+    /// executed by a single admin without going through multisig governance.
+    TreasurySingleAdminThreshold,
+    /// Issue #1202: Append-only index of dispute IDs filed against a merchant,
+    /// used by the paginated `get_merchant_disputes` dashboard view.
+    MerchantDisputes(Address),
 }

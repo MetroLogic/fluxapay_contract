@@ -1,20 +1,62 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import { createHash, randomBytes } from "crypto";
 import * as dotenv from "dotenv";
 import { z } from "zod";
 import { Database } from "./database";
-import { requireApiKey, requireAdminApiKey, requireScope } from "./auth/api-key";
-import { requireSEP10Auth } from "./auth/middleware";
-import { loadSEP10AuthConfig } from "./auth/config";
-import { sseManager } from "./sse";
 import {
   getPlatformEd25519PublicKey,
   registerWebhookRoutes,
+  startWebhookRetryDaemon,
   WebhookStore,
 } from "./webhooks";
 import { getCachedRate } from "./fx-rate-cache";
 import { createRateLimitMiddleware } from "./rate-limit";
+import { anchorEvidenceHash, parseEvidenceMultipart, pinEvidence } from "./evidence";
+import {
+  extractApiKey,
+  getKeyMerchantId,
+  getKeyScopes,
+  requireApiKey,
+  requireAdminApiKey,
+  requireScope,
+} from "./auth/api-key";
+import { requireSEP10Auth } from "./auth/middleware";
+import { loadSEP10AuthConfig, type SEP10AuthConfig } from "./auth/config";
+import { SettlementService } from "./settlement";
 
 dotenv.config();
+
+const PAYMENT_AMOUNT_DECIMALS = 7;
+
+// Issue #1163: per-merchant settings held by the running server. These are
+// process-local until a durable merchant settings table is added; the dashboard
+// endpoints below are authenticated with the merchant's SEP-10 JWT.
+interface MerchantApiKeyRecord {
+  id: string;
+  label: string;
+  masked_key: string;
+  lifetime_days: number;
+  created_at: string;
+  expires_at: string;
+}
+interface MerchantSettings {
+  webhook_signing_key: string;
+  fee_recipient: string | null;
+  api_keys: MerchantApiKeyRecord[];
+}
+const merchantSettings = new Map<string, MerchantSettings>();
+function settingsFor(merchantId: string): MerchantSettings {
+  let settings = merchantSettings.get(merchantId);
+  if (!settings) {
+    settings = {
+      webhook_signing_key: randomBytes(32).toString("base64url"),
+      fee_recipient: null,
+      api_keys: [],
+    };
+    merchantSettings.set(merchantId, settings);
+  }
+  return settings;
+}
 
 export type ReplayDLQHandler = () => Promise<{ attempted: number; succeeded: number; failed: number }>;
 
@@ -22,6 +64,7 @@ export interface ReplayProgressUpdate {
   processed: number;
   total: number;
   stored?: number;
+  skipped_duplicates?: number;
   currentLedger?: number;
 }
 
@@ -29,36 +72,106 @@ export type EventReplayHandler = (
   fromLedger: number,
   toLedger: number,
   onProgress?: (progress: ReplayProgressUpdate) => void,
-) => Promise<{ processed: number; stored: number; total: number }>;
+) => Promise<{ processed: number; stored: number; skipped_duplicates?: number; total: number }>;
 
-export const MAX_REPLAY_LEDGER_RANGE = 10000;
-
-/** Issue #839: stroops use 7 decimal places for USDC amounts. */
-const USDC_DECIMALS = 7;
-/** Issue #839: default staleness threshold (seconds) for convert preview. */
-const DEFAULT_FX_STALENESS_SECS = Number(process.env.FX_STALENESS_SECS || 300);
-
-/** Issue #839: simple per-IP sliding window rate limiter (60 req/min). */
-const FX_CONVERT_LIMIT = 60;
-const FX_CONVERT_WINDOW_MS = 60_000;
-const fxConvertHits = new Map<string, number[]>();
-
-function fxConvertRateLimit(req: Request, res: Response, next: NextFunction): void {
-  const ip = (req.ip || req.socket.remoteAddress || "unknown").toString();
-  const now = Date.now();
-  const windowStart = now - FX_CONVERT_WINDOW_MS;
-  const recent = (fxConvertHits.get(ip) || []).filter((t) => t > windowStart);
-  if (recent.length >= FX_CONVERT_LIMIT) {
-    res.status(429).json({ error: "Rate limit exceeded: 60 requests per minute" });
-    return;
+async function checkSorobanRpcEndpoint(endpoint: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3_000);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return false;
+    const body = (await response.json()) as { result?: { status?: unknown } };
+    return body.result?.status === "healthy";
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
   }
-  recent.push(now);
-  fxConvertHits.set(ip, recent);
-  next();
 }
 
-function formatFixed(n: number, decimals: number): string {
-  return n.toFixed(decimals);
+function asInteger(value: unknown): bigint {
+  const parsed = BigInt(String(value ?? 0));
+  return parsed;
+}
+
+function formatMinorUnits(value: bigint, decimalPlaces = 2): string {
+  const negative = value < 0n;
+  const absolute = negative ? -value : value;
+  const divisor = 10n ** BigInt(decimalPlaces);
+  const whole = absolute / divisor;
+  const fraction = String(absolute % divisor).padStart(decimalPlaces, "0");
+  return `${negative ? "-" : ""}${whole}.${fraction}`;
+}
+
+function formatTokenAmount(value: bigint): string {
+  const scale = 10n ** BigInt(PAYMENT_AMOUNT_DECIMALS - 2);
+  const cents = (value + (value >= 0n ? scale / 2n : -(scale / 2n))) / scale;
+  return formatMinorUnits(cents);
+}
+
+function convertAmount(
+  amount: bigint,
+  rate: bigint,
+  rateDecimals: number,
+  invert = false
+): string {
+  const amountScale = 10n ** BigInt(PAYMENT_AMOUNT_DECIMALS);
+  const rateScale = 10n ** BigInt(rateDecimals);
+  const numerator = invert ? amount * rateScale : amount * rate;
+  const denominator = invert ? amountScale * rate : amountScale * rateScale;
+  const centsNumerator = numerator * 100n;
+  const cents = (
+    centsNumerator + (centsNumerator >= 0n ? denominator / 2n : -(denominator / 2n))
+  ) / denominator;
+  return formatMinorUnits(cents);
+}
+
+function csvCell(value: unknown): string {
+  const text = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildReconciliationCsv(report: Record<string, any>): string {
+  const header = [
+    "record_type", "id", "payment_id", "amount", "currency", "status",
+    "created_at", "settled_at", "fee_amount", "net_amount", "fiat_amount", "fiat_currency",
+    "fiat_equivalent", "customer_ref", "tags",
+  ];
+  const lines = [header.map(csvCell).join(",")];
+  for (const payment of report.payments) {
+    lines.push([
+      "payment", payment.payment_id, payment.payment_id, payment.amount,
+      payment.currency, payment.status, payment.created_at, payment.settled_at,
+      payment.fee_amount, "", payment.fiat_amount, payment.fiat_currency,
+      payment.fiat_equivalent, payment.customer_ref, payment.tags,
+    ].map(csvCell).join(","));
+  }
+  for (const settlement of report.settlements) {
+    lines.push([
+      "settlement", settlement.payment_id, settlement.payment_id,
+      settlement.amount, settlement.currency, "SETTLED", "", settlement.settled_at,
+      settlement.fee_amount, settlement.net_amount,
+    ].map(csvCell).join(","));
+  }
+  for (const refund of report.refunds) {
+    lines.push([
+      "refund", refund.refund_id, refund.payment_id, refund.amount,
+      refund.currency, refund.status, refund.created_at,
+    ].map(csvCell).join(","));
+  }
+  for (const adjustment of report.dispute_adjustments) {
+    lines.push([
+      "dispute_adjustment", adjustment.dispute_id, adjustment.payment_id,
+      adjustment.amount, adjustment.currency, "LOST_DISPUTE_REFUND",
+      adjustment.created_at,
+    ].map(csvCell).join(","));
+  }
+  return `${lines.join("\r\n")}\r\n`;
 }
 
 // Issue #785: query schema for the filtered payments endpoint.
@@ -83,7 +196,20 @@ const paymentsQuerySchema = z.object({
   to: isoDateString.optional(),
   limit: z.coerce.number().int().min(1).max(100).optional().default(50),
   cursor: z.string().max(512).optional(),
+  // Issue #1035: filter to payments routed from a specific muxed sub-account.
+  payer_muxed_id: z.coerce.bigint().optional(),
 });
+
+const subscriptionMetricsQuerySchema = z.object({
+  merchant_id: z.string().min(1).max(128),
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Expected period in YYYY-MM format"),
+});
+
+const SUBSCRIPTION_METRICS_CACHE_TTL_MS = 5 * 60 * 1000;
+const subscriptionMetricsCache = new Map<
+  string,
+  { expiresAt: number; response: Record<string, unknown> }
+>();
 
 /**
  * Decode an opaque pagination cursor of the form base64url(created_at|id).
@@ -101,66 +227,300 @@ function decodePaymentsCursor(cursor: string): { createdAt: string; id: string }
   } catch {
     return null;
   }
+
+  const missingFxPayments: string[] = [];
+  const payments = data.payments.map((payment) => {
+    const currency = String(payment.currency || "").toUpperCase();
+    const amount = asInteger(payment.amount);
+    const equivalents: Record<string, string> = {};
+    let foundRate = false;
+
+    for (const [pair, rate] of rates) {
+      const [base, quote] = pair.split("_");
+      if (base === currency && quote) {
+        equivalents[quote] = convertAmount(amount, rate.rate, rate.decimals);
+        foundRate = true;
+      } else if (quote === currency && base) {
+        equivalents[base] = convertAmount(amount, rate.rate, rate.decimals, true);
+        foundRate = true;
+      }
+    }
+
+    const requestedFiat = String(payment.fiat_currency || "").toUpperCase();
+    if (!foundRate || (requestedFiat && equivalents[requestedFiat] === undefined)) {
+      missingFxPayments.push(String(payment.payment_id));
+    }
+
+    return {
+      ...payment,
+      amount: formatTokenAmount(amount),
+      fee_amount: formatTokenAmount(asInteger(payment.fee_amount)),
+      fiat_amount: payment.fiat_amount == null ? null : String(payment.fiat_amount),
+      fiat_equivalent: equivalents,
+    };
+  });
+
+  const settledUsdc = data.settlements.filter(
+    (settlement) => String(settlement.currency || "").toUpperCase() === "USDC"
+  );
+  const usdcRefunds = data.refunds.filter(
+    (refund) => String(refund.currency || "").toUpperCase() === "USDC"
+  );
+  const usdcDisputeAdjustments = data.disputeAdjustments.filter(
+    (adjustment) => String(adjustment.currency || "").toUpperCase() === "USDC"
+  );
+  const gross = settledUsdc.reduce((sum, item) => sum + asInteger(item.amount), 0n);
+  const fees = settledUsdc.reduce((sum, item) => sum + asInteger(item.fee_amount), 0n);
+  const refunds = usdcRefunds.reduce((sum, item) => sum + asInteger(item.amount), 0n);
+  const net = gross - fees - refunds;
+  const disputeAdjustments = usdcDisputeAdjustments.reduce(
+    (sum, item) => sum + asInteger(item.amount),
+    0n
+  );
+  const netFiatEquivalent: Record<string, string> = {};
+  for (const [pair, rate] of rates) {
+    const [base, quote] = pair.split("_");
+    if (base === "USDC" && quote) {
+      netFiatEquivalent[quote] = convertAmount(net, rate.rate, rate.decimals);
+    }
+  }
+  for (const [pair, rate] of rates) {
+    const [base, quote] = pair.split("_");
+    if (quote === "USDC" && base && netFiatEquivalent[base] === undefined) {
+      netFiatEquivalent[base] = convertAmount(net, rate.rate, rate.decimals, true);
+    }
+  }
+
+  const report = {
+    period: { from, to },
+    summary: {
+      total_gross_usdc: formatTokenAmount(gross),
+      total_fees_usdc: formatTokenAmount(fees),
+      total_refunds_usdc: formatTokenAmount(refunds),
+      total_net_settled_usdc: formatTokenAmount(net),
+      fiat_equivalent: netFiatEquivalent,
+      dispute_adjustments: formatTokenAmount(disputeAdjustments),
+      fx_conversion_unavailable_payment_ids: missingFxPayments,
+    },
+    payments,
+    settlements: data.settlements.map((settlement) => {
+      const amount = asInteger(settlement.amount);
+      const fee = asInteger(settlement.fee_amount);
+      return {
+        ...settlement,
+        amount: formatTokenAmount(amount),
+        fee_amount: formatTokenAmount(fee),
+        net_amount: formatTokenAmount(amount - fee),
+      };
+    }),
+    refunds: data.refunds.map((refund) => ({
+      ...refund,
+      amount: formatTokenAmount(asInteger(refund.amount)),
+    })),
+    dispute_adjustments: data.disputeAdjustments.map((adjustment) => ({
+      ...adjustment,
+      amount: formatTokenAmount(asInteger(adjustment.amount)),
+    })),
+  };
+
+  return report;
 }
 
-function encodePaymentsCursor(createdAt: string, id: string): string {
-  return Buffer.from(`${createdAt}|${id}`, "utf8").toString("base64url");
+function makeOnboardingStep(
+  key: string,
+  completedAt: Date | string | null,
+  actionUrl: string
+): { key: string; completed: boolean; completed_at?: string; action_url?: string } {
+  if (completedAt !== null) {
+    const timestamp = completedAt instanceof Date ? completedAt : new Date(completedAt);
+    return { key, completed: true, completed_at: timestamp.toISOString() };
+  }
+  return { key, completed: false, action_url: actionUrl };
+}
+
+function formatUsdc(stroops: string | number | bigint): string {
+  const amount = BigInt(stroops);
+  const cents = (amount + 50_000n) / 100_000n;
+  return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
 }
 
 export function createServer(
   database: Database,
   replayDlqHandler?: ReplayDLQHandler,
+  sep10AuthConfig: SEP10AuthConfig = loadSEP10AuthConfig(),
   eventReplayHandler?: EventReplayHandler,
+  rpcReadinessCheck: () => Promise<boolean> = () =>
+    checkSorobanRpcEndpoint(
+      process.env.SOROBAN_RPC_URL || "http://localhost:8000/soroban/rpc"
+    )
 ) {
   const app = express();
+  const sep10Config = sep10AuthConfig;
+  const settlementService = new SettlementService(database);
   app.use(express.json());
 
   // Issue #817: rate limit ALL routes (auth gets a stricter per-IP budget).
   app.use(createRateLimitMiddleware());
 
-  // GET /health - Public endpoint checking database connection
-  app.get("/health", async (_req: Request, res: Response) => {
-    try {
-      const health = await database.checkHealth();
-      if (health.healthy) {
-        res.status(200).json({ status: "healthy", database: "connected" });
-      } else {
-        res.status(503).json({ status: "unhealthy", database: "disconnected", error: health.details });
+  app.post(
+    "/v1/disputes/:id/evidence",
+    requireSEP10Auth(sep10Config),
+    express.raw({ type: "multipart/form-data", limit: "50mb" }),
+    async (req: Request, res: Response) => {
+      try {
+        const context = await database.getDisputeEvidenceContext(req.params.id);
+        if (!context) {
+          res.status(404).json({ error: "Dispute not found" });
+          return;
+        }
+        if (req.auth?.sub !== context.disputer && req.auth?.sub !== context.merchantId) {
+          res.status(403).json({ error: "Only a dispute party may upload evidence" });
+          return;
+        }
+        if (!Buffer.isBuffer(req.body)) {
+          res.status(400).json({ error: "Expected multipart file upload" });
+          return;
+        }
+
+        const file = parseEvidenceMultipart(req.body, req.headers["content-type"] || "");
+        const evidenceHash = createHash("sha256").update(file.bytes).digest();
+        const pinned = await pinEvidence(file);
+        const txHash = await anchorEvidenceHash(req.params.id, req.auth.sub, evidenceHash);
+        const item = {
+          ipfs_cid: pinned.cid,
+          evidence_hash: evidenceHash.toString("hex"),
+          ipfs_gateway_url: pinned.gatewayUrl,
+          filename: file.filename,
+          content_type: file.contentType,
+          uploaded_by: req.auth.sub,
+          tx_hash: txHash,
+          created_at: new Date().toISOString(),
+        };
+        const evidence = await database.appendDisputeEvidence(req.params.id, item);
+        if (!evidence) {
+          res.status(404).json({ error: "Dispute not found" });
+          return;
+        }
+        res.status(201).json({ ...item, evidence });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Evidence upload failed";
+        const status = /multipart|file type|size limit|file field|boundary/i.test(message) ? 400 : 502;
+        res.status(status).json({ error: message });
       }
-    } catch (error: any) {
-      res.status(503).json({ status: "unhealthy", database: "disconnected", error: error.message || String(error) });
-    }
+    },
+  );
+
+  app.get(
+    "/v1/merchant/settlements/:paymentId",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = req.auth?.merchant_id || req.auth?.sub;
+        if (!merchantId) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+
+        let settlement = await database.getSettlement(req.params.paymentId);
+        if (
+          !settlement ||
+          (settlement.merchantId !== merchantId &&
+            !sep10Config.adminAccounts.has(req.auth!.sub))
+        ) {
+          res.status(404).json({ error: "Settlement not found" });
+          return;
+        }
+
+        if (settlement.status === "awaiting_user" || settlement.status === "pending") {
+          settlement =
+            (await settlementService.resume(req.params.paymentId)) ?? settlement;
+        }
+
+        res.status(200).json({
+          payment_id: settlement.paymentId,
+          status: settlement.status,
+          anchor_transaction_id: settlement.anchorTxnId,
+          interactive_url: settlement.status === "awaiting_user"
+            ? settlement.interactiveUrl ?? null
+            : null,
+          amount: settlement.amount,
+          currency: settlement.currency,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/disputes/:id/evidence",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response) => {
+      const context = await database.getDisputeEvidenceContext(req.params.id);
+      if (!context) {
+        res.status(404).json({ error: "Dispute not found" });
+        return;
+      }
+      if (req.auth?.sub !== context.disputer && req.auth?.sub !== context.merchantId) {
+        res.status(403).json({ error: "Only a dispute party may view evidence" });
+        return;
+      }
+      res.status(200).json({ evidence: context.evidence });
+    },
+  );
+
+  // Liveness only: dependency failures must not trigger a process restart.
+  app.get("/health", async (_req: Request, res: Response) => {
+    res.status(200).json({ status: "alive" });
   });
 
-  // Issue #839: public currency conversion preview (cached oracle rate, no auth).
-  // Rate-limited to 60 req/min per IP. Must stay before the API-key gate.
-  app.get("/v1/fx/convert", fxConvertRateLimit, (req: Request, res: Response) => {
-    const from = typeof req.query.from === "string" ? req.query.from.toUpperCase() : "";
-    const to = typeof req.query.to === "string" ? req.query.to.toUpperCase() : "";
-    const amountRaw = typeof req.query.amount === "string" ? req.query.amount : "";
+  app.get("/ready", async (_req: Request, res: Response) => {
+    const [databaseHealthy, rpcHealthy] = await Promise.all([
+      database.checkHealth().then((health) => health.healthy).catch(() => false),
+      rpcReadinessCheck().catch(() => false),
+    ]);
+    const ready = databaseHealthy && rpcHealthy;
+    res.status(ready ? 200 : 503).json({
+      status: ready ? "ready" : "not_ready",
+      checks: {
+        database: databaseHealthy ? "available" : "unavailable",
+        rpc: rpcHealthy ? "available" : "unavailable",
+      },
+    });
+  });
 
-    if (!from || !to || !amountRaw) {
-      res.status(400).json({ error: "Query params from, to, and amount are required" });
-      return;
-    }
+  // Merchant onboarding is scoped to the merchant in the authenticated SEP-10 token.
+  app.get(
+    "/v1/merchants/me/onboarding",
+    requireSEP10Auth(sep10AuthConfig),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        if (!req.auth) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
 
-    let amountStroops: bigint;
-    try {
-      amountStroops = BigInt(amountRaw);
-    } catch {
-      res.status(400).json({ error: "amount must be an integer stroop count" });
-      return;
-    }
-    if (amountStroops < 0n) {
-      res.status(400).json({ error: "amount must be non-negative" });
-      return;
-    }
+        const merchantId = req.auth.merchant_id || req.auth.sub;
+        const state = await database.getMerchantOnboardingState(merchantId);
+        const steps = [
+          makeOnboardingStep("merchant_registered", state?.registeredAt ?? null, "/onboarding/register"),
+          makeOnboardingStep("kyc_submitted", state?.kycSubmittedAt ?? null, "/settings/kyc"),
+          makeOnboardingStep("webhook_configured", null, "/settings/webhooks"),
+          makeOnboardingStep("payout_channel_added", null, "/settings/payout-channels"),
+          makeOnboardingStep("test_payment_created", null, "/payments/new?network=testnet"),
+          makeOnboardingStep("first_live_payment", null, "/payments/new?network=mainnet"),
+        ];
+        const completedSteps = steps.filter((step) => step.completed).length;
 
-    const cached = getCachedRate(from, to);
-    if (!cached) {
-      res.status(404).json({ error: `No cached rate for ${from}/${to}` });
-      return;
+        res.status(200).json({
+          completion_pct: Math.round((completedSteps / steps.length) * 100),
+          steps,
+        });
+      } catch (error) {
+        next(error);
+      }
     }
+  );
 
     const nowSecs = Math.floor(Date.now() / 1000);
     const rateAgeSecs = Math.max(0, nowSecs - cached.updatedAt);
@@ -177,6 +537,9 @@ export function createServer(
       rate: formatFixed(cached.rate, 2),
       rate_age_secs: rateAgeSecs,
       stale,
+    });
+  });
+
   // Issue #817: auth endpoints (stricter 10 req/min per-IP via rate limiter above)
   app.post("/v1/auth/login", (req: Request, res: Response) => {
     const apiKey =
@@ -193,40 +556,17 @@ export function createServer(
     });
   });
 
-  app.post("/v1/auth/refresh", (req: Request, res: Response) => {
-    const refreshToken =
-      (typeof req.body?.refresh_token === "string" && req.body.refresh_token) ||
-      (typeof req.body?.token === "string" && req.body.token);
-    if (!refreshToken) {
-      res.status(400).json({ error: "refresh_token is required" });
-      return;
-    }
-    res.status(200).json({
-      token: refreshToken,
-      token_type: "api_key",
-      expires_in: 3600,
-    });
-  });
+        const merchantId = req.merchantId;
+        if (!merchantId) {
+          res.status(401).json({ error: "Merchant API key authentication required" });
+          return;
+        }
 
   // Issue #855: Real-time event streaming via Server-Sent Events (SSE)
-  const sep10Config = loadSEP10AuthConfig();
   const sseHandler = async (req: Request, res: Response): Promise<void> => {
     const merchantId = (req.query.merchant_id as string) || req.auth?.sub;
     if (!merchantId) {
       res.status(400).json({ error: "Missing required query parameter: merchant_id" });
-      return;
-    }
-
-    if (req.auth && req.auth.sub !== merchantId && !sep10Config.adminAccounts.has(req.auth.sub)) {
-      res.status(403).json({ error: "Token is not authorized for this merchant" });
-      return;
-    }
-
-    if (!sseManager.canConnect(merchantId)) {
-      res.status(429).json({
-        error: "Rate limit exceeded: maximum 5 concurrent SSE connections per merchant",
-        limit: 5,
-      });
       return;
     }
 
@@ -242,8 +582,15 @@ export function createServer(
         ? req.query.event_types.split(",").map((s) => s.trim())
         : undefined;
 
+    // Issue #1039: optional narrowing to one payment's or dispute's events,
+    // e.g. `?dispute_id=disp_1` from a dispute detail page.
+    const paymentId =
+      typeof req.query.payment_id === "string" ? req.query.payment_id : undefined;
+    const disputeId =
+      typeof req.query.dispute_id === "string" ? req.query.dispute_id : undefined;
+
     const clientId = `${merchantId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    sseManager.registerClient(clientId, merchantId, res, eventTypes);
+    sseManager.registerClient(clientId, merchantId, res, eventTypes, { paymentId, disputeId });
 
     req.on("close", () => {
       sseManager.removeClient(clientId);
@@ -265,8 +612,303 @@ export function createServer(
   app.get("/webhooks/public-key", publicKeyHandler);
   app.get("/v1/webhooks/public-key", publicKeyHandler);
 
+  app.post("/v1/payment-links/:id/view", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const recorded = await database.recordPaymentLinkView(req.params.id);
+      if (!recorded) {
+        res.status(404).json({ error: "Payment link not found" });
+        return;
+      }
+      res.status(202).json({ recorded: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get(
+    "/v1/payment-links",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const links = await database.getPaymentLinksForMerchant(req.auth!.sub);
+        res.status(200).json({
+          payment_links: links.map((link) => ({
+            link_id: link.link_id,
+            views: Number(link.views),
+            attempts: Number(link.attempts),
+            conversions: Number(link.conversions),
+            conversion_rate:
+              Number(link.attempts) === 0
+                ? null
+                : Number(link.conversions) / Number(link.attempts),
+            total_revenue_usdc: formatUsdc(link.total_revenue_stroops),
+            last_used_at: link.last_used_at?.toISOString() ?? null,
+            daily_conversions: link.daily_conversions,
+          })),
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/payment-links/:id/analytics",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const analytics = await database.getPaymentLinkAnalytics(req.params.id, req.auth!.sub);
+        if (!analytics) {
+          res.status(404).json({ error: "Payment link not found" });
+          return;
+        }
+        res.status(200).json({
+          link_id: analytics.link_id,
+          views: Number(analytics.views),
+          attempts: Number(analytics.attempts),
+          conversions: Number(analytics.conversions),
+          conversion_rate:
+            Number(analytics.attempts) === 0
+              ? null
+              : Number(analytics.conversions) / Number(analytics.attempts),
+          total_revenue_usdc: formatUsdc(analytics.total_revenue_stroops),
+          last_used_at: analytics.last_used_at?.toISOString() ?? null,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // Issue #1162: merchant refund view. Authenticated with the merchant's
+  // SEP-10 JWT (the same token the dashboard stores in `fluxapay_jwt`).
+  app.get(
+    "/v1/merchant/refunds",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const status = typeof req.query.status === "string" ? req.query.status : undefined;
+        const limit =
+          typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+        if (!Number.isFinite(limit) || limit < 1 || limit > 500) {
+          res.status(400).json({ error: "Invalid limit (expected 1-500)" });
+          return;
+        }
+        const rows = await database.getRefundsByMerchant(req.auth!.sub, limit);
+        const refunds = rows
+          .map((row: any) => ({
+            refund_id: String(row.refund_id),
+            payment_id: String(row.payment_id),
+            amount_usdc: formatUsdc(row.amount),
+            // Refund events do not carry a fee; the fee shown is the fee on
+            // the original payment, which is the fee withheld on refund.
+            fee_usdc: formatUsdc(row.fee_amount ?? 0),
+            status: String(row.status ?? "unknown"),
+            created_at: row.created_at?.toISOString?.() ?? null,
+          }))
+          .filter((refund) =>
+            status ? refund.status.toLowerCase() === status.toLowerCase() : true,
+          );
+        res.status(200).json({ refunds });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // Issue #1164: settlement history, treasury balance, and fiat payout status.
+  app.get(
+    "/v1/merchant/settlements",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const rows = await database.getSettlementsByMerchant(req.auth!.sub);
+        let treasuryStroops = 0n;
+        const settlements = rows.map((row: any) => {
+          const stroops = BigInt(row.amount ?? 0);
+          const status = String(row.status ?? "unknown");
+          // Pending/failed payouts represent value still held in treasury.
+          if (
+            status === "pending" ||
+            status === "awaiting_user" ||
+            status === "failed"
+          ) {
+            treasuryStroops += stroops;
+          }
+          return {
+            payment_id: String(row.payment_id),
+            amount_usdc: formatUsdc(stroops),
+            status,
+            fiat_amount: row.fiat_amount == null ? null : String(row.fiat_amount),
+            fiat_currency: row.fiat_currency == null ? null : String(row.fiat_currency),
+            created_at: row.created_at?.toISOString?.() ?? null,
+            settled_at: row.settled_at?.toISOString?.() ?? null,
+          };
+        });
+        res.status(200).json({
+          treasury_balance_usdc: formatUsdc(treasuryStroops),
+          payout_status:
+            settlements.find((item) => item.status === "failed")?.status ??
+            settlements.find((item) => item.status === "awaiting_user")?.status ??
+            settlements.find((item) => item.status === "pending")?.status ??
+            (settlements.length > 0 ? "fiat_sent" : "no_settlements"),
+          settlements,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // Issue #1163: merchant settings, webhook key rotation, fee recipient, and
+  // API key lifecycle. All routes use the merchant's SEP-10 JWT.
+  app.get(
+    "/v1/merchant/settings",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const settings = settingsFor(req.auth!.sub);
+      res.status(200).json({
+        webhook_signing_key: settings.webhook_signing_key,
+        fee_recipient: settings.fee_recipient,
+        api_keys: settings.api_keys,
+      });
+    },
+  );
+
+  app.post(
+    "/v1/merchant/settings/webhook-key/rotate",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const settings = settingsFor(req.auth!.sub);
+      settings.webhook_signing_key = randomBytes(32).toString("base64url");
+      // The new key is also consumed by META_TX_FUNCTIONS.rotateWebhookKey
+      // relayers; see docs/sponsored-meta-transactions.md.
+      res.status(200).json({ webhook_signing_key: settings.webhook_signing_key });
+    },
+  );
+
+  app.put(
+    "/v1/merchant/settings/fee-recipient",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const feeRecipient = req.body?.fee_recipient;
+      if (typeof feeRecipient !== "string" || feeRecipient.trim().length === 0) {
+        res.status(400).json({ error: "fee_recipient is required" });
+        return;
+      }
+      const settings = settingsFor(req.auth!.sub);
+      settings.fee_recipient = feeRecipient.trim();
+      res.status(200).json({ fee_recipient: settings.fee_recipient });
+    },
+  );
+
+  app.post(
+    "/v1/merchant/api-keys",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
+      const lifetimeDays = Number(req.body?.lifetime_days ?? 30);
+      if (!label || !Number.isInteger(lifetimeDays) || lifetimeDays < 1 || lifetimeDays > 365) {
+        res.status(400).json({ error: "label and lifetime_days (1-365) are required" });
+        return;
+      }
+      const settings = settingsFor(req.auth!.sub);
+      const value = randomBytes(32).toString("base64url");
+      const record: MerchantApiKeyRecord = {
+        id: randomBytes(8).toString("hex"),
+        label,
+        masked_key: `${value.slice(0, 6)}…${value.slice(-4)}`,
+        lifetime_days: lifetimeDays,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + lifetimeDays * 86_400_000).toISOString(),
+      };
+      settings.api_keys.push(record);
+      // The full key is returned only once, on creation.
+      res.status(201).json({ ...record, api_key: value });
+    },
+  );
+
+  app.delete(
+    "/v1/merchant/api-keys/:id",
+    requireSEP10Auth(sep10Config),
+    (req: Request, res: Response) => {
+      const settings = settingsFor(req.auth!.sub);
+      const index = settings.api_keys.findIndex((key) => key.id === req.params.id);
+      if (index < 0) {
+        res.status(404).json({ error: "API key not found" });
+        return;
+      }
+      const [revoked] = settings.api_keys.splice(index, 1);
+      res.status(200).json({ revoked: revoked.id });
+    },
+  );
+
   // All subsequent routes require API-key authentication
   app.use(requireApiKey);
+
+  app.get(
+    "/v1/subscriptions/metrics",
+    requireScope("read:analytics"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = subscriptionMetricsQuerySchema.safeParse(req.query);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid query parameters",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+
+        const apiKey = extractApiKey(req);
+        const scopes = apiKey ? getKeyScopes(apiKey) : null;
+        const merchantId = apiKey ? getKeyMerchantId(apiKey) : null;
+        if (!scopes?.includes("admin") && merchantId !== parsed.data.merchant_id) {
+          res.status(403).json({ error: "API key is not authorized for this merchant" });
+          return;
+        }
+
+        const [year, month] = parsed.data.period.split("-").map(Number);
+        const periodStart = new Date(Date.UTC(year, month - 1, 1));
+        const periodEnd = new Date(Date.UTC(year, month, 1));
+        const cacheKey = `${parsed.data.merchant_id}:${parsed.data.period}`;
+        const now = Date.now();
+        for (const [key, value] of subscriptionMetricsCache) {
+          if (value.expiresAt <= now) subscriptionMetricsCache.delete(key);
+        }
+
+        let response = subscriptionMetricsCache.get(cacheKey)?.response;
+        if (!response) {
+          const metrics = await database.getSubscriptionMetrics(
+            parsed.data.merchant_id,
+            periodStart,
+            periodEnd,
+          );
+          response = {
+            period: parsed.data.period,
+            mrr_usdc: formatUsdc(metrics.mrr_stroops),
+            active_subscribers: metrics.active_subscribers,
+            new_subscribers: metrics.new_subscribers,
+            churned_subscribers: metrics.churned_subscribers,
+            churn_rate: metrics.churn_rate,
+            trial_conversions: metrics.trial_conversions,
+            trial_conversion_rate: metrics.trial_conversion_rate,
+            past_due_subscribers: metrics.past_due_subscribers,
+            dunning_recovery_rate: metrics.dunning_recovery_rate,
+          };
+          if (subscriptionMetricsCache.size >= 1000) subscriptionMetricsCache.clear();
+          subscriptionMetricsCache.set(cacheKey, {
+            expiresAt: now + SUBSCRIPTION_METRICS_CACHE_TTL_MS,
+            response,
+          });
+        }
+
+        res.status(200).json(response);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   // Webhook test delivery and delivery history (Issues #808, #810, #854).
   app.use("/webhooks", requireScope("manage:webhooks"));
@@ -287,7 +929,7 @@ export function createServer(
         return;
       }
 
-      const { merchant_id, status, from, to, limit, cursor } = parsed.data;
+      const { merchant_id, status, from, to, limit, cursor, payer_muxed_id } = parsed.data;
 
       const subject = req.auth?.sub;
       if (!subject) {
@@ -315,6 +957,7 @@ export function createServer(
         to,
         limit,
         cursor: decodedCursor ?? undefined,
+        payerMuxedId: payer_muxed_id,
       });
 
       const nextCursor =
@@ -499,6 +1142,73 @@ export function createServer(
 
   // ------------------------------------------------------------------ Issue #1067: Invoice lifecycle routes
 
+  app.get(
+    "/v1/subscriptions/:id/invoices",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const invoices = await database.getInvoicesBySubscription(req.params.id);
+        if (invoices.length > 0 && !invoices.some(
+          (invoice) => invoice.merchantId === req.auth?.sub || invoice.subscriber === req.auth?.sub,
+        )) {
+          res.status(403).json({ error: "Not authorized for this subscription" });
+          return;
+        }
+        res.status(200).json({ invoices });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/invoices/:id/pdf",
+    requireSEP10Auth(sep10Config),
+    async (req: Request, res: Response) => {
+      const invoice = await database.getInvoiceById(req.params.id);
+      if (!invoice) {
+        res.status(404).json({ error: "Invoice not found" });
+        return;
+      }
+      if (invoice.merchantId !== req.auth?.sub && invoice.subscriber !== req.auth?.sub) {
+        res.status(403).json({ error: "Not authorized for this invoice" });
+        return;
+      }
+      const escapePdfText = (value: unknown) => String(value ?? "").replace(/[^\x20-\x7e]/g, "?").replace(/[\\()]/g, "\\$&");
+      const amount = invoice.totalAmount == null ? "0.0000000" : (Number(invoice.totalAmount) / 10_000_000).toFixed(7);
+      const lines = [
+        `Invoice ${invoice.invoiceNumber || invoice.invoiceId}`,
+        `Merchant: ${invoice.merchantId || ""}`,
+        `Subscriber: ${invoice.subscriber || ""}`,
+        `Subscription: ${invoice.subscriptionId || ""}`,
+        `Billing cycle: ${invoice.cycleNumber ?? ""}`,
+        `Billing period: ${invoice.billingPeriodStart?.toISOString() || ""} - ${invoice.billingPeriodEnd?.toISOString() || ""}`,
+        `Amount: ${amount}`,
+        `Status: ${invoice.status || ""}`,
+      ];
+      const text = lines.map((line, index) => `BT /F1 12 Tf 50 ${760 - index * 24} Td (${escapePdfText(line)}) Tj ET`).join("\n");
+      const stream = `${text}\n`;
+      const objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        `<< /Length ${Buffer.byteLength(stream, "ascii")} >>\nstream\n${stream}endstream`,
+      ];
+      let pdf = "%PDF-1.4\n";
+      const offsets = [0];
+      objects.forEach((object, index) => {
+        offsets.push(Buffer.byteLength(pdf, "ascii"));
+        pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+      });
+      const xrefOffset = Buffer.byteLength(pdf, "ascii");
+      pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+      for (const offset of offsets.slice(1)) pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+      pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+      res.status(200).type("application/pdf").send(Buffer.from(pdf, "ascii"));
+    },
+  );
+
   /** GET /v1/invoices?status=Pending|Paid|Overdue|Voided&merchant_id=... */
   app.get("/v1/invoices", requireScope("read:payments"), async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -604,24 +1314,33 @@ export function createServer(
     }
   });
 
-  app.post("/admin/replay", requireAdminApiKey, async (req: Request, res: Response, next: NextFunction) => {
+  const replayHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const fromParam = req.query.from_ledger ?? req.query.from ?? req.body?.from_ledger ?? req.body?.from;
       const toParam = req.query.to_ledger ?? req.query.to ?? req.body?.to_ledger ?? req.body?.to;
 
-      const fromLedger = parseInt(fromParam as string, 10);
-      const toLedger = parseInt(toParam as string, 10);
+      const parseLedger = (value: unknown): number | null => {
+        if (typeof value === "number") {
+          return Number.isSafeInteger(value) && value > 0 ? value : null;
+        }
+        if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return null;
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) ? parsed : null;
+      };
+      const fromLedger = parseLedger(fromParam);
+      const toLedger = parseLedger(toParam);
 
-      if (isNaN(fromLedger) || isNaN(toLedger) || fromLedger < 1 || toLedger < fromLedger) {
+      if (fromLedger === null || toLedger === null || toLedger < fromLedger) {
         res.status(400).json({
           error: "Invalid ledger parameters: 'from_ledger' and 'to_ledger' must be positive integers with from_ledger <= to_ledger",
         });
         return;
       }
 
-      if (toLedger - fromLedger > MAX_REPLAY_LEDGER_RANGE) {
+      const rangeSize = toLedger - fromLedger + 1;
+      if (rangeSize > MAX_REPLAY_LEDGER_RANGE) {
         res.status(400).json({
-          error: `Requested ledger range (${toLedger - fromLedger + 1}) exceeds maximum allowed limit of ${MAX_REPLAY_LEDGER_RANGE} ledgers`,
+          error: `Requested ledger range (${rangeSize}) exceeds maximum allowed limit of ${MAX_REPLAY_LEDGER_RANGE} ledgers`,
         });
         return;
       }
@@ -637,18 +1356,29 @@ export function createServer(
       res.flushHeaders?.();
 
       let isClientConnected = true;
-      req.on("close", () => {
+      res.on("close", () => {
         isClientConnected = false;
       });
 
       const onProgress = (progress: ReplayProgressUpdate) => {
         if (!isClientConnected) return;
-        res.write(`data: ${JSON.stringify({ processed: progress.processed, total: progress.total, stored: progress.stored })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          processed: progress.processed,
+          total: progress.total,
+          stored: progress.stored,
+          skipped_duplicates: progress.skipped_duplicates ?? 0,
+        })}\n\n`);
       };
 
       const result = await eventReplayHandler(fromLedger, toLedger, onProgress);
       if (isClientConnected) {
-        res.write(`data: ${JSON.stringify({ type: "complete", processed: result.processed, total: result.total, stored: result.stored })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          type: "complete",
+          processed: result.processed,
+          total: result.total,
+          stored: result.stored,
+          skipped_duplicates: result.skipped_duplicates ?? 0,
+        })}\n\n`);
         res.end();
       }
     } catch (error: any) {
@@ -659,7 +1389,10 @@ export function createServer(
         next(error);
       }
     }
-  });
+  };
+
+  app.post("/admin/replay", requireAdminApiKey, replayHandler);
+  app.post("/v1/admin/replay", requireScope("admin"), replayHandler);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error("API Request Error:", err);
@@ -674,8 +1407,17 @@ export async function startServer(
   port = parseInt(process.env.PORT || process.env.INDEXER_API_PORT || "3001", 10),
   replayDlqHandler?: ReplayDLQHandler,
   eventReplayHandler?: EventReplayHandler,
+  rpcReadinessCheck?: () => Promise<boolean>,
 ) {
-  const app = createServer(database, replayDlqHandler, eventReplayHandler);
+  const app = createServer(
+    database,
+    replayDlqHandler,
+    loadSEP10AuthConfig(),
+    eventReplayHandler,
+    rpcReadinessCheck,
+  );
+  // Issue #961: automatic webhook delivery retry with exponential backoff.
+  startWebhookRetryDaemon(database.getPool(), new WebhookStore(database.getPool()));
   const server = app.listen(port, () => {
     console.log(`Indexer REST API listening on port ${port}`);
   });

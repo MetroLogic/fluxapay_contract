@@ -150,6 +150,12 @@ pub const MAX_TREASURY_SIGNERS: u32 = 10;
 /// keeping the ledger-read budget bounded regardless of the caller's `limit`.
 pub const TOP_MERCHANTS_MAX_LIMIT: u32 = 100;
 
+/// Issue #1170: maximum number of payment ids retained in the per-merchant
+/// `MerchantPayments` index. Payment entries themselves are TTL-bumped on
+/// creation (`bump_payment_ttl`), while this index is capped so a single
+/// merchant cannot grow persistent storage without bound.
+pub const MAX_PAYMENTS_PER_MERCHANT: u32 = 10_000;
+
 /// Maximum number of fee-collection records retained in `FeeCollectionHistory`.
 /// Kept larger than `TREASURY_WITHDRAWAL_HISTORY_CAP` since fee reporting is
 /// meant to cover longer look-back windows (e.g. a full reporting month).
@@ -189,3 +195,17 @@ pub const MAX_FEE_RECIPIENTS: u32 = 3;
 /// Maximum total affiliate share (in basis points) across all recipients.
 /// 5000 bps = 50%; the remaining share always goes to the platform treasury.
 pub const MAX_AFFILIATE_BPS: u32 = 5_000;
+
+/// Issue #1033: Default maximum age (in seconds) of an FX oracle rate that
+/// `confirm_payment`/`verify_payment` will trust. This is enforced by the
+/// PaymentProcessor itself, independently of the FX oracle contract's own
+/// internal staleness cap, so merchants get a sane default (5 minutes)
+/// instead of relying on the oracle's much looser 24h hard cap.
+/// Admin-configurable via `set_oracle_staleness_threshold`.
+pub const MAX_ORACLE_STALENESS_SECS: u64 = 300; // 5 minutes
+
+/// Issue #1032: Per-IP payment-creation window, mirrored by the indexer's
+/// `POST /v1/payments` rate limiter so on-chain and API-level spam controls
+/// agree. Matches `CREATE_PAYMENT_WINDOW_SECS` / `CREATE_PAYMENT_MAX_PER_WINDOW`.
+pub const CREATE_PAYMENT_IP_WINDOW_SECS: u64 = CREATE_PAYMENT_WINDOW_SECS;
+pub const CREATE_PAYMENT_IP_MAX_PER_WINDOW: u32 = CREATE_PAYMENT_MAX_PER_WINDOW;

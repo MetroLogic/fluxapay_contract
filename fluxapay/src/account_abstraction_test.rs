@@ -5,9 +5,11 @@
 //! `register_session_key` is covered alongside the existing module tests.
 
 use crate::account_abstraction::{
-    execute_with_session, register_session_key, register_session_key_with_policy,
-    AccountAbstractionError, SessionInvocation, SessionPolicy,
+    execute_with_session, grant_delegation, list_delegations, register_session_key,
+    register_session_key_with_policy, require_delegation, revoke_delegation,
+    AccountAbstractionError, DelegationScope, SessionInvocation, SessionPolicy,
 };
+use crate::Error;
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Events as _, Ledger as _},
@@ -331,4 +333,168 @@ fn test_negative_spend_cap_rejected_at_registration() {
     });
     assert_eq!(res, Err(AccountAbstractionError::InvalidPayload));
     assert_eq!(session_event_count(&env, "POLICY_REGISTERED"), 0);
+}
+
+#[test]
+fn test_revoked_session_key_rejected_for_policy_execution() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (contract_id, account, session_key) = open(&env);
+    let target = Address::generate(&env);
+    let limits = policy(&env, Some(100), Some(1_000), 10_000, vec![&env], vec![&env]);
+
+    in_contract(&env, &contract_id, || {
+        register_session_key_with_policy(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+            100_000,
+            limits,
+        )
+        .unwrap();
+        crate::account_abstraction::revoke_session_key(
+            env.clone(),
+            account.clone(),
+            session_key.clone(),
+        )
+        .unwrap();
+
+        let res = execute_with_session(
+            env.clone(),
+            account,
+            session_key,
+            invocation(&env, &target, "charge", 10),
+        );
+        assert_eq!(res, Err(AccountAbstractionError::SignerRevoked));
+    });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Issue #1029: merchant -> sub-account delegation                    */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn test_delegation_grant_use_revoke_use_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SessionContext, ());
+    let merchant = Address::generate(&env);
+    let sub_account = Address::generate(&env);
+    let expires_at = env.ledger().timestamp() + 3_600;
+
+    in_contract(&env, &contract_id, || {
+        grant_delegation(
+            env.clone(),
+            merchant.clone(),
+            sub_account.clone(),
+            DelegationScope::CreatePayment,
+            expires_at,
+        )
+        .unwrap();
+
+        // Granted scope covers CreatePayment.
+        assert!(require_delegation(
+            &env,
+            &merchant,
+            &sub_account,
+            &DelegationScope::CreatePayment,
+        )
+        .is_ok());
+
+        // Revoke, then the same check must fail.
+        revoke_delegation(env.clone(), merchant.clone(), sub_account.clone()).unwrap();
+        let res = require_delegation(&env, &merchant, &sub_account, &DelegationScope::CreatePayment);
+        assert_eq!(res, Err(Error::DelegationRevoked));
+    });
+}
+
+#[test]
+fn test_delegation_scope_mismatch_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SessionContext, ());
+    let merchant = Address::generate(&env);
+    let sub_account = Address::generate(&env);
+    let expires_at = env.ledger().timestamp() + 3_600;
+
+    in_contract(&env, &contract_id, || {
+        grant_delegation(
+            env.clone(),
+            merchant.clone(),
+            sub_account.clone(),
+            DelegationScope::CreatePayment,
+            expires_at,
+        )
+        .unwrap();
+
+        // Granted only CreatePayment; CreateRefund must be rejected.
+        let res = require_delegation(&env, &merchant, &sub_account, &DelegationScope::CreateRefund);
+        assert_eq!(res, Err(Error::Unauthorized));
+    });
+}
+
+#[test]
+fn test_delegation_expired_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+    let contract_id = env.register(SessionContext, ());
+    let merchant = Address::generate(&env);
+    let sub_account = Address::generate(&env);
+
+    in_contract(&env, &contract_id, || {
+        grant_delegation(
+            env.clone(),
+            merchant.clone(),
+            sub_account.clone(),
+            DelegationScope::All,
+            env.ledger().timestamp() + 100,
+        )
+        .unwrap();
+
+        // Still valid before expiry.
+        assert!(require_delegation(&env, &merchant, &sub_account, &DelegationScope::CreatePayment).is_ok());
+    });
+
+    env.ledger().set_timestamp(1_101);
+    in_contract(&env, &contract_id, || {
+        let res = require_delegation(&env, &merchant, &sub_account, &DelegationScope::CreatePayment);
+        assert_eq!(res, Err(Error::DelegationExpired));
+    });
+}
+
+#[test]
+fn test_list_delegations_includes_revoked_entries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SessionContext, ());
+    let merchant = Address::generate(&env);
+    let sub_account_a = Address::generate(&env);
+    let sub_account_b = Address::generate(&env);
+    let expires_at = env.ledger().timestamp() + 3_600;
+
+    in_contract(&env, &contract_id, || {
+        grant_delegation(
+            env.clone(),
+            merchant.clone(),
+            sub_account_a.clone(),
+            DelegationScope::CreatePayment,
+            expires_at,
+        )
+        .unwrap();
+        grant_delegation(
+            env.clone(),
+            merchant.clone(),
+            sub_account_b.clone(),
+            DelegationScope::All,
+            expires_at,
+        )
+        .unwrap();
+        revoke_delegation(env.clone(), merchant.clone(), sub_account_a.clone()).unwrap();
+
+        let delegations = list_delegations(env.clone(), merchant.clone());
+        assert_eq!(delegations.len(), 2);
+        assert!(delegations.iter().any(|d| d.sub_account == sub_account_a && d.revoked));
+        assert!(delegations.iter().any(|d| d.sub_account == sub_account_b && !d.revoked));
+    });
 }

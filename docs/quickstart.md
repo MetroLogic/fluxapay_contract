@@ -17,17 +17,18 @@ for the full reference):
 
 ```bash
 # 1. Request a challenge transaction for your merchant account
-curl "https://api.fluxapay.example/auth/challenge?account=GABC...YOUR_ACCOUNT"
+curl "https://api.fluxapay.example/auth?account=GABC...YOUR_ACCOUNT"
 
 # 2. Sign the returned transaction XDR with your Stellar keypair (client-side),
 #    then exchange it for a JWT
-curl -X POST https://api.fluxapay.example/auth/token \
+curl -X POST https://api.fluxapay.example/auth \
   -H "Content-Type: application/json" \
-  -d '{"transaction": "<signed XDR>", "account": "GABC...YOUR_ACCOUNT"}'
+  -d '{"transaction": "<signed XDR>"}'
 ```
 
-The response is a JWT containing `merchant_id`, `iat`, and `exp` claims,
-valid for 24 hours. Include it as `Authorization: Bearer <token>` on
+The response is a JWT containing `sub`, `merchant_id`, `iat`, and `exp` claims.
+Its lifetime defaults to 24 hours and can be configured with `JWT_EXPIRY_SECS`.
+Include it as `Authorization: Bearer <token>` on
 subsequent API calls. The SDK's `SEP10Authenticator` (`sdk/src/sep10.ts`)
 implements the client-side signing/verification flow if you'd rather not
 call the REST endpoints directly.
@@ -231,4 +232,5 @@ The endpoint (`GET /v1/payment-links/{id}/stats`) requires merchant authenticati
 
 - [docs/webhooks.md](webhooks.md) — full webhook payload reference, retries, idempotency
 - [docs/architecture.md](architecture.md) — contract structure and payment lifecycle
+- [docs/account-abstraction.md](account-abstraction.md) — delegate a scoped, spend-capped session key (e.g. a read-only or checkout-only key) to a POS terminal or automated agent instead of sharing your merchant key
 - [sdk/README.md](../sdk/README.md) — full SDK API reference

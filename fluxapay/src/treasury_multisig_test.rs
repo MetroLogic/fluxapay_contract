@@ -1,7 +1,7 @@
 //! Treasury Multisig Timelock Tests
 
 use crate::{
-    refund_manager::RefundManager,
+    refund_manager::{RefundManager, RefundManagerClient},
     types::{TreasuryMultisigConfig, TreasuryWithdrawalProposal, TreasuryProposalStatus},
     Error,
 };

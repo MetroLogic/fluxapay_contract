@@ -17,6 +17,10 @@ For security vulnerabilities, see [SECURITY.md](SECURITY.md) instead of opening 
 6. [Commit Message Format](#6-commit-message-format)
 7. [Pull Request Requirements](#7-pull-request-requirements)
    - [Adding Contract Events](#72-adding-contract-events)
+   - [`lib.rs` Module Boundaries](#73-librs-module-boundaries-issue-1222)
+   - [Error Code Documentation Sync](#74-error-code-documentation-sync-issue-1193)
+   - [Entrypoint Reference](#74-entrypoint-reference)
+   - [Storage Key Layout Reference](#75-storage-key-layout-reference)
 8. [Issue Workflow](#8-issue-workflow)
 
 ---
@@ -96,6 +100,32 @@ PROPTEST_CASES=64 cargo test -p fluxapay proptests:: --all-features -- --test-th
 cd fluxapay && make test
 ```
 
+### Nightly full test run (Issue #1219)
+
+`.github/workflows/nightly.yml` runs every day at 02:00 UTC (and on demand
+via **Actions → Nightly full test run → Run workflow**). It runs the whole
+suite in a way PR CI does not:
+
+| Step | What it catches |
+|------|-----------------|
+| `cargo test --workspace --all-features --all-targets` | breakage in any contract feature, unit or integration target |
+| `cargo test --workspace --all-targets` | code that only compiles or passes with extra features on |
+| same as the first step with `--test-threads=1` | order- and interleaving-dependent tests |
+
+`PROPTEST_CASES=4096` is set for the whole job, so property tests get
+16x the PR budget.
+
+When a scheduled run fails, the `notify-failure` job opens an issue titled
+**Nightly full test run failing**, labelled `nightly-failure`, with a link
+to the run. Later failures comment on that same issue while it stays open.
+Close it once the fix lands.
+
+To reproduce a nightly failure locally:
+
+```bash
+PROPTEST_CASES=4096 cargo test --workspace --all-features --all-targets -- --test-threads=1
+```
+
 For testnet testing, see [docs/local-invoke.md](docs/local-invoke.md).
 
 ---
@@ -136,6 +166,48 @@ scoped entry to `[bans].skip` with the exact crate name and version plus a
 crate merely because it appears in tests if it is also reachable through a
 production dependency. Review the dependency tree (`cargo tree -e normal`) and
 remove obsolete exceptions when upgrading dependencies.
+
+### Dependency license policy
+
+Every crate in the production dependency graph must use a license on the
+allowlist in `deny.toml` (`[licenses].allow`). The check runs as part of
+`cargo deny check bans licenses advisories` in both the `Security Scan` and
+`Cargo Deny Check` CI jobs, so a pull request that adds a dependency with a
+disallowed license fails CI with a `rejected` license error naming the crate.
+
+Currently allowed (all permissive and compatible with this repository's MIT
+license):
+
+| License | Typical source |
+|---|---|
+| `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception` | most of the Rust ecosystem |
+| `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib` | small utility and crypto crates |
+| `OpenSSL` | `ring` and OpenSSL-derived code |
+| `Unicode-3.0` | `unicode-ident` and Unicode data tables |
+
+Copyleft licenses (`GPL-*`, `LGPL-*`, `AGPL-*`) and weak-copyleft licenses
+(`MPL-2.0`, `EPL-*`) are not allowed by default. Dev-dependencies are not
+checked (`include-dev = false`) because they never ship in the contract WASM.
+
+Check a change locally before opening a PR:
+
+```bash
+# Licenses only
+cargo deny check licenses
+
+# Show which license each dependency resolved to
+cargo deny list
+```
+
+If a dependency you need is rejected:
+
+1. Look for an alternative crate under an allowed license first.
+2. If there is none, add a per-crate entry to `[licenses].exceptions` in
+   `deny.toml` (for example `{ crate = "some-crate", allow = ["MPL-2.0"] }`)
+   rather than adding the license to the global `allow` list.
+3. Explain in the PR description why the crate is needed and why its license
+   is acceptable. A maintainer must approve any change to the allowlist or
+   exceptions.
 
 ### Linting GitHub Actions Workflows (actionlint)
 
@@ -181,24 +253,40 @@ Do not silently raise the baseline in an unrelated feature commit.
 
 ## 4a. Pre-commit Hooks
 
-We use [lefthook](https://github.com/evilmartians/lefthook) to run `cargo fmt`, `cargo clippy`, and TypeScript type checks before each commit.
+We use [lefthook](https://github.com/evilmartians/lefthook) to run `cargo fmt`, `cargo clippy`, TypeScript type checks, `eslint`, and secret scanning before each commit.
 
 ### Installation
 
 ```bash
-# Install lefthook (macOS / Linux)
+# Install lefthook (macOS / Linux) via Homebrew
 brew install lefthook
-# or via Go:
+
+# ...or via npm
+npm install -g lefthook
+
+# ...or via Go
 go install github.com/evilmartians/lefthook@latest
 
 # Install hooks for this repo
 lefthook install
 ```
 
+Secret scanning requires [`gitleaks`](https://github.com/gitleaks/gitleaks) on your `PATH`:
+
+```bash
+brew install gitleaks
+# or
+go install github.com/gitleaks/gitleaks/v8@latest
+```
+
+If `gitleaks` isn't installed, the hook prints a warning and skips the scan rather than blocking the commit -- CI still runs the full scan.
+
 ### What the hooks do
 
-- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets - -D warnings` on staged `.rs` files
-- *pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+- **pre-commit** (Rust files): runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on staged `.rs` files
+- **pre-commit** (TypeScript files): runs `npx tsc --noEmit` in `sdk/` on staged `.ts` files
+- **pre-commit** (TypeScript/TSX files in `sdk/`, `indexer/`, `backend/`, `dashboard/`): runs `npx eslint` on only the staged files
+- **pre-commit** (all staged files): runs `gitleaks protect --staged` to block commits that introduce secrets (API keys, private keys, tokens)
 
 ### Skipping hooks
 
@@ -265,6 +353,8 @@ Before marking a PR ready for review:
 - [ ] New features and bug fixes include tests
 - [ ] PR title follows Conventional Commits format
 - [ ] PR description explains *what* changed, *why*, and how it was tested
+- [ ] If your change affects the compiled contract (new dependency, new public function, large refactor), run `./scripts/update-wasm-baseline.sh` and commit the updated `.wasm-size-baseline` so the CI size gate compares against the right number
+- [ ] If your change implements, removes, or changes the status of a feature listed in the README's ["Feature Status"](README.md#feature-status) matrix (Issue #1189) — e.g. moves the DEX router from "Partial (simulated)" to "Implemented" once real Soroswap routing lands (ADR-0005) — update that row in the same PR
 
 ### Changelog Format
 
@@ -287,9 +377,18 @@ Follow [Keep a Changelog](https://keepachangelog.com/) categories:
 ### Added
 - **Issue #831 / PR #123**: Multi-payee payment streams with proportional withdraw.
 
+### Changed
+- **Issue #1013 / PR #124**: `withdraw_treasury` now allows single-admin execution
+  below `TreasurySingleAdminThreshold`; larger withdrawals still require multisig.
+
 ### Fixed
 - **PR #123**: `payment_id` format validation now enforces 3–64 alphanumeric/-/_ characters.
 ```
+
+A single PR commonly only needs one of these subsections — add `### Changed` /
+`### Fixed` / etc. only when that category applies, in the order given by
+[Keep a Changelog](https://keepachangelog.com/) (`Added`, `Changed`, `Deprecated`,
+`Removed`, `Fixed`, `Security`).
 
 Use the `skip-changelog` label only for CI/CD, docs, or internal refactors with no user-facing impact.
 
@@ -363,6 +462,80 @@ Contributors can add support for new languages to the SDK error system:
 2. Map each contract error code number to its translated, user-friendly message (refer to `sdk/src/locales/en.json` for the complete list of error codes).
 3. Register the new locale in `sdk/src/locales/index.ts` under `SUPPORTED_LOCALES` and the `MESSAGES` map.
 4. Run `npm test` in `sdk/` to ensure all tests pass.
+
+---
+
+## 7.3. `lib.rs` Module Boundaries (Issue #1222)
+
+`fluxapay/src/lib.rs` is a thin wiring file: module declarations, re-exports, shared
+cross-module `#[contracttype]`/`#[contracterror]` enums, and `#[contractimpl]` bodies that
+**delegate** to submodule logic. Do not add business logic, storage helpers, or state machines
+to `lib.rs` — put them in the relevant submodule (`payment_processor.rs`, `refund_manager.rs`,
+`payment_state_machine.rs`, etc.).
+
+This is enforced in CI by `scripts/check_librs_boundaries.sh` (see
+[ADR-0006](docs/ADR-0006-module-boundaries-lib-rs.md)), which fails the build if `lib.rs` grows
+beyond the frozen baseline in `.librs-baseline` (line count, with a small tolerance, or `pub fn`
+count, strict). If your PR moves logic **out** of `lib.rs`, lower the numbers in
+`.librs-baseline` accordingly; never raise them.
+
+---
+
+## 7.4. Error Code Documentation Sync (Issue #1193)
+
+[`docs/error-codes.md`](docs/error-codes.md) is the single source of truth for what every
+numeric error code returned by the contracts means. It is hand-maintained, so it only stays
+useful if it's updated in the same PR that changes the code it documents.
+
+**Whenever your PR adds, renames, renumbers, or removes a variant of `fluxapay::Error`**
+(`fluxapay/src/lib.rs`), you must also update the **Core** table at the top of
+`docs/error-codes.md` in the same PR:
+
+- Added a variant? Add a row with its code, name, a plain-language description, the common
+  cause, and the remediation.
+- Renamed or renumbered a variant? Update its row in place — do not leave the old name/code
+  behind as a stale row.
+- Removed a variant? Delete its row.
+- Reusing a discriminant that's already shared by another variant (see the collision note in
+  the doc)? List both names in the `Name` column, separated by ` / `.
+
+This is distinct from `scripts/check-error-map-sync.ts` (issue #829 fixed a bug in that script),
+which only checks `sdk/src/index.ts`'s `FLUXAPAY_CONTRACT_ERROR_MAP` against the same enum — it
+does not look at `docs/error-codes.md` at all.
+
+**CI enforcement:** `scripts/check-error-codes-doc-sync.js` runs on every push/PR (see
+`.github/workflows/error-codes-sync.yml`) and fails the build if the Core table's `(code, name)`
+pairs don't exactly match the `Error` enum's. Run it locally before pushing if you touched
+`Error`:
+
+```bash
+node scripts/check-error-codes-doc-sync.js
+```
+## 7.4. Entrypoint Reference
+
+[`docs/entrypoint-reference.md`](docs/entrypoint-reference.md) is the single reference
+listing every public contract entrypoint (every `pub fn` inside a `#[contractimpl] impl`
+block) across all FluxaPay contracts, with its signature, authorization requirement,
+emitted events, and the `Error` variants it can return.
+
+**Any PR that adds, removes, or changes the signature, auth, or events of a `pub fn`
+entrypoint must update the corresponding entry in `docs/entrypoint-reference.md` in the
+same PR.** This keeps the reference trustworthy without requiring a separate audit pass —
+reviewers should treat a missing update here the same as a missing CHANGELOG entry.
+
+---
+
+## 7.5. Storage Key Layout Reference
+
+[`docs/storage-layout.md`](docs/storage-layout.md) lists every `DataKey` /
+`MerchantDataKey` (and other contract-local key enum) variant, how its TTL is managed,
+and the migration history of keys that have changed shape or location.
+
+**Any PR that adds, removes, renames, or changes the stored type of a storage key must
+update the corresponding table/section of `docs/storage-layout.md` in the same PR.** If
+the change is breaking per [`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md) (see
+"Storage Key Changes" there), also add a dated entry under `docs/storage-layout.md`'s own
+"Migration notes" section, in addition to the required `CHANGELOG.md` entry.
 
 ---
 

@@ -1,31 +1,21 @@
-# PR: Add NatSpec-style Documentation and CI Documentation Check
+# PR: Add Scoped Pausing, Dispute Evidence, Subscription Invoices, and SEP-10 Auth
 
-## 📝 Description
+## Description
 
-This PR addresses issue #52 by adding comprehensive NatSpec-style (///) doc comments to all public functions in the core contract files. It also adds a documentation validity check to the CI pipeline to ensure future contributions maintain this standard.
+Implements four related merchant and contract features in one PR:
 
-The goal is to improve developer experience and ensure that generated TypeScript bindings have proper inline documentation.
+- **Granular contract pauses (#1055):** Adds operation-level pause scopes for payment creation, verification, settlement, refunds, and swaps, plus the global scope. Existing pause entry points remain compatible, and callers can query active scopes.
+- **Dispute evidence uploads (#1051):** Adds party-authorized evidence upload and retrieval, IPFS pinning, server-side SHA-256 calculation, and on-chain hash anchoring.
+- **Subscription invoices (#1050):** Generates cycle-linked invoices from successful subscription charge events and provides invoice lookup and PDF access.
+- **SEP-10 wallet authentication (#1048):** Adds challenge-response sign-in, single-use challenge validation, and bearer JWT authentication for protected API routes.
 
-## ✅ Technical Requirements Fulfilled
+## Issues Closed
 
-- Added Rust doc comments (///) to all `pub fn` in:
-  - `lib.rs` (RefundManager, PaymentProcessor, format_id)
-  - `merchant_registry.rs` (MerchantRegistry)
-  - `access_control.rs` (AccessControl and Role definitions)
-- Documented:
-  - Purpose/Description
-  - Parameters
-  - Return values
-  - Authorization requirements
-  - Potential errors
-- Added `cargo doc --no-deps --all-features` check to the `.github/workflows/ci.yml` lint job.
+Closes #1055
+Closes #1051
+Closes #1050
+Closes #1048
 
-## 🧪 Verification Results
+## Verification
 
-- **Documentation Generation**: Verified locally with `cargo doc --no-deps --all-features`. All documentation generated successfully.
-- **Automated Tests**: Ran `cargo test --verbose --all-features`. Result: `41 passed; 0 failed`.
-- **Merge-Safe**: No functional logic was modified; changes are limited to doc comments and CI configuration.
-
----
-
-_Note: This PR was prepared by Antigravity AI._
+Tests and builds were not run for this change.

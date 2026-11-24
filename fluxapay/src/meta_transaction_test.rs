@@ -366,3 +366,28 @@ fn test_direct_merchant_call_still_requires_auth() {
 
     assert_eq!(client.get_webhook_key(&merchant), Some(webhook_key));
 }
+
+#[test]
+fn test_out_of_order_nonce_is_rejected() {
+    let env = Env::default();
+    let (_contract_id, _admin, client) = setup(&env);
+    let key = merchant_key();
+    let merchant = account_address(&env, &key.verifying_key().to_bytes());
+    let relayer = Address::generate(&env);
+    let domain = client.get_domain_separator();
+    let (payload, signature) = signed_payload(
+        &env,
+        &key,
+        &merchant,
+        &domain,
+        FN_ROTATE_WEBHOOK_KEY,
+        BytesN::from_array(&env, &[11u8; 32]).to_xdr(&env),
+        1, // expected nonce is 0
+        NOW + 600,
+    );
+
+    let result = client.try_execute_meta_transaction(&relayer, &payload, &signature);
+    assert_eq!(result, Err(Ok(MetaTxError::InvalidNonce)));
+    assert_eq!(client.get_merchant_nonce(&merchant), 0);
+    assert!(client.get_webhook_key(&merchant).is_none());
+}

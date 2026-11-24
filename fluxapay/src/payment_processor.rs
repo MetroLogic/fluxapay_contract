@@ -35,6 +35,41 @@ impl PaymentProcessor {
             .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION))
     }
 
+    /// Admin-only: update the stored contract version after a WASM upgrade.
+    pub fn set_version(env: Env, admin: Address, version: String) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if !utils::is_valid_contract_version(&version) {
+            return Err(Error::InvalidVersion);
+        }
+
+        let old_version = Self::version(env.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &version);
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &version,
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ContractVersion, threshold, LONG_LIVE_TTL);
+        env.storage()
+            .instance()
+            .extend_ttl(threshold, LONG_LIVE_TTL);
+        env.events().publish(
+            (
+                Symbol::new(&env, "CONTRACT"),
+                Symbol::new(&env, "VERSION_UPDATED"),
+            ),
+            (old_version, version),
+        );
+        Ok(())
+    }
+
     /// Alias for version() — returns the current contract version string.
     ///
     /// # Parameters
@@ -729,6 +764,89 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1206: Admin-configurable default payment duration (seconds),
+    /// used by `create_payment`/batch variants when the caller supplies
+    /// neither `expires_at` nor `duration_secs`. Bounded by the existing
+    /// Min/MaxPaymentDurationSecs policy so it can never resolve to an
+    /// expiry outside the admin-configured safe window.
+    pub fn set_default_payment_duration(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DefaultPaymentDurationSecs, &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Per-merchant override for the default payment duration
+    /// (seconds). Self-service: the merchant authorizes the call and sets
+    /// their own override, bounded by the same Min/MaxPaymentDurationSecs
+    /// policy as the global default.
+    pub fn set_merchant_payment_duration(
+        env: Env,
+        merchant_id: Address,
+        secs: u64,
+    ) -> Result<(), Error> {
+        merchant_id.require_auth();
+        if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantPaymentDurationSecs(merchant_id), &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Read the admin-configured min/max payment duration bounds,
+    /// falling back to the same defaults used by `create_payment`.
+    fn payment_duration_bounds(env: &Env) -> (u64, u64) {
+        let min_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MinPaymentDurationSecs)
+            .unwrap_or(CREATE_PAYMENT_WINDOW_SECS);
+        let max_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MaxPaymentDurationSecs)
+            .unwrap_or(30 * 24 * 3600);
+        (min_duration, max_duration)
+    }
+
+    /// Issue #1206: Resolve the effective default payment duration (seconds)
+    /// for a merchant when the caller does not supply `duration_secs` or
+    /// `expires_at`. Resolution order: per-merchant override, then the
+    /// admin-configured global default, then the compile-time
+    /// `DEFAULT_PAYMENT_DURATION_SECS` constant.
+    fn get_default_payment_duration(env: &Env, merchant_id: &Address) -> u64 {
+        if let Some(secs) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MerchantPaymentDurationSecs(merchant_id.clone()))
+        {
+            return secs;
+        }
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::DefaultPaymentDurationSecs)
+            .unwrap_or(DEFAULT_PAYMENT_DURATION_SECS)
+    }
+
     /// Return the accumulated treasury balance collected via settlement fees.
     /// Uses the default USDC token for backward compatibility.
     ///
@@ -745,6 +863,13 @@ impl PaymentProcessor {
             .ok_or(Error::Unauthorized)
             .unwrap_or_else(|_| Address::from_str(&env, ZERO_CONTRACT_STRKEY));
         Self::get_token_treasury_balance(env, usdc_token)
+    }
+
+    /// Return the treasury balance accrued for a specific settlement token.
+    /// Fees are tracked per-token so that non-USDC settlement fees remain
+    /// redeemable in the token they were actually collected in.
+    pub fn get_treasury_balance_for_token(env: Env, token_address: Address) -> i128 {
+        Self::get_token_treasury_balance(env, token_address)
     }
 
     /// Get treasury balance for a specific token.
@@ -907,21 +1032,45 @@ impl PaymentProcessor {
             return Err(Error::InvalidAmount);
         }
 
-        let treasury_balance = Self::get_treasury_balance(env.clone());
-        if amount > treasury_balance {
-            return Err(Error::InsufficientTreasuryBalance);
-        }
-
         let usdc_token_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::UsdcToken)
             .ok_or(Error::Unauthorized)?;
+        Self::withdraw_treasury_for_token(env, admin, usdc_token_address, amount, destination)
+    }
+
+    /// Admin withdrawal of accumulated treasury fees for a specific settlement
+    /// token. Fees are tracked per-token, so only the balance accrued in
+    /// `token_address` can be withdrawn in that token. Emits
+    /// `TREASURY/WITHDRAWN` with `(amount, destination)` and appends to the
+    /// paginated history log.
+    pub fn withdraw_treasury_for_token(
+        env: Env,
+        admin: Address,
+        token_address: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let treasury_balance = Self::get_token_treasury_balance(env.clone(), token_address.clone());
+        if amount > treasury_balance {
+            return Err(Error::InsufficientTreasuryBalance);
+        }
+
         let token_client = token::TokenClient::new(&env, &usdc_token_address);
         let contract_address = env.current_contract_address();
 
         env.storage().persistent().set(
-            &DataKey::TreasuryBalance,
+            &DataKey::TokenTreasuryBalance(token_address),
             &treasury_balance.saturating_sub(amount),
         );
 
@@ -1816,6 +1965,38 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1033: Admin-configurable staleness threshold (in seconds) that
+    /// `confirm_payment`/`verify_payment` enforces on the FX rate snapshot
+    /// before trusting it for settlement, independent of the FX oracle
+    /// contract's own internal staleness cap. Must be strictly positive.
+    pub fn set_oracle_staleness_threshold(
+        env: Env,
+        admin: Address,
+        threshold_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if threshold_secs == 0 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OracleStalenessThreshold, &threshold_secs);
+        Self::bump_ttl(&env, &DataKey::OracleStalenessThreshold, LONG_LIVE_TTL);
+        Ok(())
+    }
+
+    /// Issue #1033: Currently configured oracle staleness threshold, falling
+    /// back to `MAX_ORACLE_STALENESS_SECS` when the admin has not overridden it.
+    pub fn get_oracle_staleness_threshold(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OracleStalenessThreshold)
+            .unwrap_or(MAX_ORACLE_STALENESS_SECS)
+    }
+
     /// Add an address to the global blacklist (admin only).
     ///
     /// # Parameters
@@ -2032,7 +2213,7 @@ impl PaymentProcessor {
         // Idempotency check: if client_token was already used, return the existing payment
         // (or error if it maps to a different payment_id).
         if let Some(ref token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                 if existing_id == args.payment_id {
                     return Self::get_payment_internal(&env, &args.payment_id);
@@ -2177,6 +2358,24 @@ impl PaymentProcessor {
         Self::enforce_create_payment_rate_limit(&env, &args.merchant_id)?;
 
         let now = env.ledger().timestamp();
+
+        // Issue #1032: Reject reuse of a deposit_address that is already
+        // assigned to another open (Pending, unexpired) payment. Only an
+        // active Pending payment blocks the address — once that payment is
+        // confirmed, cancelled, failed, or simply expires, the address is
+        // free again (checked lazily here, no explicit release needed).
+        if let Some(existing_id) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, String>(&DataKey::DepositAddressPending(args.deposit_address.clone()))
+        {
+            if let Ok(existing) = Self::get_payment_internal(&env, &existing_id) {
+                if existing.status == PaymentStatus::Pending && existing.expires_at > now {
+                    return Err(Error::DepositAddressInUse);
+                }
+            }
+        }
+
         let min_duration = env
             .storage()
             .persistent()
@@ -2197,13 +2396,25 @@ impl PaymentProcessor {
                 ts
             }
             None => {
-                let duration = args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS);
+                let duration = args
+                    .duration_secs
+                    .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id));
                 if duration < min_duration || duration > max_duration {
                     return Err(Error::InvalidExpiry);
                 }
                 now.saturating_add(duration)
             }
         };
+
+        // Issue #1209: Validate an optional deferred-settlement timestamp. It must
+        // be strictly in the future and no later than the payment's own expiry,
+        // otherwise the payment could expire before `settle_payment` is ever
+        // allowed to run.
+        if let Some(settle_at) = args.settle_at {
+            if settle_at <= now || settle_at > resolved_expires_at {
+                return Err(Error::InvalidExpiry);
+            }
+        }
 
         let payment = PaymentCharge {
             payment_id: args.payment_id.clone(),
@@ -2243,6 +2454,16 @@ impl PaymentProcessor {
         );
         Self::record_payment_status(&env, &payment);
         Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
+
+        // Issue #1032: Track this deposit_address as claimed by this Pending
+        // payment so a concurrent create_payment with the same address is
+        // rejected until this one leaves the Pending state or expires.
+        let deposit_key = DataKey::DepositAddressPending(payment.deposit_address.clone());
+        env.storage()
+            .persistent()
+            .set(&deposit_key, &args.payment_id);
+        Self::bump_ttl(&env, &deposit_key, LONG_LIVE_TTL);
+
         Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
         Self::index_payment_by_date(
             &env,
@@ -2290,7 +2511,7 @@ impl PaymentProcessor {
         // Issue #399: Persist idempotency key → payment_id mapping with a TTL that matches
         // the payment expiry window so keys do not accumulate indefinitely.
         if let Some(token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             env.storage().persistent().set(&key, &args.payment_id);
             // TTL in ledgers ≈ (expires_at − now) / 5s per ledger, clamped to SHORT_LIVE_TTL min.
             let payment_duration_secs = resolved_expires_at.saturating_sub(now);
@@ -2301,9 +2522,21 @@ impl PaymentProcessor {
             // Store reverse mapping so cancel/expire can clean up the token.
             // We prefix the payment_id with "r:" to avoid collision with real tokens.
             let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-            let rev_key = DataKey::IdempotencyKey(rev_token_id);
+            let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
             env.storage().persistent().set(&rev_key, &token);
             Self::bump_ttl(&env, &rev_key, ttl_ledgers);
+        }
+
+        // Issue #1209: Persist the deferred-settlement timestamp so
+        // `settle_payment` can enforce it; TTL mirrors the payment's own expiry.
+        if let Some(settle_at) = args.settle_at {
+            let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+            env.storage().persistent().set(&settle_key, &settle_at);
+            let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+            let ledgers_per_sec: u64 = 5;
+            let ttl_ledgers =
+                ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
+            Self::bump_ttl(&env, &settle_key, ttl_ledgers);
         }
 
         Ok(payment)
@@ -2477,7 +2710,7 @@ impl PaymentProcessor {
 
             // Check idempotency
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != args.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -2497,12 +2730,20 @@ impl PaymentProcessor {
         for args in args_list.iter() {
             let resolved_expires_at = match args.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    args.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = args.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -2543,6 +2784,13 @@ impl PaymentProcessor {
             Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
 
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = args.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
             // Issue #489: Store reverse index for metadata_hash → payment_id lookup in batch
             if let Some(ref hash) = args.metadata_hash {
                 let key = DataKey::MetadataHashPayment(hash.clone());
@@ -2571,7 +2819,7 @@ impl PaymentProcessor {
 
             // Issue #399: Persist idempotency key with TTL matching payment expiry window.
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 env.storage().persistent().set(&key, &args.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -2580,7 +2828,7 @@ impl PaymentProcessor {
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 // Reverse mapping for cleanup on cancel/expire.
                 let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -2776,7 +3024,7 @@ impl PaymentProcessor {
             }
 
             if let Some(ref token) = req.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != req.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -2794,12 +3042,20 @@ impl PaymentProcessor {
         for req in payments.iter() {
             let resolved_expires_at = match req.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(req.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    req.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = req.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -2840,6 +3096,13 @@ impl PaymentProcessor {
             Self::extend_payment_ttl(&env, &req.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &req.payment_id, payment.expires_at);
 
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = req.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(req.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
             if let Some(ref hash) = req.metadata_hash {
                 let key = DataKey::MetadataHashPayment(hash.clone());
                 env.storage().persistent().set(&key, &req.payment_id);
@@ -2866,7 +3129,7 @@ impl PaymentProcessor {
             );
 
             if let Some(ref token) = req.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 env.storage().persistent().set(&key, &req.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -2874,7 +3137,7 @@ impl PaymentProcessor {
                     ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 let rev_token_id = Self::rev_key_for(&env, &req.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -3132,8 +3395,14 @@ impl PaymentProcessor {
 
         payment.status = new_status.clone();
 
-        // Issue #304: snapshot the FX rate at verification time, if an oracle
-        // is configured for this contract.
+        // Issue #304 / #1033: snapshot the FX rate at verification time, if an
+        // oracle is configured for this contract, and reject when the rate is
+        // older than the PaymentProcessor's own staleness threshold
+        // (independent of the FX oracle contract's internal cap). Unlike the
+        // oracle's own `RateStale` guard (which defaults to a lenient 24h
+        // hard cap), this enforces `MAX_ORACLE_STALENESS_SECS` /
+        // `set_oracle_staleness_threshold` (5 minutes by default) so a
+        // merchant cannot be settled against a dangerously stale rate.
         if let Some(fx_oracle) = env
             .storage()
             .persistent()
@@ -3142,8 +3411,16 @@ impl PaymentProcessor {
             let oracle_client = FXOracleClient::new(&env, &fx_oracle);
             match oracle_client.try_get_rate(&payment.currency) {
                 Ok(Ok(rate_data)) => {
+                    let threshold = Self::get_oracle_staleness_threshold(env.clone());
+                    let age = env.ledger().timestamp().saturating_sub(rate_data.updated_at);
+                    if age > threshold {
+                        return Err(Error::OracleStale);
+                    }
                     payment.fx_rate = Some(rate_data.rate);
-                    payment.fx_rate_at = Some(env.ledger().timestamp());
+                    payment.fx_rate_at = Some(rate_data.updated_at);
+                }
+                Ok(Err(FXOracleError::RateStale)) => {
+                    return Err(Error::OracleStale);
                 }
                 _ => {
                     env.events().publish(
@@ -3244,28 +3521,31 @@ impl PaymentProcessor {
             Self::enforce_tier_volume_cap(&env, &payment.merchant_id, total_received)?;
         }
 
-        // Issue #304: Check FX rate freshness when both registry and oracle address are configured
+        // Issue #304 / #1033: Check FX rate freshness against the oracle
+        // configured via `set_fx_oracle_address`. Previously this was only
+        // enforced when a merchant registry was *also* configured, which let
+        // verify_payment settle against a stale rate whenever no registry was
+        // set. The registry is unrelated to oracle freshness, so the gate is
+        // removed — this now runs whenever an oracle address is configured.
         if new_status == PaymentStatus::Confirmed || new_status == PaymentStatus::Overpaid {
-            if let Some(_registry_address) = env
+            if let Some(oracle_address) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+                .get::<DataKey, Address>(&DataKey::FXOracleAddress)
             {
-                if let Some(oracle_address) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, Address>(&DataKey::FXOracleAddress)
-                {
-                    let oracle_client =
-                        crate::fx_oracle::FXOracleClient::new(&env, &oracle_address);
-                    match oracle_client.try_get_rate(&payment.currency) {
-                        Ok(Ok(rate_data)) => {
-                            payment.fx_rate = Some(rate_data.rate);
-                            payment.fx_rate_at = Some(rate_data.updated_at);
+                let oracle_client = crate::fx_oracle::FXOracleClient::new(&env, &oracle_address);
+                match oracle_client.try_get_rate(&payment.currency) {
+                    Ok(Ok(rate_data)) => {
+                        let threshold = Self::get_oracle_staleness_threshold(env.clone());
+                        let age = env.ledger().timestamp().saturating_sub(rate_data.updated_at);
+                        if age > threshold {
+                            return Err(Error::OracleStale);
                         }
-                        _ => {
-                            return Err(Error::StaleOracleRate);
-                        }
+                        payment.fx_rate = Some(rate_data.rate);
+                        payment.fx_rate_at = Some(rate_data.updated_at);
+                    }
+                    _ => {
+                        return Err(Error::OracleStale);
                     }
                 }
             }
@@ -3368,13 +3648,21 @@ impl PaymentProcessor {
         };
 
         // Issue #166: Optimize event topics for efficient indexing
+        // Issue #1035: include payer_muxed_id (None for non-muxed payers) so
+        // downstream consumers (indexer, webhooks) can route confirmation to
+        // the correct sub-account without a separate lookup.
         env.events().publish(
             (
                 Symbol::new(&env, "PAYMENT"),
                 event_name,
                 payment.merchant_id.clone(),
             ),
-            (payment_id.clone(), payment.amount, amount_received),
+            (
+                payment_id.clone(),
+                payment.amount,
+                amount_received,
+                payment.payer_muxed_id,
+            ),
         );
 
         Ok(new_status)
@@ -4559,6 +4847,18 @@ impl PaymentProcessor {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
+        // Issue #1209: Reject settlement before the payment's optional deferred
+        // `settle_at` timestamp, supporting escrow-like deferred release.
+        if let Some(settle_at) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::PaymentSettleAt(payment_id.clone()))
+        {
+            if env.ledger().timestamp() < settle_at {
+                return Err(Error::SettlementNotYetDue);
+            }
+        }
+
         // Resolve the settlement token: use payment.token_address if set, else the configured USDC token
         let settlement_token: Option<Address> = payment.token_address.clone().or_else(|| {
             env.storage()
@@ -5086,6 +5386,86 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1200: Maximum number of items accepted by a single
+    /// `batch_settle_payments` call. Kept well under `create_payments_batch`'s
+    /// cap of 50 since each settlement does materially more work per item
+    /// (fee-waiver lookups, merchant registry calls, token transfers, event
+    /// publishing) than a payment creation.
+    pub const MAX_BATCH_SETTLE_PAYMENTS: u32 = 20;
+
+    /// Issue #1200: Settle up to `MAX_BATCH_SETTLE_PAYMENTS` confirmed payments
+    /// in a single invocation.
+    ///
+    /// Unlike `create_payments_batch`, a failure on one payment does **not**
+    /// revert the whole call: each item is settled independently by calling
+    /// `settle_payment`, and its outcome — success, or the `Error` discriminant
+    /// `settle_payment` would have returned for that payment on its own — is
+    /// recorded in the corresponding `BatchSettleResult`. This lets an operator
+    /// submit a day's worth of confirmed payments in one transaction without a
+    /// single already-settled or invalid `payment_id` blocking the rest.
+    ///
+    /// Each settled item still emits its own `PAYMENT`/`SETTLED` event (and the
+    /// other per-settlement events `settle_payment` emits) exactly as if it had
+    /// been settled individually; this call additionally emits a single
+    /// `PAYMENT`/`BATCH_SETTLED` summary event once all items have been
+    /// processed.
+    pub fn batch_settle_payments(
+        env: Env,
+        operator: Address,
+        items: Vec<BatchSettlePaymentItem>,
+    ) -> Result<Vec<BatchSettleResult>, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator) {
+            return Err(Error::Unauthorized);
+        }
+
+        if items.len() > Self::MAX_BATCH_SETTLE_PAYMENTS {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut results: Vec<BatchSettleResult> = vec![&env];
+        let mut settled_count: u32 = 0;
+
+        for item in items.iter() {
+            let outcome = Self::settle_payment(
+                env.clone(),
+                operator.clone(),
+                item.payment_id.clone(),
+                item.splits.clone(),
+            );
+
+            match outcome {
+                Ok(()) => {
+                    settled_count += 1;
+                    results.push_back(BatchSettleResult {
+                        payment_id: item.payment_id.clone(),
+                        success: true,
+                        error_code: None,
+                    });
+                }
+                Err(e) => {
+                    results.push_back(BatchSettleResult {
+                        payment_id: item.payment_id.clone(),
+                        success: false,
+                        error_code: Some(e as u32),
+                    });
+                }
+            }
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PAYMENT"),
+                Symbol::new(&env, "BATCH_SETTLED"),
+                operator,
+            ),
+            (items.len() as u32, settled_count),
+        );
+
+        Ok(results)
+    }
+
     /// Issue #480: Trigger a settlement for a merchant's accumulated pending balance.
     ///
     /// Sweeps the merchant's pending settlement balance to their payout address.
@@ -5595,6 +5975,7 @@ impl PaymentProcessor {
             idempotency_key: None,
             allow_partial: None,
             tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -5712,6 +6093,7 @@ impl PaymentProcessor {
             idempotency_key: None,
             allow_partial: None,
             tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -6190,11 +6572,11 @@ impl PaymentProcessor {
     /// client_token can be reused after expiry or cancellation.
     fn remove_idempotency_key(env: &Env, payment_id: &String) {
         let rev_token_id = Self::rev_key_for(env, payment_id);
-        let rev_key = DataKey::IdempotencyKey(rev_token_id);
+        let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
         if let Some(token) = env.storage().persistent().get::<DataKey, String>(&rev_key) {
             env.storage()
                 .persistent()
-                .remove(&DataKey::IdempotencyKey(token));
+                .remove(&DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token)));
             env.storage().persistent().remove(&rev_key);
         }
     }
@@ -7030,23 +7412,16 @@ impl PaymentProcessor {
 
         let stored_hash = proposal.new_wasm_hash.clone();
         // Hash verification: apply exactly the hash stored at propose time.
-        let old_version: String = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ContractVersion)
-            .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION));
-        let new_version_str = bump_version_string(&env, &old_version);
+        let old_version = Self::version(env.clone());
 
         env.storage()
             .persistent()
             .remove(&DataKey::PendingWasmUpgrade);
-        env.storage()
-            .persistent()
-            .set(&DataKey::ContractVersion, &new_version_str);
+        Self::set_version(env.clone(), admin, new_version.clone())?;
 
         env.events().publish(
             (Symbol::new(&env, "UPGRADE"), Symbol::new(&env, "EXECUTED")),
-            (stored_hash.clone(), old_version, new_version_str),
+            (stored_hash.clone(), old_version, new_version),
         );
 
         env.deployer().update_current_contract_wasm(stored_hash);
@@ -7217,9 +7592,7 @@ impl PaymentProcessor {
 
                 let new_version_str = bump_version_string(&env, &old_version);
                 env.deployer().update_current_contract_wasm(new_wasm_hash);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::ContractVersion, &new_version_str);
+                Self::set_version(env.clone(), admin.clone(), new_version_str.clone())?;
 
                 env.events().publish(
                     (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),

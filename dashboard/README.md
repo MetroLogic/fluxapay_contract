@@ -9,6 +9,7 @@ A minimal Next.js 14+ (App Router) merchant dashboard for managing FluxaPay paym
 - **Payment detail** — expandable view with refunds, events timeline, and dispute status.
 - **Create payment link** — simple form with QR code display.
 - **Analytics** — weekly revenue bar chart from the analytics endpoint.
+- **Subscription metrics** — monthly recurring revenue, active subscribers, churn, trial conversion, and dunning recovery.
 
 ## Tech Stack
 
@@ -81,6 +82,11 @@ dashboard/
 2. Freighter signs the challenge transaction.
 3. The signed challenge is exchanged for a JWT.
 4. The JWT is attached to all subsequent indexer API calls.
+
+The subscription metrics endpoint uses merchant API keys rather than SEP-10
+JWTs. The `/subscriptions` dashboard page reads the merchant-bound API key and
+merchant ID from `localStorage` keys `fluxapay_api_key` and
+`fluxapay_merchant_id`; the key must include the indexer `read:analytics` scope.
 
 ## Responsive Design
 

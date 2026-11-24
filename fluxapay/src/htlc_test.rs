@@ -1,537 +1,294 @@
-use super::*;
+//! Tests for the HTLC escrow module (`htlc.rs`), including the Issue #1021
+//! permissionless timeout-sweep entry point `claim_htlc_timeout`.
 
-use crate::{FluxaPay, FluxaPayClient};
+use crate::{Htlc, HtlcClient, HtlcError, HtlcStatus};
 use soroban_sdk::{
-    address_string_to_address, address_to_string, address_to_value, address_value_to_address,
-    crypto::Hash, testutils::{
-        Address as TestAddress,
-        Authors, Budget, Env as TestEnv, Ledger, LedgerInfo, Metadata, TestContract,
-    },
-    Symbol, Vec5,
+    testutils::{Address as _, Ledger},
+    token, Address, Bytes, BytesN, Env, String,
 };
 
-const TTL_THRESHOLD: u32 = 100;
-const TTL_EXTENDED: u32 = 120;
-
-fn setup_env() -> (TestEnv, FluxaPayClient<') {
-    let env = Env::default();
-    env.ledger().set_time(1_000_000);
-    env.budget().reset_unlimited();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(FluxaPay, ());
-    let client = FluxaPayClient::new(&env, &contract_id);
-    (env, client)
+fn setup(env: &Env) -> HtlcClient<'_> {
+    let contract_id = env.register(Htlc, ());
+    HtlcClient::new(env, &contract_id)
 }
 
-fn adv_ledger(env: &TestEnv, ledgers: u32) {
-    env.ledger().set_sequence(env.ledger().sequence() + ledgers as u32);
-    env.ledger().set_time(env.ledger().timestamp() + (ledgers as u64 * 5));
-}
-
-fn hash_of_preimage(env: &TestEnv, preimage: &[u8]) -> Hash<32> {
-    env.crypto().sha256(&Bytes::from_slice(env, preimage))
-}
-
-fn setup_tokens(env: &TestEnv, user: &Address, amount: i128) -> Address {
+/// Registers a Stellar asset token and mints `amount` to `holder`.
+fn setup_token(env: &Env, holder: &Address, amount: i128) -> Address {
     let token_admin = Address::generate(env);
-    let token_id = env.register_stellar_token();
-    let token_client = token::Client::new(env, &token_id);
-    token_client.mint(&token_admin, &amount);
-    token_client.burn(&token_admin, &amount);
-    token_client.mint(user, &amount);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token_admin_client = token::StellarAssetClient::new(env, &token_id);
+    token_admin_client.mint(holder, &amount);
     token_id
 }
 
-// -----------------------------------------------------------------------------
-// Happy path
-// -----------------------------------------------------------------------------
-
-#[test]
-fn test_create_and_claim_htlc_happy_path() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"secret-preimage-1234567890";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
-
-    let htlc = client.get_htlc(&htlc_id);
-    assert_eq!(htlc.sender, address_to_string(&env, &sender));
-    assert_eq!(htlc.recipient, address_to_string(&env, &recipient));
-    assert_eq!(htlc.amount, amount);
-    assert_eq!(htlc.claimed, false);
-    assert_eq!(htlc.refunded, false);
-
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
-
-    let htlc_after = client.get_htlc(&htlc_id);
-    assert!(htlc_after.claimed);
-    assert_eq!(htlc_after.refunded, false);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&recipient), amount);
-    assert_eq!(token_client.balance(&sender), 0);
+struct Fixture<'a> {
+    client: HtlcClient<'a>,
+    token_id: Address,
+    alice: Address, // sender
+    bob: Address,   // receiver
+    amount: i128,
+    secret: Bytes,
+    hashlock: BytesN<32>,
+    timeout_ledger: u32,
+    htlc_id: String,
 }
 
-// -----------------------------------------------------------------------------
-// Invalid preimage
-// -----------------------------------------------------------------------------
+/// Creates a contract, a funded token, and one Active HTLC from `alice` to
+/// `bob` with a 100-ledger timeout. `env` must outlive the returned fixture.
+fn create_fixture(env: &Env) -> Fixture<'_> {
+    env.mock_all_auths();
+    let client = setup(env);
 
-#[test]
-#[should_panic]
-fn test_claim_with_invalid_preimage_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let amount = 10_000_000i128;
+    let token_id = setup_token(env, &alice, amount);
 
-    let preimage = b"correct-preimage-abcdefghijk";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
+    let secret = Bytes::from_array(env, &[1, 2, 3, 4]);
+    let hashlock: BytesN<32> = env.crypto().sha256(&secret).to_bytes();
+    let timeout_ledger = env.ledger().sequence() + 100;
 
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
+    let htlc_id = client.create_htlc(&alice, &bob, &token_id, &amount, &hashlock, &timeout_ledger);
 
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, b"wrong-preimage-abcdefghijk"));
+    Fixture {
+        client,
+        token_id,
+        alice,
+        bob,
+        amount,
+        secret,
+        hashlock,
+        timeout_ledger,
+        htlc_id,
+    }
 }
 
 #[test]
-fn test_claim_with_invalid_preimage_leaves_htlc_unclaimed() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
+fn test_create_locks_tokens_in_escrow() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    let token_client = token::Client::new(&env, &f.token_id);
 
-    let preimage = b"correct-preimage-abcdefghijk";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
+    assert_eq!(token_client.balance(&f.alice), 0);
+    assert_eq!(token_client.balance(&f.client.address), f.amount);
 
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        'hash,
-        &timelock,
-    );
-
-    let result = env.try_invoke_contract(&client.contract_id, &Symbol::new(&env, "claim_htlc"), (&htlc_id, Bytes::from_slice(&env, b"wrong-preimage-abcdefghijk")));
-    assert!(result.is_err());
-
-    let htlc = client.get_htlc(&htlc_id);
-    assert!(!htlc.claimed);
-    assert!(!htlc.refunded);
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&recipient), 0);
-}
-
-// -----------------------------------------------------------------------------
-// Late claims (after timelock expiration)
-// -----------------------------------------------------------------------------
-
-#[test]
-#[should_panic]
-fn test_claim_after_timelock_expiration_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"late-claim-preimage-12345678";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
-
-    adv_ledger(&env, TTL_THRESHOLD + 1);
-
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
-}
-
-// -----------------------------------------------------------------------------
-// Early refunds (before timelock expiration)
-// -----------------------------------------------------------------------------
-
-#[test]
-#[should_panic]
-fn test_refund_before_timelock_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"early-refund-preimage-12345678";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        'hash,
-        &timelock,
-    );
-
-    client.refund_htlc(&htlc_id);
-}
-
-// -----------------------------------------------------------------------------
-// Refund after timelock expiration (success)
-// -----------------------------------------------------------------------------
-
-#[test]
-fn test_refund_after_timelock_succeeds() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"refund-after-expiry-123456789";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
-
-    adv_ledger(&env, TTL_THRESHOLD + 1);
-
-    client.refund_htlc(&htlc_id);
-
-    let htlc = client.get_htlc(&htlc_id);
-    assert!(htlc.refunded);
-    assert!(!htlc.claimed);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&sender), amount);
-    assert_eq!(token_client.balance(&recipient), 0);
-}
-
-// -----------------------------------------------------------------------------
-// Uznauthorized refund
-// -----------------------------------------------------------------------------
-
-#[test]
-#[should_panic]
-fn test_refund_by_unauthorized_caller_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let attacker = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"unauthorized-refund-123456789";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        'hash,
-        &timelock,
-    );
-
-    adv_ledger(&env, TTL_THRESHOLD_EXTENDED);
-
-    // Attacker attempts to refund and steal the funds.
-    env.mock_auth(&attacker, &address_to_value(&env, &attacker), &address_to_value(&env, &attacker), &());
-    client.refund_htlc(&htlc_id);
-}
-
-// -----------------------------------------------------------------------------
-// Replay / double-claim prevention
-// -----------------------------------------------------------------------------
-
-#[test]
-#[should_panic]
-fn test_double_claim_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"double-claim-preimage-12345678";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        'hash,
-        &timelock,
-    );
-
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
-
-    // Second claim must fail.
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
+    let record = f.client.get_htlc(&f.htlc_id);
+    assert_eq!(record.status, HtlcStatus::Active);
+    assert_eq!(record.sender, f.alice);
+    assert_eq!(record.receiver, f.bob);
+    assert_eq!(record.amount, f.amount);
+    assert_eq!(record.hashlock, f.hashlock);
+    assert_eq!(record.timeout_ledger, f.timeout_ledger);
+    assert!(record.resolved_at.is_none());
 }
 
 #[test]
-#[should_panic]
-fn test_claim_after_refund_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
+fn test_create_htlc_rejects_non_positive_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let token_id = setup_token(&env, &alice, 100);
+    let secret = Bytes::from_array(&env, &[1, 2, 3, 4]);
+    let hashlock: BytesN<32> = env.crypto().sha256(&secret).to_bytes();
 
-    let preimage = b"claim-after-refund-123456789";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
-
-    adv_ledger(&env, TTL_THRESHOLD + 1);
-    client.refund_htlc(&htlc_id);
-
-    // Claim after refund must fail.
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
-}
-
-#[test]
-#[should_panic]
-fn test_double_refund_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
-
-    let preimage = b"double-refund-preimage-12345678";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        'hash,
-        &timelock,
-    );
-
-    adv_ledger(&env, TTL_THRESHOLD_EXTENDED);
-    client.refund_htlc(&htlc_id);
-
-    // Second refund must fail.
-    client.refund_htlc(&htlc_id);
-}
-
-// -----------------------------------------------------------------------------
-// Get htlc / not-found / invalid arguments
-+/ -----------------------------------------------------------------------------
-
-#[test]
-#[should_panic]
-fn test_get_missing_htlc_fails() {
-    let (env, client) = setup_env();
-    client.get_htlc(&u32::9999);
-}
-
-#[test]
-#[should_panic]
-fn test_create_with_zero_amount_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let token_id = setup_tokens(&env, &sender, 1_000);
-
-    let preimage = b"zero-amount-preimage-123456789";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
-
-    client.create_htlc(
-        &sender,
-        &recipient,
+    let result = client.try_create_htlc(
+        &alice,
+        &bob,
         &token_id,
         &0i128,
-        &hash,
-        &timelock,
+        &hashlock,
+        &(env.ledger().sequence() + 10),
     );
+    assert_eq!(result, Err(Ok(HtlcError::InvalidAmount)));
 }
 
 #[test]
-#[should_panic]
-fn test_create_with_past_timelock_fails() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let token_id = setup_tokens(&env, &sender, 1_000);
+fn test_create_htlc_rejects_past_timeout() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let token_id = setup_token(&env, &alice, 100);
+    let secret = Bytes::from_array(&env, &[1, 2, 3, 4]);
+    let hashlock: BytesN<32> = env.crypto().sha256(&secret).to_bytes();
 
-    let preimage = b"past-timelock-preimage-12345678";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence();
-
-    client.create_htlc(
-        &sender,
-        &recipient,
+    let result = client.try_create_htlc(
+        &alice,
+        &bob,
         &token_id,
-        &1_000,
-        &hash,
-        &timelock,
+        &100i128,
+        &hashlock,
+        &env.ledger().sequence(),
     );
+    assert_eq!(result, Err(Ok(HtlcError::InvalidTimeout)));
 }
 
-// -----------------------------------------------------------------------------
-// Events
-+/ -----------------------------------------------------------------------------
-
 #[test]
-fn test_events_published_on_create_claim_refund() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount * 2);
+fn test_claim_htlc_happy_path_releases_to_receiver() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    let token_client = token::Client::new(&env, &f.token_id);
 
-    let preimage = b"event-preimage-1234567890abcdef";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
+    f.client.claim_htlc(&f.htlc_id, &f.bob, &f.secret);
 
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
+    assert_eq!(token_client.balance(&f.bob), f.amount);
+    assert_eq!(token_client.balance(&f.client.address), 0);
 
-    let events = env.events().all();
-    let created_event = events
-        .iter()
-        .find(|e| {
-            e.topics.len== 2
-                && e.topics.get(0).unwrap() == Symbol::new(&env, "HTLC")
-                && e.topics.get(1).unwrap() == Symbol::new(&env, "CREATED")
-        })
-        .expect("HTLC CREATED event not found");
-    assert_eq!(created_event.topics.get(0).unwrap(), Symbol::new(&env, "HTLC"));
-
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
-
-    let events_after_claim = env.events().all();
-    let claimed_event = events_after_claim
-        .iter()
-        .find(|e| {
-            e.topics.len() == 2
-                && e.topics.get(0).unwrap() == Symbol::new(&env, "HTLC")
-                && e.topics.get(1).unwrap() == Symbol::new(&env, "CLAIMED")
-        })
-        .expect("HTLC CLAIMED event not found");
-    assert_eq!(claimed_event.topics.get(0).unwrap(), Symbol::new(&env, "HTLC"));
-
-    // Create a second HTLC to exercise the refund path and verify the REFUNDED event.
-    let preimage2 = b"event-preimage-2-123456789abcdef";
-    let hash2 = hash_of_preimage(&env, preimage2);
-    let timelock2 = env.ledger().sequence() + TTL_THRESHOLD;
-    let htlc_id2 = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash2,
-        &timelock2,
-    );
-
-    adv_ledger(&env, TTL_THRESHOLD_EXTENDED);
-    client.refund_htlc(&htlc_id2);
-
-    let events_after_refund = env.events().all();
-    let refunded_event = events_after_refund
-        .iter()
-        .find(|e| {
-            e.topics.len() == 2
-                && e.topics.get(0).unwrap() == Symbol::new(&env, "HTLC")
-                && e.topics.get(1).unwrap() == Symbol::new(&env, "REFUNDED")
-        })
-        .expect("HTLC REFUNDED event not found");
-    assert_eq!(refunded_event.topics.get(0).unwrap(), Symbol::new(&env, "HTLC"));
+    let record = f.client.get_htlc(&f.htlc_id);
+    assert_eq!(record.status, HtlcStatus::Claimed);
+    assert!(record.resolved_at.is_some());
 }
 
-// -----------------------------------------------------------------------------
-// Persistent storage TVL / bounded keys smoke test
-// -----------------------------------------------------------------------------
+#[test]
+fn test_claim_after_timeout_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    env.ledger().set_sequence(f.timeout_ledger);
+
+    let result = f.client.try_claim_htlc(&f.htlc_id, &f.bob, &f.secret);
+    assert_eq!(result, Err(Ok(HtlcError::Expired)));
+}
 
 #[test]
-fn test_htlc_persists_across_ledger_advance() {
-    let (env, client) = setup_env();
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let amount: i128 = 1_000;
-    let token_id = setup_tokens(&env, &sender, amount);
+fn test_claim_with_wrong_preimage_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    let wrong_secret = Bytes::from_array(&env, &[9, 9, 9, 9]);
 
-    let preimage = b"persistent-preimage-123456789";
-    let hash = hash_of_preimage(&env, preimage);
-    let timelock = env.ledger().sequence() + TTL_THRESHOLD;
+    let result = f.client.try_claim_htlc(&f.htlc_id, &f.bob, &wrong_secret);
+    assert_eq!(result, Err(Ok(HtlcError::PreimageMismatch)));
+}
 
-    let htlc_id = client.create_htlc(
-        &sender,
-        &recipient,
-        &token_id,
-        &amount,
-        &hash,
-        &timelock,
-    );
+#[test]
+fn test_claim_by_non_receiver_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    let mallory = Address::generate(&env);
 
-    adv_ledger(&env, 5);
+    let result = f.client.try_claim_htlc(&f.htlc_id, &mallory, &f.secret);
+    assert_eq!(result, Err(Ok(HtlcError::Unauthorized)));
+}
 
-    let htlc = client.get_htlc(&htlc_id);
-    assert_eq!(htlc.amount, amount);
-    assert!(!htlc.claimed);
-    assert!(!htlc.refunded);
+#[test]
+fn test_refund_before_timeout_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
 
-    client.claim_htlc(&htlc_id, &Bytes::from_slice(&env, preimage));
-    let htlc_after = client.get_htlc(&htlc_id);
-    assert!(htlc_after.claimed);
+    let result = f.client.try_refund_htlc(&f.htlc_id, &f.alice);
+    assert_eq!(result, Err(Ok(HtlcError::NotExpired)));
+}
+
+#[test]
+fn test_refund_after_timeout_returns_funds_to_sender() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    env.ledger().set_sequence(f.timeout_ledger);
+    let token_client = token::Client::new(&env, &f.token_id);
+
+    f.client.refund_htlc(&f.htlc_id, &f.alice);
+
+    assert_eq!(token_client.balance(&f.alice), f.amount);
+    let record = f.client.get_htlc(&f.htlc_id);
+    assert_eq!(record.status, HtlcStatus::Refunded);
+}
+
+#[test]
+fn test_refund_by_non_sender_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    env.ledger().set_sequence(f.timeout_ledger);
+    let mallory = Address::generate(&env);
+
+    let result = f.client.try_refund_htlc(&f.htlc_id, &mallory);
+    assert_eq!(result, Err(Ok(HtlcError::Unauthorized)));
+}
+
+#[test]
+fn test_claim_or_refund_after_claim_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    f.client.claim_htlc(&f.htlc_id, &f.bob, &f.secret);
+
+    let claim_again = f.client.try_claim_htlc(&f.htlc_id, &f.bob, &f.secret);
+    assert_eq!(claim_again, Err(Ok(HtlcError::AlreadyClaimed)));
+
+    env.ledger().set_sequence(f.timeout_ledger);
+    let refund_after_claim = f.client.try_refund_htlc(&f.htlc_id, &f.alice);
+    assert_eq!(refund_after_claim, Err(Ok(HtlcError::AlreadyClaimed)));
+}
+
+// ---- Issue #1021: claim_htlc_timeout (permissionless sweep) ----
+
+#[test]
+fn test_claim_htlc_timeout_before_expiry_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+
+    let result = f.client.try_claim_htlc_timeout(&f.htlc_id);
+    assert_eq!(result, Err(Ok(HtlcError::NotExpired)));
+}
+
+#[test]
+fn test_claim_htlc_timeout_at_exact_ledger_succeeds_for_any_caller() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    // Exactly at timeout_ledger, not past it - the boundary must succeed.
+    env.ledger().set_sequence(f.timeout_ledger);
+    let token_client = token::Client::new(&env, &f.token_id);
+
+    // No caller argument at all, matching the issue's
+    // `pub fn claim_htlc_timeout(env: Env, htlc_id: String)` signature -
+    // anyone (or no one in particular) can trigger it. Funds must land on
+    // the original sender (alice), not on whoever submitted the call.
+    f.client.claim_htlc_timeout(&f.htlc_id);
+
+    assert_eq!(token_client.balance(&f.alice), f.amount);
+    assert_eq!(token_client.balance(&f.client.address), 0);
+
+    let record = f.client.get_htlc(&f.htlc_id);
+    assert_eq!(record.status, HtlcStatus::Refunded);
+    assert!(record.resolved_at.is_some());
+}
+
+#[test]
+fn test_claim_htlc_timeout_called_twice_fails() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    env.ledger().set_sequence(f.timeout_ledger);
+
+    f.client.claim_htlc_timeout(&f.htlc_id);
+    let second = f.client.try_claim_htlc_timeout(&f.htlc_id);
+    assert_eq!(second, Err(Ok(HtlcError::AlreadyClaimed)));
+}
+
+#[test]
+fn test_claim_htlc_timeout_does_not_allow_double_spend_with_refund_htlc() {
+    let env = Env::default();
+    let f = create_fixture(&env);
+    env.ledger().set_sequence(f.timeout_ledger);
+    let token_client = token::Client::new(&env, &f.token_id);
+
+    f.client.claim_htlc_timeout(&f.htlc_id);
+    assert_eq!(token_client.balance(&f.alice), f.amount);
+
+    // A subsequent manual refund attempt by the sender must not pay out
+    // a second time.
+    let result = f.client.try_refund_htlc(&f.htlc_id, &f.alice);
+    assert_eq!(result, Err(Ok(HtlcError::AlreadyClaimed)));
+    assert_eq!(token_client.balance(&f.alice), f.amount);
+}
+
+#[test]
+fn test_claim_htlc_timeout_on_unknown_id_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+
+    let result = client.try_claim_htlc_timeout(&String::from_str(&env, "htlc_999"));
+    assert_eq!(result, Err(Ok(HtlcError::NotFound)));
 }

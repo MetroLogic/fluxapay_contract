@@ -3,8 +3,8 @@ use crate::{
     PaymentProcessor, PaymentProcessorClient,
 };
 use soroban_sdk::{
-    testutils::{Address as _, BytesN as _},
-    Address, BytesN, Env, String, Symbol,
+    testutils::{Address as _, BytesN as _, Events as _},
+    Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
 
 fn setup_payment_processor_with_registry(
@@ -375,4 +375,77 @@ fn test_muxed_account_type_wraps_address_and_id() {
     };
     assert_eq!(muxed.account, account);
     assert_eq!(muxed.id, 7_777);
+}
+
+/// Issue #1035: the PAYMENT/VERIFIED event emitted on confirmation includes
+/// `payer_muxed_id` so the indexer/webhooks can route to the correct
+/// sub-account without a separate lookup.
+#[test]
+fn test_verified_event_includes_muxed_id() {
+    let env = Env::default();
+    let (_admin, _processor_addr, payment_client, merchant_client) =
+        setup_payment_processor_with_registry(&env);
+    let (oracle, merchant) =
+        setup_oracle_and_merchant(&env, &_admin, &payment_client, &merchant_client);
+
+    let payment_id = String::from_str(&env, "pay_test_mux_event");
+    let deposit_addr = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let muxed_id: u64 = 54321;
+
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        payer: None,
+        amount: 100_000_000i128,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: deposit_addr,
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        idempotency_key: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+            tip_enabled: false,
+    };
+    payment_client.create_payment(&args);
+
+    let tx_hash = BytesN::<32>::random(&env);
+    let result = payment_client.try_verify_payment(
+        &oracle,
+        &payment_id,
+        &tx_hash,
+        &payer,
+        &100_000_000i128,
+        &Some(muxed_id),
+    );
+    assert!(result.is_ok(), "verify_payment should succeed: {:?}", result);
+
+    let found = env.events().all().iter().any(|(_, topics, data)| {
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        if !matches!(
+            (&t0, &t1),
+            (Ok(a), Ok(b)) if a == &Symbol::new(&env, "PAYMENT") && b == &Symbol::new(&env, "VERIFIED")
+        ) {
+            return false;
+        }
+        let decoded: Result<(String, i128, i128, Option<u64>), _> = data.try_into_val(&env);
+        matches!(decoded, Ok((_, _, _, Some(id))) if id == muxed_id)
+    });
+
+    assert!(
+        found,
+        "expected a PAYMENT/VERIFIED event carrying payer_muxed_id = Some({})",
+        muxed_id
+    );
 }

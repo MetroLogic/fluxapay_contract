@@ -3,6 +3,9 @@
  *
  * Provides real-time event streaming for merchant dashboard live updates:
  * - Event filtering via comma-separated `event_types`
+ * - Issue #1039: optional `payment_id` / `dispute_id` filtering, so a client
+ *   can subscribe to just one payment's or dispute's lifecycle (e.g. a
+ *   dispute detail page) instead of every event for the merchant.
  * - Keepalive ping every 30 seconds
  * - Disconnect cleanup to prevent memory leaks
  * - Rate limiting to a maximum of 5 concurrent connections per merchant
@@ -10,11 +13,18 @@
 
 import type { Response } from "express";
 
+export interface SSEClientFilters {
+  paymentId?: string;
+  disputeId?: string;
+}
+
 export interface SSEClient {
   id: string;
   merchantId: string;
   res: Response;
   eventTypes?: Set<string>;
+  paymentId?: string;
+  disputeId?: string;
   pingTimer: NodeJS.Timeout;
 }
 
@@ -33,6 +43,7 @@ export class SSEManager {
     merchantId: string,
     res: Response,
     eventTypes?: string[],
+    filters?: SSEClientFilters,
   ): SSEClient | null {
     if (!this.canConnect(merchantId)) {
       return null;
@@ -58,6 +69,8 @@ export class SSEManager {
         eventTypes && eventTypes.length > 0
           ? new Set(eventTypes.map((t) => t.trim()))
           : undefined,
+      paymentId: filters?.paymentId,
+      disputeId: filters?.disputeId,
       pingTimer,
     };
 
@@ -83,16 +96,23 @@ export class SSEManager {
   public broadcast(merchantId: string, eventType: string, data: any): void {
     const payload = typeof data === "string" ? data : JSON.stringify(data);
     const message = `event: ${eventType}\ndata: ${payload}\n\n`;
+    const record = data && typeof data === "object" ? (data as Record<string, unknown>) : undefined;
+    const paymentId = record?.payment_id != null ? String(record.payment_id) : undefined;
+    const disputeId = record?.dispute_id != null ? String(record.dispute_id) : undefined;
 
     for (const client of this.clients.values()) {
-      if (client.merchantId === merchantId) {
-        if (!client.eventTypes || client.eventTypes.has(eventType)) {
-          try {
-            client.res.write(message);
-          } catch {
-            this.removeClient(client.id);
-          }
-        }
+      if (client.merchantId !== merchantId) continue;
+      if (client.eventTypes && !client.eventTypes.has(eventType)) continue;
+      // Issue #1039: a client that asked for one payment/dispute only gets
+      // events carrying that same ID — e.g. `?dispute_id=disp_1` on a
+      // dispute detail page shouldn't see every other dispute's events too.
+      if (client.paymentId && client.paymentId !== paymentId) continue;
+      if (client.disputeId && client.disputeId !== disputeId) continue;
+
+      try {
+        client.res.write(message);
+      } catch {
+        this.removeClient(client.id);
       }
     }
   }

@@ -750,6 +750,7 @@ impl PaymentStreaming {
             now,
             old_rate,
             stream.remaining_deposit,
+            stream.cliff_at,
         );
         stream.last_checkpoint_at = now;
 
@@ -874,6 +875,53 @@ impl PaymentStreaming {
             }
         }
         streams
+    }
+
+    /// Issue #1203: Query a merchant's (the stream `receiver`'s) payment
+    /// streams for dashboard and reconciliation use.
+    ///
+    /// Paginated (`offset`/`limit`, hard-capped at 100 per call) and
+    /// optionally filtered by `status`. When `status_filter` is `Some`, only
+    /// streams matching that status are counted against `offset`/`limit`.
+    pub fn get_merchant_streams(
+        env: Env,
+        merchant: Address,
+        offset: u32,
+        limit: u32,
+        status_filter: Option<StreamStatus>,
+    ) -> Vec<PaymentStream> {
+        let capped_limit = if limit == 0 || limit > 100 { 100 } else { limit };
+        let count = get_recipient_stream_count(&env, &merchant);
+
+        let mut result = Vec::new(&env);
+        let mut matched: u32 = 0;
+        for idx in 0..count {
+            let stream_id = match get_recipient_stream_id(&env, &merchant, idx) {
+                Some(id) => id,
+                None => continue,
+            };
+            let stream: PaymentStream = match env
+                .storage()
+                .persistent()
+                .get(&StreamDataKey::Stream(stream_id))
+            {
+                Some(s) => s,
+                None => continue,
+            };
+            if let Some(status) = &status_filter {
+                if stream.status != *status {
+                    continue;
+                }
+            }
+            if matched >= offset {
+                result.push_back(stream);
+                if result.len() >= capped_limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        result
     }
 
     /// Withdraw accrued funds from up to `max_streams` active streams for the recipient.
@@ -1199,6 +1247,7 @@ impl PaymentStreaming {
             now,
             stream.rate_per_second,
             stream.remaining_deposit,
+            stream.cliff_at,
         );
         stream.last_checkpoint_at = now;
 
@@ -1280,6 +1329,7 @@ impl PaymentStreaming {
             now,
             stream.rate_per_second,
             stream.remaining_deposit,
+            stream.cliff_at,
         );
         stream.accrued_at_pause = stream.accrued_at_checkpoint;
         stream.last_checkpoint_at = now;
@@ -1375,6 +1425,7 @@ impl PaymentStreaming {
                 now,
                 stream.rate_per_second,
                 stream.remaining_deposit,
+                stream.cliff_at,
             );
             stream.last_checkpoint_at = now;
 
@@ -1477,6 +1528,7 @@ impl PaymentStreaming {
             now,
             old_rate,
             stream.remaining_deposit,
+            stream.cliff_at,
         );
         stream.last_checkpoint_at = now;
 
@@ -1605,6 +1657,7 @@ impl PaymentStreaming {
                 now,
                 stream.rate_per_second,
                 stream.remaining_deposit,
+                stream.cliff_at,
             );
             stream.last_checkpoint_at = now;
 
@@ -1927,6 +1980,7 @@ impl PaymentStreaming {
             now,
             stream.rate_per_second,
             stream.remaining_deposit,
+            stream.cliff_at,
         );
         stream.last_checkpoint_at = now;
 

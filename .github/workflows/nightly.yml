@@ -1,0 +1,82 @@
+name: Nightly full test run
+
+# Issue #1219: PR CI keeps the suite fast. Once a day, run everything —
+# every contract feature, unit + integration test targets, and proptest at a
+# much higher case count — to surface time- and order-dependent flakes.
+# A failure opens (or comments on) a `nightly-failure` issue.
+
+on:
+  schedule:
+    # Every day at 02:00 UTC.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # PR CI uses 256; nightly digs much deeper.
+  PROPTEST_CASES: 4096
+
+jobs:
+  full-test:
+    name: Full test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache cargo
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: Test all features (unit + integration, parallel)
+        run: cargo test --workspace --all-features --all-targets
+
+      - name: Test default features
+        run: cargo test --workspace --all-targets
+
+      # Same suite, one thread: catches tests that only pass because of
+      # the interleaving the parallel runner happens to pick.
+      - name: Test all features (serial, order-dependence check)
+        run: cargo test --workspace --all-features --all-targets -- --test-threads=1
+
+  notify-failure:
+    name: Report failure
+    needs: [full-test]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or update nightly-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create nightly-failure --color B60205 \
+            --description "Nightly full test run failed" 2>/dev/null || true
+          EXISTING=$(gh issue list --label nightly-failure --state open \
+            --json number --jq '.[0].number')
+          BODY="Nightly full test run failed on \`${GITHUB_SHA::7}\`: $RUN_URL"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "Nightly full test run failing" \
+              --label nightly-failure --body "$BODY"
+          fi

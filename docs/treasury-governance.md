@@ -298,6 +298,7 @@ client.cancel_treasury_withdrawal(&signer4, &proposal_id);
 | 79 | `TreasuryInsufficientApprovals` | `approvals < required_approvals` |
 | 80 | `InvalidTreasuryThreshold` | Invalid M/N configuration |
 | 81 | `InsufficientTokenTreasuryBalance` | Token balance < amount |
+| 94 | `TreasuryExceedsSingleAdminThreshold` | `withdraw_treasury` amount exceeds `get_treasury_single_admin_threshold()` — use the multisig flow instead |
 
 ## Testing
 
@@ -317,16 +318,54 @@ Tests cover:
 - ✅ Multi-token proposal isolation
 - ✅ Proposal expiry handling
 - ✅ Event emission verification
+- ✅ Single-admin threshold enforcement and signer add/remove (`treasury_single_admin_threshold_test.rs`)
+
+## Single-Admin Withdrawal Threshold (Issue #1013)
+
+`withdraw_treasury` previously let a single admin withdraw **any** amount —
+completely bypassing the M-of-N governance above regardless of whether
+multisig had been configured. It now enforces a configurable threshold:
+amounts at or below the threshold may still go through the single-admin
+path (for operational convenience on small amounts); anything above it must
+use `propose_treasury_withdrawal` → `approve_treasury_withdrawal` →
+`execute_treasury_withdrawal`.
+
+```rust
+// Defaults to 1,000 USDC (10_000_000_000 stroops at 7 decimals) until configured.
+let threshold = client.get_treasury_single_admin_threshold();
+
+// Admin-only: change it.
+client.set_treasury_single_admin_threshold(&admin, &5_000_000_000); // 500 USDC
+
+// Amounts above the threshold are rejected with TreasuryExceedsSingleAdminThreshold:
+client.withdraw_treasury(&admin, &20_000_000_000, &destination); // fails — use multisig instead
+client.withdraw_treasury(&admin, &1_000_000, &destination);      // fine — small, single-admin path
+```
+
+### Signer management
+
+Signers no longer need a full `configure_treasury_multisig` call to add or
+remove one address:
+
+```rust
+client.add_treasury_signer(&admin, &new_signer);
+// Rejected with InvalidTreasuryThreshold if it would drop the signer count
+// below `required_approvals` (quorum would become unreachable):
+client.remove_treasury_signer(&admin, &departing_signer);
+```
 
 ## Migration from Legacy `withdraw_treasury`
 
-The legacy single-admin `withdraw_treasury` function remains for backward compatibility but **should be deprecated** in favor of the multisig flow. 
+The legacy single-admin `withdraw_treasury` function remains for small,
+operational withdrawals but is now gated by the single-admin threshold
+above — it can no longer be used to move the whole treasury in one call
+once multisig governance is the intended control for large amounts.
 
 **Migration path:**
 1. Configure multisig with `required_approvals = 1` and single admin as signer
-2. Use `propose → approve (auto) → wait timelock → execute` flow
-3. Increase `required_approvals` and add signers progressively
-4. Remove `withdraw_treasury` access once multisig is validated
+2. Lower `set_treasury_single_admin_threshold` to the amount you want to keep allowing without multisig
+3. Use `propose → approve (auto) → wait timelock → execute` flow for everything above that
+4. Increase `required_approvals` and add signers progressively via `add_treasury_signer`
 
 ## Constants Reference
 
@@ -337,4 +376,6 @@ pub const DEFAULT_TREASURY_TIMELOCK_SECS: u64 = 24 * 60 * 60;      // 24h
 pub const MAX_TREASURY_TIMELOCK_SECS: u64 = 48 * 60 * 60;          // 48h
 pub const MIN_TREASURY_TIMELOCK_SECS: u64 = 60 * 60;               // 1h
 pub const TREASURY_WITHDRAWAL_HISTORY_CAP: u32 = 100;
+// Issue #1013:
+pub const DEFAULT_TREASURY_SINGLE_ADMIN_THRESHOLD: i128 = 10_000_000_000; // 1,000 USDC
 ```

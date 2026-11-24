@@ -39,6 +39,11 @@ export function getCachedRate(from: string, to: string): CachedFxRate | null {
   return null;
 }
 
+/** Issue #957: snapshot of every cached pair, for the bulk rates endpoint. */
+export function listCachedRates(): CachedFxRate[] {
+  return Array.from(rates.values());
+}
+
 export function clearCachedRates(): void {
   rates.clear();
 }

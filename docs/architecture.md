@@ -73,6 +73,49 @@ PaymentLinkManager
   └─ stores links independently (no external calls)
 ```
 
+## Cross-Contract Storage Ownership Map (Issue #1223)
+
+Each contract is the sole writer of its own storage; cross-contract access is read-only via the
+matching `*Client` (e.g. `MerchantRegistryClient`, `FXOracleClient`, `DexRouterClient`). The main
+`DataKey` enum (`fluxapay/src/data_keys.rs`) is shared by `PaymentProcessor` and `RefundManager`,
+but each deployed instance owns its own instance of those keys.
+
+| Contract | Storage enum | Owns (representative keys) |
+|---------|--------------|----------------------------|
+| PaymentProcessor | `DataKey` (`data_keys.rs`) | `Payment`, `PaymentStatusHistory`, `MerchantPayments`, `Dispute*`, `Stream`, `Subscription*`, `Invoice*`, `TreasuryBalanceByToken`, `IdempotencyKey`, `MerchantRateLimit`, `AllowedToken`, `Blacklisted`, `MerchantAmountLimits`, `FxOracleAddress`, `DexRouterAddress`, `AllowedRouter(s)`, `WrappedXlmContract`, `PaymentLinkManagerAddress`, `MerkleDistribution*`, `PauseScope`, `ReentrancyLock`, `SettlementFeeRate`, fee waivers, expiry buckets |
+| RefundManager | `DataKey` (shared enum, own instance) | `Refund`, `RefundCounter`, `RefundIdempotencyKey`, `PaymentRefunds`, `RefundFeeBps`, `FeeSplitConfig`, `RefundExpirySecs`, `RefundCooldownSecs`, `AutoRefundQueue`, `RefundIndex`, treasury withdrawal proposals/history |
+| MerchantRegistry | `MerchantDataKey` (`merchant_registry.rs`) | `Merchant`, `MerchantList`, `FeeConfig`/`PlatformFeeConfig`, `TierLimit`, `MerchantCustomerWhitelist`, `MerchantPendingSettlement`, `DisputeThreshold`, `Suspension*`, `MerchantReserve*`, `MerchantMonthlyVolume`, `MerchantPayoutHistory`, `PaymentProcessorAddress`, `RefundManagerAddress` |
+| FXOracle | `OracleDataKey` (`fx_oracle.rs`) | `Rate(pair)`, `StalenessThreshold`, `MaxDeviation(pair)`, `Quorum`, `Submissions`, `AllowedTokens` |
+| DexRouter | none of its own | swap execution only; allowlist/WXLM/router-address config lives in PaymentProcessor's `DataKey` |
+| PaymentLinkManager | `LinkDataKey` (`payment_link.rs`) | `Link`, `LinkAdmin`, `LinkPayments`, `LinkPayment`, `MerchantLinks`, `PaymentBaseUrl`, `GlobalFeeBps`, `LinkRateLimitConfig`, `PayerLinkUseWindow`, `LinkViewRateLimitConfig`, `PayerLinkViewWindow` |
+| AccessControl | `AccessControlDataKey` (`access_control.rs`) | role grants, `Admin`, `MultisigConfig`, proposals/nonces, timelocked admin actions |
+| Stream | `StreamDataKey` (`stream.rs`) | stream ledger records, withdrawals, destinations |
+
+### Ownership boundary rules
+
+- A key is owned by the single contract that **writes** it. Other contracts never write to a key
+  they do not own; they read via the matching `*Client`.
+- `PaymentProcessor` stores the addresses of its dependencies (`MerchantRegistryAddress`,
+  `FxOracleAddress`, `DexRouterAddress`, `PaymentLinkManagerAddress`) and is the only writer of
+  those address pointers; dependencies do not write back into `PaymentProcessor`.
+- `MerchantRegistry` stores the reverse pointers `PaymentProcessorAddress` /
+  `RefundManagerAddress` so it can grant roles back to the processor; it is the sole writer of
+  those keys.
+- DEX router config (allowlist, WXLM address) lives in `PaymentProcessor`'s `DataKey`; the
+  `DexRouter` contract owns no persistent cross-contract state in the current (simulated) design
+  — see [ADR-0005](ADR-0005-dex-simulation-to-real-migration.md).
+
+## Subscription Metrics (#1083)
+
+The indexer retains subscription plan ownership/pricing and lifecycle events
+from `SUBSCRIPTION` contract events. The merchant-scoped
+`GET /v1/subscriptions/metrics?merchant_id=...&period=YYYY-MM` endpoint uses
+that history to calculate active subscribers at the start of the month, churn,
+trial conversions, and dunning recoveries; current subscription state and plan
+amounts supply active subscriber count, past-due count, and MRR. API responses
+are cached for five minutes and require a merchant-bound API key with the
+`read:analytics` scope (admin keys may query any merchant).
+
 ### Key Call Flows
 
 **Payment Creation Flow:**
@@ -86,10 +129,23 @@ PaymentLinkManager
 **Payment Settlement Flow:**
 1. Operator calls `PaymentProcessor::settle_payment(payment_id)`
 2. PaymentProcessor acquires reentrancy lock
-3. PaymentProcessor updates payment status to SETTLED
-4. Fees are calculated and split
-5. Settlement event is emitted
-6. Reentrancy lock is released
+3. **(Issue #1031)** If the merchant's `settlement_schedule` is `Daily` or
+   `Weekly`, PaymentProcessor rejects the call with
+   `Error::SettlementIntervalNotElapsed` unless at least one interval has
+   passed since `last_settlement_at`, and with `Error::SettlementBelowMinimum`
+   if the merchant's pending balance (including this payment) is still below
+   `SETTLEMENT_MIN_AMOUNT`. `Manual`-schedule merchants are unaffected and
+   settle immediately, matching `trigger_settlement`'s existing semantics for
+   the aggregate sweep.
+4. PaymentProcessor updates payment status to SETTLED
+5. Fees are calculated and split
+6. **(Issue #1017)** If the merchant has a `reserve_policy`, the configured
+   `reserve_bps` share of the net settlement amount is withheld in a rolling
+   reserve bucket (`PAYMENT/RESERVE_HELD`) instead of being credited to
+   pending settlement; it becomes available after `holding_period_secs` via
+   `release_merchant_reserve`.
+7. Settlement event is emitted
+8. Reentrancy lock is released
 
 **Refund Processing Flow:**
 1. Operator/Payer calls `RefundManager::process_refund(refund_id)`
@@ -98,6 +154,21 @@ PaymentLinkManager
 4. Refund status updated to PROCESSED
 5. Refund event emitted
 6. Funds transferred to original payer
+
+**Swap and Pay Protection:**
+`PaymentProcessor::swap_and_pay()` applies a default 50 bps (0.5%) minimum
+output floor relative to the on-chain DEX quote, in addition to the caller's
+`amount_out_min`. If an FX oracle and pair are provided, the quoted output is
+also checked against that independent reference and rejected when adverse
+price impact exceeds 100 bps (1%). Swaps without an oracle still receive the
+minimum-output and volume protections, but cannot be checked against a
+reference-market price.
+
+The PaymentProcessor tracks successful `amount_in` swap volume for the current
+ledger sequence in instance storage. A swap that would exceed the default
+10,000,000,000,000-unit per-ledger cap is rejected before calling the DEX.
+Admin accounts can adjust all three defaults with `set_swap_limits`; the
+volume counter starts fresh when the ledger sequence changes.
 
 ---
 
@@ -422,6 +493,27 @@ pub fn execute_swap(
 - **Two-Step Admin Transfer**: Prevents accidental admin loss via `pending_admin` + `claim_admin()`
 - **Metadata Validation**: Payment links enforce max key count (20) and value length (256 chars)
 
+## Indexer Event Replay
+
+The indexer can recover contract events missed during downtime through
+`POST /v1/admin/replay`, which accepts `from_ledger` and `to_ledger` in the
+JSON request body. The inclusive ledger range is limited to 10,000 ledgers and
+the caller must provide an API key with the `admin` scope. The legacy
+`POST /admin/replay` route remains available for existing operator clients.
+
+Replay reads contract events from the configured Soroban RPC endpoint, then
+passes each event through the normal persistence pipeline. `event_id` is
+unique in `contract_events`; an already-stored event is skipped without
+reapplying its payment, refund, or dispute update. Newly stored events update
+the typed index tables and dispatch matching enabled merchant webhooks. Replay
+webhook envelopes include `replayed: true` at the top level and in `data`, so
+consumers can distinguish recovery deliveries from live notifications.
+
+The endpoint streams progress and a final summary as Server-Sent Events. Each
+update reports processed events, newly stored events, and skipped duplicates.
+RPC or persistence errors are surfaced as an SSE error rather than reported as
+a successful replay.
+
 ## Error Codes
 
 Every `#[contracterror]` enum across all contracts (`Error`, `AccessControlError`,
@@ -436,3 +528,5 @@ reference table, including common causes and remediation: see
 - [ADR-0002: Payment Stream Design](ADR-0002-payment-stream-design.md)
 - [ADR-0003: KYC Tier System](ADR-0003-kyc-tier-system.md)
 - [ADR-0004: Multi-Sig Admin Governance](ADR-0004-multisig-admin-governance.md)
+- [ADR-0005: DEX Simulation-to-Real (Soroswap) Migration](ADR-0005-dex-simulation-to-real-migration.md)
+- [ADR-0006: Module Boundaries for `lib.rs`](ADR-0006-module-boundaries-lib-rs.md)

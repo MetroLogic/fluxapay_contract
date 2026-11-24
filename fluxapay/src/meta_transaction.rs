@@ -401,13 +401,16 @@ fn dispatch_set_fee_recipient(
     Ok(())
 }
 
-fn set_auth(env: &Env, merchant: &Address) {
+/// Issue #1029: visible at `pub(crate)` so `PaymentProcessor::create_payment_delegated`
+/// can reuse the same temporary merchant-authorization bypass that sponsored
+/// meta-transactions use, instead of duplicating the storage key handling.
+pub(crate) fn set_auth(env: &Env, merchant: &Address) {
     env.storage()
         .instance()
         .set(&MetaAuthKey::Merchant, merchant);
 }
 
-fn clear_auth(env: &Env) {
+pub(crate) fn clear_auth(env: &Env) {
     env.storage().instance().remove(&MetaAuthKey::Merchant);
 }
 

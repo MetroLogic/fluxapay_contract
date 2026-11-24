@@ -184,6 +184,45 @@ pub fn emit_payment_partial_received(
     );
 }
 
+/// Issue #1018: Emitted when accumulated partial-payment funds are
+/// automatically refunded to the payer after the payment expires without
+/// being fully funded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentPartialRefunded {
+    pub payment_id: String,
+    pub merchant_id: Address,
+    pub payer: Address,
+    pub amount: i128,
+    pub refund_id: String,
+}
+
+/// Issue #1018: Emit PAYMENT/PARTIAL_REFUNDED when an expired, partially
+/// funded payment's accumulated balance is auto-refunded to the payer.
+#[allow(deprecated)]
+pub fn emit_payment_partial_refunded(
+    env: &Env,
+    payment_id: &String,
+    merchant_id: &Address,
+    payer: &Address,
+    amount: i128,
+    refund_id: &String,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "PAYMENT"),
+            Symbol::new(env, "PARTIAL_REFUNDED"),
+            merchant_id.clone(),
+        ),
+        (
+            payment_id.clone(),
+            payer.clone(),
+            amount,
+            refund_id.clone(),
+        ),
+    );
+}
+
 /// Emitted when a payment is overpaid (amount above tolerance).
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -1049,6 +1088,7 @@ pub struct ContractUpgraded {
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct TreasuryWithdrawn {
+    pub token_address: Address,
     pub amount: i128,
     pub recipient: Address,
 }

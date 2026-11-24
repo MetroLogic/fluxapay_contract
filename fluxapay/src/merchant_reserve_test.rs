@@ -1,208 +1,326 @@
-use super::*;
+//! Issue #1017: merchant rolling reserve deduction on payment confirmation.
+//!
+//! These tests exercise `MerchantRegistry::set_reserve_policy` /
+//! `get_reserve_policy` / `get_locked_reserve`, and the end-to-end flow
+//! through `PaymentProcessor::settle_payment` (which withholds the
+//! configured `reserve_bps` share into a reserve bucket) and
+//! `PaymentProcessor::release_merchant_reserve` (which sweeps matured
+//! buckets back into pending settlement once `holding_period_secs` elapses).
 
-/// Unit and edge-case tests for tier-based rolling reserves and settlement holding periods.
-///
-/// These tests exercise the `RollingReservePolicy`, `RollingReserveBucket` queue,
-/// and the `ReserveVault` entry points exposed by the merchant reserve module.
+use crate::{
+    merchant_registry::{
+        MaybeFeeConfig, MerchantRegistry, MerchantRegistryClient, RollingReservePolicy,
+    },
+    CreatePaymentArgs, Error, PaymentProcessor, PaymentProcessorClient, SettlementSplit,
+};
+use soroban_sdk::{
+    testutils::{Address as _, BytesN as _, Ledger as _},
+    token, vec, Address, BytesN, Env, String, Symbol,
+};
 
-/// Test helper: build a default KYC tier table with the canonical policy values.
-fn default_tier_policies() -> Vec<u32> {
-    vec![0, 1, 2, 3]
+fn setup(
+    env: &Env,
+) -> (
+    Address,
+    PaymentProcessorClient,
+    MerchantRegistryClient,
+    Address,
+) {
+    let payment_processor = env.register(PaymentProcessor, ());
+    let merchant_registry = env.register(MerchantRegistry, ());
+    let refund_manager = env.register(crate::RefundManager, ());
+
+    let payment_client = PaymentProcessorClient::new(env, &payment_processor);
+    let merchant_client = MerchantRegistryClient::new(env, &merchant_registry);
+    let admin = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let usdc_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let refund_client = crate::RefundManagerClient::new(env, &refund_manager);
+    refund_client.initialize_refund_manager(&admin, &usdc_token);
+    let token_admin_client = token::StellarAssetClient::new(env, &usdc_token);
+    token_admin_client.mint(&refund_manager, &1_000_000_000_000i128);
+
+    payment_client.initialize_payment_processor(&admin);
+    merchant_client.initialize(&admin);
+
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+    merchant_client.set_payment_processor_address(&admin, &payment_client.address);
+
+    let merchant = Address::generate(env);
+    (admin, payment_client, merchant_client, merchant)
 }
 
-# [test]
-fn reserve_policy_rejects_out_of_range_bps() {
-    let result = RollingReservePolicy::new(10, 5, 20000, 100);
+fn register_merchant(
+    env: &Env,
+    admin: &Address,
+    merchant_client: &MerchantRegistryClient,
+    merchant: &Address,
+) {
+    merchant_client.register_merchant(
+        merchant,
+        &String::from_str(env, "Test Merchant"),
+        &String::from_str(env, "USD"),
+        &Some(merchant.clone()),
+        &None::<String>,
+        &MaybeFeeConfig::None,
+    );
+    merchant_client.verify_merchant(admin, merchant);
+}
+
+fn create_and_settle(
+    env: &Env,
+    admin: &Address,
+    payment_client: &PaymentProcessorClient,
+    merchant: &Address,
+    payment_id: &str,
+    amount: i128,
+) {
+    payment_client.grant_role(admin, &Symbol::new(env, "MERCHANT"), merchant);
+    let args = CreatePaymentArgs {
+        payment_id: String::from_str(env, payment_id),
+        merchant_id: merchant.clone(),
+        payer: None,
+        amount,
+        currency: Symbol::new(env, "USDC"),
+        deposit_address: Address::generate(env),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        idempotency_key: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        tip_enabled: false,
+    };
+    payment_client.create_payment(&args);
+
+    let tx_hash = BytesN::<32>::random(env);
+    let oracle = Address::generate(env);
+    payment_client.grant_role(admin, &Symbol::new(env, "ORACLE"), &oracle);
+    payment_client.verify_payment(
+        &oracle,
+        &String::from_str(env, payment_id),
+        &tx_hash,
+        &Address::generate(env),
+        &amount,
+        &None::<u64>,
+    );
+
+    let operator = Address::generate(env);
+    payment_client.grant_role(admin, &Symbol::new(env, "SETTLEMENT_OPERATOR"), &operator);
+    let splits = vec![
+        env,
+        SettlementSplit {
+            recipient: merchant.clone(),
+            amount,
+        },
+    ];
+    payment_client.settle_payment(&operator, &String::from_str(env, payment_id), &splits);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Reserve policy configuration                                       */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn test_reserve_policy_defaults_to_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    assert_eq!(merchant_client.get_reserve_policy(&merchant), None);
+    assert_eq!(merchant_client.get_locked_reserve(&merchant), 0);
+}
+
+#[test]
+fn test_admin_can_set_and_clear_reserve_policy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    let policy = RollingReservePolicy {
+        reserve_bps: 1_000, // 10%
+        holding_period_secs: 90 * 24 * 60 * 60,
+    };
+    merchant_client.set_reserve_policy(&admin, &merchant, &Some(policy.clone()));
+    assert_eq!(merchant_client.get_reserve_policy(&merchant), Some(policy));
+
+    merchant_client.set_reserve_policy(&admin, &merchant, &None);
+    assert_eq!(merchant_client.get_reserve_policy(&merchant), None);
+}
+
+#[test]
+fn test_reserve_policy_rejects_out_of_range_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    let policy = RollingReservePolicy {
+        reserve_bps: 10_001,
+        holding_period_secs: 100,
+    };
+    let result = merchant_client.try_set_reserve_policy(&admin, &merchant, &Some(policy));
     assert!(result.is_err());
 }
 
-# [test]
-fn reserve_policy_rejects_zero_holding() {
-    let result = RollingReservePolicy::new(10, 5, 500, 0);
+#[test]
+fn test_non_admin_cannot_set_reserve_policy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    let not_admin = Address::generate(&env);
+    let policy = RollingReservePolicy {
+        reserve_bps: 500,
+        holding_period_secs: 100,
+    };
+    let result = merchant_client.try_set_reserve_policy(&not_admin, &merchant, &Some(policy));
     assert!(result.is_err());
 }
 
-# [test]
-fn reserve_policy_accepts_valid_range() {
-    let policy = RollingReservePolicy::new(10, 5, 500, 100).expect("valid policy");
-    assert_eq!(policy.reserve_bps, 500);
-    assert_eq!(policy.holding_period_ledgers, 100);
+/* ------------------------------------------------------------------ */
+/*  Reserve deduction on settlement                                    */
+/* ------------------------------------------------------------------ */
+
+#[test]
+fn test_settle_payment_withholds_reserve_share() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    let policy = RollingReservePolicy {
+        reserve_bps: 1_000, // 10%
+        holding_period_secs: 90 * 24 * 60 * 60,
+    };
+    merchant_client.set_reserve_policy(&admin, &merchant, &Some(policy));
+
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_RESERVE_001",
+        1_000_000,
+    );
+
+    // 10% of 1_000_000 = 100_000 withheld in reserve; 900_000 immediately pending.
+    assert_eq!(merchant_client.get_locked_reserve(&merchant), 100_000);
+    assert_eq!(merchant_client.get_pending_settlement(&merchant), 900_000);
 }
 
-# [test]
-fn tier_0_and_1_get_higher_reserve_than_tier_2_3() {
-    let tier_0 = RollingReservePolicy::for_tier(0).expect("tier 0");
-    let tier_1 = RollingReservePolicy::for_tier(1).expect("tier 1");
-    let tier_2 = RollingReservePolicy::for_tier(2).expect("tier 2");
-    let tier_3 = RollingReservePolicy::for_tier(3).expect("tier 3");
-    assert!(tier_0.reserve_bps >= tier_1.reserve_bps);
-    assert!(tier_1.reserve_bps > tier_2.reserve_bps);
-    assert!(tier_2.reserve_bps >= tier_3.reserve_bps);
-    assert_eq!(tier_3.reserve_bps, 0);
-    assert_eq!(tier_3.holding_period_ledgers, 0);
+#[test]
+fn test_settle_payment_without_policy_keeps_full_amount_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_RESERVE_002",
+        1_000_000,
+    );
+
+    assert_eq!(merchant_client.get_locked_reserve(&merchant), 0);
+    assert_eq!(merchant_client.get_pending_settlement(&merchant), 1_000_000);
 }
 
-# [test]
-fn split_proceeds_respects_reserve_bps() {
-    let amount: i128 = 10_000;
-    let policy = RollingReservePolicy::new(10, 5, 500, 100).expect("valid");
-    let (immediate, reserve) = policy.split(amount);
-    assert_eq!(immediate + reserve, amount);
-    assert_eq!(reserve, 500);
-}
+/* ------------------------------------------------------------------ */
+/*  Reserve release after the holding period                          */
+/* ------------------------------------------------------------------ */
 
-# [test]
-fn split_rounds_down_in_favor_of_merchant() {
-    let amount: i128 = 199;
-    let policy = RollingReservePolicy::new(10, 5, 500, 100).expect("valid");
-    let (immediate, reserve) = policy.split(amount);
-    assert_eq!(immediate + reserve, amount);
-    assert_eq!(reserve, 9);
-}
+#[test]
+fn test_release_merchant_reserve_before_hold_period_is_noop() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
 
-# [test]
-fn reserve_bucket_accumulates_multiple_deposits() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit 1");
-    vault.deposit(&merchant, 200, 20).expect("deposit 2");
-    vault.deposit(&merchant, 300, 30).epect("deposit 3");
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, 600);
-    assert_eq!(balance.buckets.len(), 3);
-}
+    let policy = RollingReservePolicy {
+        reserve_bps: 1_000,
+        holding_period_secs: 90 * 24 * 60 * 60,
+    };
+    merchant_client.set_reserve_policy(&admin, &merchant, &Some(policy));
 
-# [test]
-fn release_matured_reserves_releases_in_chronological_order() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit 1");
-    vault.deposit(&merchant, 200, 20).epect("deposit 2");
-    vault.deposit(&merchant, 300, 30).epect("deposit 3");
-    let released = vault.release_matured_reserves(&merchant, 25).epect("release");
-    assert_eq!(released, 300);
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, 300);
-    assert_eq!(balance.matured, 0);
-    assert_eq!(balance.buckets.len(), 1);
-}
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_RESERVE_003",
+        1_000_000,
+    );
 
-# [test]
-fn release_matured_reserves_returns_zero_when_nothing_mature() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 1000).epect("deposit");
-    let released = vault.release_matured_reserves(&merchant, 500).epect("release");
+    let operator = Address::generate(&env);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+
+    let released = payment_client.release_merchant_reserve(&operator, &merchant);
     assert_eq!(released, 0);
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, 100);
-    assert_eq!(balance.matured, 0);
+    assert_eq!(merchant_client.get_locked_reserve(&merchant), 100_000);
 }
 
-# [test]
-fn get_merchant_reserve_balance_reports_matured_and_upcoming() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit 1");
-    vault.deposit(&merchant, 200, 20).epect("deposit 2");
-    let balance = vault.get_merchant_reserve_balance_at(&merchant, 15);
-    assert_eq!(balance.total_locked, 300);
-    assert_eq!(balance.matured, 100);
-    assert_eq!(balance.upcoming.len(), 1);
-    assert_eq!(balance.upcoming[0].amount, 200);
-    assert_eq!(balance.upcoming[0].unlock_ledger, 20);
+#[test]
+fn test_release_merchant_reserve_after_hold_period_moves_to_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
+
+    let holding_period_secs = 90 * 24 * 60 * 60;
+    let policy = RollingReservePolicy {
+        reserve_bps: 1_000,
+        holding_period_secs,
+    };
+    merchant_client.set_reserve_policy(&admin, &merchant, &Some(policy));
+
+    create_and_settle(
+        &env,
+        &admin,
+        &payment_client,
+        &merchant,
+        "PAY_RESERVE_004",
+        1_000_000,
+    );
+
+    let pending_before = merchant_client.get_pending_settlement(&merchant);
+    assert_eq!(pending_before, 900_000);
+
+    env.ledger()
+        .with_mut(|li| li.timestamp += holding_period_secs + 1);
+
+    let operator = Address::generate(&env);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+    let released = payment_client.release_merchant_reserve(&operator, &merchant);
+
+    assert_eq!(released, 100_000);
+    assert_eq!(merchant_client.get_locked_reserve(&merchant), 0);
+    assert_eq!(merchant_client.get_pending_settlement(&merchant), 1_000_000);
 }
 
-# [test]
-fn slash_reserve_for_dispute_drains_buckets() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit 1");
-    vault.deposit(&merchant, 200, 20).epect("deposit 2");
-    let slashed = vault.slash_reserve_for_dispute(&merchant, 150).epect("slash");
-    assert_eq!(slashed, 150);
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, 150);
-    assert_eq!(balance.buckets.len(), 1);
-    assert_eq!(balance.buckets[0].amount, 150);
-}
+#[test]
+fn test_release_merchant_reserve_requires_settlement_operator_role() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, merchant) = setup(&env);
+    register_merchant(&env, &admin, &merchant_client, &merchant);
 
-# [test]
-fn slash_reserve_for_dispute_capped_at_available_balance() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit");
-    let slashed = vault.slash_reserve_for_dispute(&merchant, 500).epect("slash");
-    assert_eq!(slashed, 100);
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, 0);
-}
-
-# [test]
-fn slash_reserve_for_dispute_returns_zero_for_unknown_merchant() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    let slashed = vault.slash_reserve_for_dispute(&merchant, 100).epect("slash");
-    assert_eq!(slashed, 0);
-}
-
-# [test]
-fn tier_upgrade_applies_new_policy_to_future_deposits() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GNAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    // Tier 0 deposit at 15% reserve.
-    let tier_0 = RollingReservePolicy::for_tier(0).epect("tier 0");
-    let (_, reserve_0) = tier_0.split(10_000);
-    vault.deposit(&merchant, reserve_0, 10).epect("deposit tier 0");
-    // Upgrade to Tier 2.
-    let tier_2 = RollingReservePolicy::for_tier(2).epect("tier 2");
-    let (_, reserve_2) = tier_2.split(10_000);
-    vault.deposit(&merchant, reserve_2, 20).epect("deposit tier 2");
-    assert!(reserve_2 < reserve_0);
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, reserve_0 + reserve_2);
-    assert_eq!(balance.buckets.len(), 2);
-}
-
-# [test]
-fn multi_bucket_release_is_idempotent() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit 1");
-    vault.deposit(&merchant, 200, 20).epect("deposit 2");
-    let first = vault.release_matured_reserves(&merchant, 25).epect("release 1");
-    let second = vault.release_matured_reserves(&merchant, 25).epect("release 2");
-    assert_eq!(first, 300);
-    assert_eq!(second, 0);
-}
-
-# [test]
-fn events_are_emitted_on_deposit_release_and_slash() {
-    let mut vault = ReserveVault::new();
-    let merchant = Address::from_address("GPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    vault.deposit(&merchant, 100, 10).epect("deposit");
-    vault.release_matured_reserves(&merchant, 20).epect("release");
-    vault.slash_reserve_for_dispute(&merchant, 50).epect("slash");
-    let events = vault.events();
-    assert!(events.iter().any(|e| e.topic == "RESERVE/FUNDS_HELD"));
-    assert!(events.iter().anyh|e| e.topic == "RESERVE/FUNDS_RELEASED"));
-    assert!(events.iter().any(|e| e.topic == "RESERVE/FUNDS_SLASHED"));
-}
-
-# [test]
-fn default_tier_policies_covers_all_kyc_tiers() {
-    for tier in default_tier_policies() {
-        assert!(RollingReservePolicy::for_tier(tier).is_ok());
-    }
-}
-
-# [test]
-fn get_merchant_reserve_balance_for_unknown_merchant_is_empty() {
-    let vault = ReserveVault::new();
-    let merchant = Address::from_address("GQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    let balance = vault.get_merchant_reserve_balance(&merchant);
-    assert_eq!(balance.total_locked, 0);
-    assert_eq!(balance.matured, 0);
-    assert!(balance.buckets.is_empty());
-    assert!(balance.upcoming.is_empty());
+    let caller = Address::generate(&env);
+    let result = payment_client.try_release_merchant_reserve(&caller, &merchant);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }

@@ -79,7 +79,11 @@ export interface CreatePaymentArgs {
   payer_muxed_id?: Option<u64 | bigint>;
   /** Issue #516 */
   payer?: Option<string>;
-  /** Issue #844: when true, confirmPayment may accept tipAmount. */
+  /**
+   * Issue #844: when true, confirmPayment may accept tipAmount.
+   * Issue #1025 makes this enforceable: `verifyPayment`/`confirmPayment`
+   * validate and record a tip, capped at `MAX_TIP_BPS`, only when `true`.
+   */
   tip_enabled: boolean;
 }
 
@@ -184,6 +188,10 @@ export interface PaymentCharge {
   payment_id: string;
   status: PaymentStatus;
   transaction_hash: Option<Buffer>;
+  /** Issue #1025: Whether this payment accepts an optional tip/gratuity. */
+  tip_enabled: boolean;
+  /** Issue #1025: Tip amount recorded by `verify_payment`, if any. */
+  tip_amount: Option<i128>;
 }
 
 export type PaymentStatus =
@@ -463,12 +471,15 @@ export interface Client {
       transaction_hash,
       payer_address,
       amount_received,
+      tip_amount,
     }: {
       oracle: string;
       payment_id: string;
       transaction_hash: Buffer;
       payer_address: string;
       amount_received: i128;
+      /** Issue #1025: Tip/gratuity portion of `amount_received`, if any. */
+      tip_amount?: Option<i128>;
     },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<PaymentStatus>>>;

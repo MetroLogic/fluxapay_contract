@@ -1,1 +1,307 @@
-dXNlIHNvcm9iYW5fc3RkOjp7YWRkcmVzcywgY3J5cHRvOjpIYXNoLCBwYW5pY193aXRoX2Vycm9yfTsKdXNlIHNvcm9iYW5fc3RkOjp7Y29udHJhY3QsIGNvbnRyYWN0dHlwZSwgZW52fTsKdXNlIHNvcm9iYW5fc3RkOjp7QWRkcmVzcywgRW52LCBTeW1ib2x9OwoKLy8vIFRUTCB0aHJlc2hvbGQgZm9yIHBlcnNpc3RlbnQgZW50cmllcyAoMzAgZGF5cyBhdCB+NSBzZWNvbmRzL2xlZGdlcikuCmNvbnN0IFRUTDo6dTMyID0gNTE4NDAwOwoKY29uc3QgSFRMQ19DT1VOVEVSOiBTeW1ib2wgPSBTeW1ib2w6Om5ldygiSFRMQ19DT1VOVEVSIik7CmNvbnN0IEhUTENfUFJFRklYOiBTeW1ib2wgPSBTeW1ib2w6Om5ldygiSFRMQyIpOwoKY29uc3QgU1RBVFVTX0xPQ0tFRDogdTMyID0gMDsKY29uc3QgU1RBVFVTX0NMQUlNRUQ6IHUzMiA9IDE7CmNvbnN0IFNUQVRVU19SRUZVTkRFRDogdTMyID0gMjsKCi8vLyBTdG9yYWdlIGtleSBmb3IgYSBzaW5nbGUgSFRMQyByZWNvcmQuCi8vLyBUaGUga2V5IGlzIGJvdW5kZWQgYnkgdGhlIG1vbm90b25pY2FsbHkgaW5jcmVhc2luZyBjb3VudGVyLCBzbyB0aGUgbnVtYmVyIG9mCi8vLyBwZXJzaXN0ZW50IGVudHJpZXMgaXMgZXhwbGljaXRseSBjb250cm9sbGVkIGFuZCBUVExzIGFyZSBleHRlbmRlZCBvbiBldmVyeSB3cml0ZS4KI1tkZXJpdmUoQ2xvbmUsIERlYnVnLCBFcUZxLCBQYXJ0aWFsRXEpXQojW2NvbnRyYWN0dHBlXQpwdWIgc3RydWN0IEh0bGNLZXkgewogICAgcHViaWQgaWQ6IHU2NCwKfQoKLy8vIFBlcnNpc3RlbnQgSFRMQyByZWNvcmQuCi8vLyBUaGUgYHN0YXR1c2AgaXMgdXBkYXRlZCBiZWZvcmUgYW55IGV4dGVybmFsIHRva2VuIHRyYW5zZmVyIHRvIHByZXZlbnQK Ly8vIHJlZW50cmFuY3kgLyBkb3VibGUtY2xhaW0uCiNbZGVyaXZlKENsb25lLCBEZWJ1ZywgRXFGYywgUGFydGlhbEVxKV0KI1tjb250cmFjdHR5cGVdCnB1YiBzdHJ1Y3QgSHRsY1JlY29yZCB7CiAgICBwdWJpZCBpZDogdTY0LAogICAgcHViaWQgc2VuZGVyOiBBZGRyZXNzLAogICAgcHViaWQgc3RhdHVzOiB1MzIsCiAgICBwdWJpZCBhbW91bnQ6IGkxMjgsCiAgICBwdWJpZCB0b2tlbjogQWRkcmVzcywKICAgIHB1YmlkIHJlY2VpdmVyOiBBZGRyZXNzLAogICAgcHViaWQgaGFzaGxvY2s6IEJ5dGVzLAogICAgcHViaWQgdGltZWxvY2s6IHU2NCwKfQoKI1tkZXJpdmUoQ2xvbmUsIERlYnVnLCBFcUZxLCBQYXJ0aWFsRXEpXQojW2NvbnRyYWN0dHBlXQpwdWIgZW51bSBIdGxjRXJyb3IgewogICAgSW52YWxpZEFtb3VudCwKICAgIEludmFsaWRIYXNoTG9jaywKICAgIEludmFsaWRUaW1lbG9jaywKICAgIE5vdEZvdW5kLAogICAgQWxyZWFkeVJlc29sdmVkLAogICAgVW5hdXRob3JpemVkLAogICAgUHJlbWFnZUludmFsaWQsCiAgICBUaW1lbG9ja0V4cGlyZWQsCiAgICBUaW1lbG9ja05vdEV4cGlyZWQsCn0KCi8vLyBDcmVhdGUgYSBuZXcgSFRMQy4gVGhlIHNlbmRlciBsb2NrcyBgdG9rZW5gIGFtb3VudCB1bnRpbCBlaXRoZXIgdGhlCi8vLyByZWNlaXZlciBjbGFpbXMgd2l0aCB0aGUgY29ycmVjdCBwcmVpbWFnZSBvciB0aGUgdGltZWxvY2sgZXhwaXJlcyBhbmQgdGhlCi8vLyBzZW5kZXIgcmVmdW5kcy4KI1tjb250cmFjdF0KcHViIGZuIGNyZWF0ZV9odGxjKAogICAgZW52OiBFbnYsCiAgICBzZW5kZXI6IEFkZHJlc3MsCiAgICByZWNlaXZlcjogQWRkcmVzcywKICAgIHRva2VuOiBBZGRyZXNzLAogICAgYW1vdW50OiBpMTI4LAogICAgaGFzaGxvY2s6IEJ5dGVzLAogICAgdGltZWxvY2s6IHU2NCwKKSAtPiBSZXN1bHQ8dTY0LCBIdGxjRXJyb3I+IHsKICAgIHNlbmRlci5yZXF1aXJlX2F1dGgoKTsKCiAgICBpZiBhbW91bnQgPD0gMCB7CiAgICAgICAgcmV0dXJuIEVycihIdGxjRXJyb3I6OkludmFsaWRBbW91bnQpOwogICAgfQogICAgaWYgaGFzaGxvY2subGVuKCkgIT0gMzIgewogICAgICAgIHJldHVybiBFcnIoSHRsY0Vycm9yOjpJbnZhbGlkSGFzaExvY2spOwogICAgfQogICAgaWYgdGltZWxvY2sgPD0gZW52LmxlZGdlcigpLnRpbWVzdGFtcCgpIHsKICAgICAgICByZXR1cm4gRXJyKEh0bGNFcnJvcjo6SW52YWxpZFRpbWVsb2NrKTsKICAgIH0KCiAgICAvLyBFZmZlY3RzIGJlZm9yZSBpbnRlcmFjdGlvbnM6IG1vdmUgdG9rZW5zIGludG8gdGhlIGNvbnRyYWN0IGFjY291bnQuCiAgICB0b2tlbi5jbGllbnQoKS50cmFuc2Zlcihmcm9tOiAmc2VuZGVyLCB0bzogJmVudi5jdXJyZW50X2NvbnRyYWN0X2FkZHJlc3MoKSwgJmFtb3VudCk7CgogICAgbGV0IGlkID0gbmV4dF9pZCgmZW52KTsKICAgIGxldCByZWNvcmQgPSBIdGxjUmVjb3JkIHsKICAgICAgICBpZCwKICAgICAgICBzZW5kZXI6IHNlbmRlci5jbG9uZSgpLAogICAgICAgIHN0YXR1czogU1RBVFVTX0xPQ0tFRCwKICAgICAgICBhbW91bnQsCiAgICAgICAgdG9rZW46IHRva2VuLmNsb25lKCksCiAgICAgICAgcmVjZWl2ZXI6IHJlY2VpdmVyLmNsb25lKCksCiAgICAgICAgaGFzaGxvY2s6IGhhc2hsb2NrLmNsb25lKCksCiAgICAgICAgdGltZWxvY2ssCiAgICB9OwogICAgc2F2ZV9odGxjKCZlbnYsICZyZWNvcmQpOwoKICAgIGVudi5ldmVudHMKCQkucHVibGlzaCgKICAgICAgICAgICAgKFN5bWJvbDo6bmV3KCZlbnYsICJIVExDIiksIFN5bWJvbDo6bmV3KCZlbnYsICJDUkVBVEVEIikpLAogICAgICAgICAgKGlkLCBzZW5kZXIsIHJlY2VpdmVyLCBhbW91bnQsIHRpbWVsb2NrKSwKICAgICAgICApOwoKICAgIE9rKGlkKQp9CgovLy8gQ2xhaW0gYW4gSFRMQyBieSByZXZlYWxpbmcgdGhlIHByZWltYWdlIHdob3NlIFNIQS0yNTYgaGFzaCBlcXVhbHMgdGhlCi8vLyBzdG9yZWQgaGFzaGxvY2suIFRoZSBmdW5kcyBhcmUgc2VudCB0byB0aGUgcmVjZWl2ZXIuCiNbY29udHJhY3RdCnB1YiBmbiBjbGFpbV9odGxjKGVudjogRW52LCBjbGFpbWFudDogQWRkcmVzcywgaWQ6IHU2NCwgcHJlaW1hZ2U6IEJ5dGVzKSAtPiBSZXN1bHQ8KCksIEh0bGNFcnJvcj4gewogICAgY2xhaW1hbnQucmVxdWlyZV9hdXRoKCk7CgogICAgbGV0IG11dCByZWNvcmQgPSBsb2FkX2h0bGMoJmVudiwgaWQpLm9rX29yKEVycihIdGxjRXJyb3I6Ok5vdEZvdW5kKSk/OwogICAgaWYgcmVjb3JkLnN0YXR1cyAhPSBTVEFUVVNfTE9DS0VEIHsKICAgICAgICByZXR1cm4gRXJyKEh0bGNFcnJvcjo6QWxyZWFkeVJlc29sdmVkKTsKICAgIH0KICAgIGlmIGNsYWltYW50ICE9IHJlY29yZC5yZWNlaXZlciB7CiAgICAgICAgcmV0dXJuIEVycihIdGxjRXJyb3I6OlVuYXV0aG9yaXplZCk7CiAgICB9CiAgICBpZiBlbnYubGVkZ2VyKCkudGltZXN0YW1wKCkgPj0gcmVjb3JkLnRpbWVsb2NrIHsKICAgICAgICByZXR1cm4gRXJyKEh0bGNFcnJvcjo6VGltZWxvY2tFeHBpcmVkKTsKICAgIH0KCiAgICBsZXQgY29tcHV0ZWQ6IEhhc2g8MzI+ID0gZW52LmNyeXB0bygpLnNoYTI1NigmcHJlaW1hZ2UpOwogICAgaWYgY29tcHV0ZWQgIT0gcmVjb3JkLmhhc2hsb2NrIHsKICAgICAgICByZXR1cm4gRXJyKEh0bGNFcnJvcjo6UHJlaW1hZ2VJbnZhbGlkKTsKICAgIH0KCiAgICAvLyBTdGF0dXMgdXBkYXRlIGJlZm9yZSBleHRlcm5hbCB0b2tlbiB0cmFuc2ZlciAoZG91YmxlLWNsYWltIHByZXZlbnRpb24pLgogICAgcmVjb3JkLnN0YXR1cyA9IFNUQVRVU19DTEFJTUVEOwogICAgc2F2ZV9odGxjKCZlbnYsICZyZWNvcmQpOwoKICAgIHJlY29yZC50b2tlbi5jbGllbnQoKS50cmFuc2Zlcihmcm9tOiAmZW52LmN1cnJlbnRfY29udHJhY3RfYWRkcmVzcygpLCB0bzogJnJlY29yZC5yZWNlaXZlciwgJnJlY29yZC5hbW91bnQpOwoKICAgIGVudi5ldmVudHMKCQkucHVibGlzaCgKICAgICAgICAgICAgKFN5bWJvbDo6bmV3KCZlbnYsICJIVExDIiksIFN5bWJvbDo6bmV3KCZlbnYsICJDTEFJTUVEIikpLAogICAgICAgICAgKGlkLCByZWNvcmQucmVjZWl2ZXIsIHJlY29yZC5hbW91bnQpLAogICAgICAgICk7CgogICAgT2soKQp9CgovLy8gUmVmdW5kIGFuIEhUTEMgdG8gdGhlIHNlbmRlciBhZnRlciB0aGUgdGltZWxvY2sgaGFzIGV4cGlyZWQuCiNbY29udHJhY3RdCnB1YiBmbiByZWZ1bmRfaHRsYyhlbnY6IEVudiwgY2FsbGVyOiBBZGRyZXNzLCBpZDogdTY0KSAtPiBSZXN1bHQ8KCksIEh0bGNFcnJvcj4gewogICAgY2FsbGVyLnJlcXVpcmVfYXV0aCgpOwoKICAgIGxldCBtdXQgcmVjb3JkID0gbG9hZF9odGxjKCZlbnYsIGlkKS5va19vcihFcnIoSHRsY0Vycm9yOjpOb3RGb3VuZCkpPzsKICAgIGlmIHJlY29yZC5zdGF0dXMgIT0gU1RBVFVTX0xPQ0tFRCB7CiAgICAgICAgcmV0dXJuIEVycihIdGxjRXJyb3I6OkFscmVhZHlSZXNvbHZlZCk7CiAgICB9CiAgICBpZiBjYWxsZXIgIT0gcmVjb3JkLnNlbmRlciB7CiAgICAgICAgcmV0dXJuIEVycihIdGxjRXJyb3I6OlVuYXV0aG9yaXplZCk7CiAgICB9CiAgICBpZiBlbnYubGVkZ2VyKCkudGltZXN0YW1wKCkgPCByZWNvcmQudGltZWxvY2sgewogICAgICAgIHJldHVybiBFcnIoSHRsY0Vycm9yOjpUaW1lbG9ja05vdEV4cGlyZWQpOwogICAgfQoKICAgIC8vIFN0YXR1cyB1cGRhdGUgYmVmb3JlIGV4dGVybmFsIHRva2VuIHRyYW5zZmVyIChkb3VibGUtcmVmdW5kIHByZXZlbnRpb24pLgogICAgcmVjb3JkLnN0YXR1cyA9IFNUQVRVU19SRUZVTkRFRDsKICAgIHNhdmVfaHRsYygmZW52LCAmcmVjb3JkKTsKCiAgICByZWNvcmQudG9rZW4uY2xpZW50KCkudHJhbnNmZXIoZnJvbTogJmVudi5jdXJyZW50X2NvbnRyYWN0X2FkZHJlc3MoKSwgdG86ICZyZWNvcmQuc2VuZGVyLCAmcmVjb3JkLmFtb3VudCk7CgogICAgZW52LmV2ZW50cwoJCS5wdWJsaXNoKAogICAgICAgICAgICAoU3ltYm9sOjpuZXcoJmVudiwgIkhUTEMiKSwgU3ltYm9sOjpuZXcoJmVudiwgIlJFRlVOREVEIikpLAogICAgICAgICAgKGlkLCByZWNvcmQuc2VuZGVyLCByZWNvcmQuYW1vdW50KSwKICAgICAgICApOwoKICAgIE9rKCkKfQoKLy8vIFJldHVybiB0aGUgSFRMQyByZWNvcmQgZm9yIGBpZGAuCiNbY29udHJhY3RdCnB1YiBmbiBnZXRfaHRsYyhlbnY6IEVudiwgaWQ6IHU2NCkgLT4gUmVzdWx0PEh0bGNSZWNvcmQsIEh0bGNFcnJvcj4gewogICAgbG9hZF9odGxjKCZlbnYsIGlkKS5va19vcihFcnIoSHRsY0Vycm9yOjpOb3RGb3VuZCkpCn0KCmZuIG5leHRfaWQoZW52OiAmRW52KSAtPiB1NjQgewogICAgbGV0IGtleSA9IEhUTENfQ09VTlRFUjsKICAgIGxldCBjdXJyZW50OiB1NjQgPSBlbnYuc3RvcmFnZSgpLnBlcnNpc3RlbnQoKS5nZXQoJmtleSkudW53cmFwX29yKDApOwogICAgbGV0IG5leHQgPSBjdXJyZW50ICsgMTsKICAgIGVudi5zdG9yYWdlKCkucGVyc2lzdGVudCgpLnNldCgma2V5LCAmbik7CiAgICBlbnYuc3RvcmFnZSgpLnBlcnNpc3RlbnQoKS5leHRlbmRfdHRsKCZrZXksIFRUTCwgVFRMKTsKICAgIG5leHQKfQoKZm4gaHRsY19rZXkoaWQ6IHU2NCkgLT4gSHRsY0tleSB7CiAgICBIdGxjS2V5IHsgaWQgfQp9CgpmbiBsb2FkX2h0bGMoZW52OiAmRW52LCBpZDogdTY0KSAtPiBPcHRpb248SHRsY1JlY29yZD4gewogICAgZW52LnN0b3JhZ2UoKS5wZXJzaXN0ZW50KCkuZ2V0KCZodGxjX2tleShpZCkpCn0KCmZuIHNhdmVfaHRsYyhlbnY6ICZFbnYsIHJlY29yZDogJkh0bGNSZWNvcmQpIHsKICAgIGxldCBrZXkgPSBodGxjX2tleShyZWNvcmQuaWQpOwogICAgZW52LnN0b3JhZ2UoKS5wZXJzaXN0ZW50KCkuc2V0KCZrZXksIHJlY29yZCk7CiAgICBlbnYuc3RvcmFnZSgpLnBlcnNpc3RlbnQoKS5leHRlbmRfdHRsKCZrZXksIFRUTCwgVFRMKTsKfQo=
+//! Hash Time-Locked Contract (HTLC) escrow module.
+//!
+//! Locks a token amount from a `sender` into on-chain escrow that can only be
+//! released to a `receiver` by revealing the SHA-256 preimage of a
+//! `hashlock`, or returned to `sender` once `timeout_ledger` has passed. This
+//! is the building block for trustless conditional payments and cross-chain
+//! atomic swaps. See `docs/htlc-guide.md` for the full design writeup.
+//!
+//! ## Issue #1021: permissionless timeout sweep
+//!
+//! `refund_htlc` already lets the original `sender` reclaim an expired HTLC,
+//! but that requires the sender to notice the timeout and sign a
+//! transaction. `claim_htlc_timeout` is the automation-friendly counterpart:
+//! *anyone* may call it once `timeout_ledger` has passed, and it always
+//! returns the escrowed funds to the original sender (never to the caller),
+//! so a third-party sweep bot (see `scripts/htlc-sweep.js`) can clean up
+//! expired HTLCs without holding any keys for the sender.
+
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env,
+    String, Symbol,
+};
+
+/// TTL threshold for persistent HTLC entries: once remaining TTL dips below
+/// this many ledgers, the next write extends it back out to
+/// `HTLC_TTL_EXTEND_TO` (~30 days at ~5s/ledger).
+const HTLC_TTL_THRESHOLD: u32 = 86_400; // ~5 days
+const HTLC_TTL_EXTEND_TO: u32 = 518_400; // ~30 days
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HtlcStatus {
+    /// Funds are locked in escrow, awaiting claim or refund.
+    Active,
+    /// Receiver claimed the funds by revealing a valid preimage.
+    Claimed,
+    /// Sender (or anyone, via `claim_htlc_timeout`) reclaimed the funds after expiry.
+    Refunded,
+}
+
+/// Persistent HTLC record.
+///
+/// `status` is updated in storage *before* any external token transfer, so a
+/// reentrant call or a replay cannot drain the same escrow twice.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HtlcRecord {
+    pub id: String,
+    pub sender: Address,
+    pub receiver: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub hashlock: BytesN<32>,
+    /// Ledger sequence after which the escrow may be refunded (by `sender`
+    /// via `refund_htlc`, or by anyone via `claim_htlc_timeout`).
+    pub timeout_ledger: u32,
+    pub status: HtlcStatus,
+    pub created_at: u64,
+    /// Ledger timestamp at which the HTLC was claimed or refunded, if resolved.
+    pub resolved_at: Option<u64>,
+}
+
+#[contracttype]
+pub enum HtlcDataKey {
+    /// Monotonically increasing counter used to mint new HTLC ids.
+    Counter,
+    Htlc(String),
+}
+
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HtlcError {
+    /// `amount` must be strictly positive.
+    InvalidAmount = 1,
+    /// `timeout_ledger` must be strictly greater than the current ledger sequence.
+    InvalidTimeout = 2,
+    /// No HTLC exists for the given id.
+    NotFound = 3,
+    /// The HTLC has already been claimed or refunded.
+    AlreadyClaimed = 4,
+    /// The caller is not authorized to perform this action on this HTLC.
+    Unauthorized = 5,
+    /// The supplied preimage does not hash to `hashlock`.
+    PreimageMismatch = 6,
+    /// The HTLC timelock has passed; claims must happen before `timeout_ledger`.
+    Expired = 7,
+    /// `timeout_ledger` has not yet passed; refunds are not yet allowed.
+    NotExpired = 8,
+}
+
+#[contract]
+pub struct Htlc;
+
+#[cfg_attr(any(not(target_arch = "wasm32"), feature = "contract-htlc"), contractimpl)]
+impl Htlc {
+    /// Locks `amount` of `token` from `sender` into escrow, payable to
+    /// `receiver` on reveal of the preimage of `hashlock`, or refundable to
+    /// `sender` after `timeout_ledger`. Returns the new HTLC id.
+    pub fn create_htlc(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+        amount: i128,
+        hashlock: BytesN<32>,
+        timeout_ledger: u32,
+    ) -> Result<String, HtlcError> {
+        sender.require_auth();
+
+        if amount <= 0 {
+            return Err(HtlcError::InvalidAmount);
+        }
+        if timeout_ledger <= env.ledger().sequence() {
+            return Err(HtlcError::InvalidTimeout);
+        }
+
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&HtlcDataKey::Counter)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&HtlcDataKey::Counter, &next_id);
+
+        let id = crate::format_id(&env, "htlc_", next_id);
+
+        let record = HtlcRecord {
+            id: id.clone(),
+            sender: sender.clone(),
+            receiver: receiver.clone(),
+            token: token.clone(),
+            amount,
+            hashlock,
+            timeout_ledger,
+            status: HtlcStatus::Active,
+            created_at: env.ledger().timestamp(),
+            resolved_at: None,
+        };
+        env.storage()
+            .persistent()
+            .set(&HtlcDataKey::Htlc(id.clone()), &record);
+        Self::bump_htlc_ttl(&env, &id);
+
+        // Interaction last: pull the deposit into this contract's custody.
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&sender, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "HTLC"), Symbol::new(&env, "CREATED")),
+            (id.clone(), sender, receiver, token, amount, timeout_ledger),
+        );
+
+        Ok(id)
+    }
+
+    /// Releases the escrow to `claimant`, who must be the HTLC's `receiver`
+    /// and must supply a `preimage` whose SHA-256 hash matches `hashlock`.
+    /// Must happen strictly before `timeout_ledger`.
+    pub fn claim_htlc(
+        env: Env,
+        htlc_id: String,
+        claimant: Address,
+        preimage: Bytes,
+    ) -> Result<(), HtlcError> {
+        claimant.require_auth();
+
+        let mut record = Self::load(&env, &htlc_id)?;
+
+        if record.status != HtlcStatus::Active {
+            return Err(HtlcError::AlreadyClaimed);
+        }
+        if claimant != record.receiver {
+            return Err(HtlcError::Unauthorized);
+        }
+        if env.ledger().sequence() >= record.timeout_ledger {
+            return Err(HtlcError::Expired);
+        }
+        if env.crypto().sha256(&preimage).to_bytes() != record.hashlock {
+            return Err(HtlcError::PreimageMismatch);
+        }
+
+        // Effect before interaction: mark claimed first to prevent double-claim.
+        record.status = HtlcStatus::Claimed;
+        record.resolved_at = Some(env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .set(&HtlcDataKey::Htlc(htlc_id.clone()), &record);
+        Self::bump_htlc_ttl(&env, &htlc_id);
+
+        let token_client = token::Client::new(&env, &record.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &record.receiver,
+            &record.amount,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "HTLC"), Symbol::new(&env, "CLAIMED")),
+            (htlc_id, record.receiver, record.amount),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the escrowed tokens to the original `sender`. Only the
+    /// sender may call this, and only after `timeout_ledger` has passed.
+    pub fn refund_htlc(env: Env, htlc_id: String, caller: Address) -> Result<(), HtlcError> {
+        caller.require_auth();
+
+        let mut record = Self::load(&env, &htlc_id)?;
+
+        if record.status != HtlcStatus::Active {
+            return Err(HtlcError::AlreadyClaimed);
+        }
+        if caller != record.sender {
+            return Err(HtlcError::Unauthorized);
+        }
+        if env.ledger().sequence() < record.timeout_ledger {
+            return Err(HtlcError::NotExpired);
+        }
+
+        record.status = HtlcStatus::Refunded;
+        record.resolved_at = Some(env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .set(&HtlcDataKey::Htlc(htlc_id.clone()), &record);
+        Self::bump_htlc_ttl(&env, &htlc_id);
+
+        let token_client = token::Client::new(&env, &record.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &record.sender,
+            &record.amount,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "HTLC"), Symbol::new(&env, "REFUNDED")),
+            (htlc_id, record.sender, record.amount),
+        );
+
+        Ok(())
+    }
+
+    /// Issue #1021: permissionless timeout sweep. Callable by *any* account
+    /// (no `require_auth` needed from the caller - the contract itself
+    /// authorizes moving its own escrowed balance). Succeeds only once
+    /// `env.ledger().sequence() >= htlc.timeout_ledger`, and always refunds
+    /// to the original `sender`, never to the caller.
+    pub fn claim_htlc_timeout(env: Env, htlc_id: String) -> Result<(), HtlcError> {
+        let mut record = Self::load(&env, &htlc_id)?;
+
+        if record.status != HtlcStatus::Active {
+            return Err(HtlcError::AlreadyClaimed);
+        }
+        if env.ledger().sequence() < record.timeout_ledger {
+            return Err(HtlcError::NotExpired);
+        }
+
+        // Effect before interaction: mark refunded first to prevent a second
+        // sweep (or a racing `refund_htlc`) from double-spending the escrow.
+        record.status = HtlcStatus::Refunded;
+        record.resolved_at = Some(env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .set(&HtlcDataKey::Htlc(htlc_id.clone()), &record);
+        Self::bump_htlc_ttl(&env, &htlc_id);
+
+        let token_client = token::Client::new(&env, &record.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &record.sender,
+            &record.amount,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "HTLC"),
+                Symbol::new(&env, "TIMEOUT_REFUNDED"),
+            ),
+            (htlc_id, record.sender, record.amount),
+        );
+
+        Ok(())
+    }
+
+    /// Read-only lookup. Returns `HtlcError::NotFound` if the id does not exist.
+    pub fn get_htlc(env: Env, htlc_id: String) -> Result<HtlcRecord, HtlcError> {
+        Self::load(&env, &htlc_id)
+    }
+
+    fn load(env: &Env, htlc_id: &String) -> Result<HtlcRecord, HtlcError> {
+        env.storage()
+            .persistent()
+            .get(&HtlcDataKey::Htlc(htlc_id.clone()))
+            .ok_or(HtlcError::NotFound)
+    }
+
+    fn bump_htlc_ttl(env: &Env, htlc_id: &String) {
+        env.storage().persistent().extend_ttl(
+            &HtlcDataKey::Htlc(htlc_id.clone()),
+            HTLC_TTL_THRESHOLD,
+            HTLC_TTL_EXTEND_TO,
+        );
+    }
+}

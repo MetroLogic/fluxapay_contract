@@ -20,6 +20,7 @@ contract-fx-oracle = []
 contract-merchant-registry = []
 contract-payment-link = []
 contract-dex-router = []
+contract-htlc = []
 
 [dependencies]
 soroban-sdk = { workspace = true }

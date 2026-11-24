@@ -7,7 +7,16 @@ use crate::access_control::{role_admin, role_oracle, AccessControl};
 
 /// Maximum allowed age of a rate in seconds, regardless of admin-configured threshold.
 const MAX_RATE_AGE_SECS: u64 = 86_400; // 24 hours
+/// Pre-existing/unrelated fix (found while writing FX conversion property
+/// tests for issue #1186): this constant was referenced by
+/// `oracle_initialize_with_tokens` and `set_max_staleness` but never
+/// defined anywhere in the crate, so the crate failed to compile at all
+/// (this module has no feature gate on its free functions, only on the
+/// `#[contractimpl]` block, so it is always built). `60` matches the floor
+/// already asserted by `fx_oracle_test::test_staleness_threshold_bounds_are_enforced`
+/// (59 rejected, 60 accepted).
 const MIN_RATE_AGE_SECS: u64 = 60;
+const MAX_RATE_DECIMALS: u32 = 38;
 
 /// Maximum ledger sequence gap since last rate update (~24 h at ~5 s/ledger).
 const MAX_LEDGER_GAP: u32 = 17_280;
@@ -66,11 +75,23 @@ pub enum FXOracleError {
     /// Issue #636: Neither the requested `BASE_QUOTE` pair nor its inverse
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
-    InvalidStalenessThreshold = 7,
-    /// Issue #851: `set_rates_batch` was called with an empty rate list.
-    EmptyBatch = 8,
-    /// Issue #811: Pair symbol is malformed, or a token is outside the allowlist.
-    TokenNotAllowed = 9,
+    /// Rate must be positive and use at most 38 fixed-point decimals.
+    InvalidRate = 7,
+    /// Pre-existing/unrelated fix (found alongside `MIN_RATE_AGE_SECS` while
+    /// writing FX conversion property tests for issue #1186): `set_max_staleness`
+    /// already returned this variant, but it was never added to the enum, which
+    /// is a second reason the crate failed to compile. `threshold` passed to
+    /// `set_staleness_threshold`/`set_max_staleness` is outside
+    /// `[MIN_RATE_AGE_SECS, MAX_RATE_AGE_SECS]`.
+    InvalidStalenessThreshold = 8,
+    /// Pre-existing/unrelated fix (found alongside the other missing
+    /// variants above while writing FX conversion property tests for issue
+    /// #1186): `set_rates_batch` already returned this for an empty batch,
+    /// but it was never added to the enum.
+    EmptyBatch = 9,
+    /// Pre-existing/unrelated fix, same as above: returned when a pair's
+    /// base/quote token is not on the allowlist, but never added to the enum.
+    TokenNotAllowed = 10,
 }
 
 #[contracttype]
@@ -204,7 +225,11 @@ impl FXOracle {
         // Emit event: (RATE, UPDATED), pair
         env.events().publish(
             (Symbol::new(&env, "RATE"), Symbol::new(&env, "UPDATED")),
-            pair,
+            pair.clone(),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "FX_RATE"), Symbol::new(&env, "UPDATED")),
+            (pair, rate, decimals),
         );
 
         Ok(())
@@ -264,6 +289,10 @@ impl FXOracle {
         let count = rates.len();
         for (pair, rate, decimals) in rates.iter() {
             Self::store_rate(&env, pair, rate, decimals)?;
+            env.events().publish(
+                (Symbol::new(&env, "FX_RATE"), Symbol::new(&env, "UPDATED")),
+                (pair, rate, decimals),
+            );
         }
 
         env.events().publish(
@@ -402,10 +431,7 @@ impl FXOracle {
     }
 
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
-        // Reject non-positive rates before persisting. A stored `rate <= 0`
-        // would cause a divide-by-zero panic in downstream consumers such as
-        // `PaymentLinkManager.use_link`, permanently bricking affected links.
-        if rate <= 0 {
+        if rate <= 0 || decimals > MAX_RATE_DECIMALS {
             return Err(FXOracleError::InvalidRate);
         }
 

@@ -46,6 +46,33 @@ fn test_merchant_registration() {
 }
 
 #[test]
+fn test_merchant_registry_set_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    assert_eq!(client.version(), String::from_str(&env, "1.0.0"));
+    let new_version = String::from_str(&env, "3.2.1");
+    client.set_version(&admin, &new_version);
+    assert_eq!(client.version(), new_version);
+    assert_eq!(
+        client.try_set_version(&admin, &String::from_str(&env, "v3.2.1")),
+        Err(Ok(MerchantError::InvalidVersion))
+    );
+    assert_eq!(client.version(), new_version);
+
+    let non_admin = Address::generate(&env);
+    assert_eq!(
+        client.try_set_version(&non_admin, &String::from_str(&env, "4.0.0")),
+        Err(Ok(MerchantError::Unauthorized))
+    );
+}
+
+#[test]
 fn test_merchant_update() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2499,4 +2526,106 @@ fn test_list_merchants_pagination_cursor_and_integrity() {
     assert_ne!(m1_1, m2_0);
     assert_ne!(m2_0, m2_1);
     assert_ne!(m2_1, m3_0);
+}
+
+#[test]
+fn test_dispute_auto_suspension_threshold_rejected_excluded_and_reinstate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let refund_manager = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_refund_manager_address(&admin, &refund_manager);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    // Configured dispute/lost-dispute threshold is respected for auto-suspension.
+    client.set_dispute_threshold(&admin, &2);
+
+    // A rejected dispute is excluded from resolved-against/lost counters.
+    let before = client.get_merchant(&merchant_id);
+    assert_eq!(before.resolved_against_count, 0);
+    assert_eq!(before.lost_disputes_count, 0);
+
+    assert_eq!(
+        client.increment_resolved_against_count(&refund_manager, &merchant_id),
+        1
+    );
+    let mid = client.get_merchant(&merchant_id);
+    assert!(mid.active);
+    assert_eq!(mid.resolved_against_count, 1);
+
+    // Threshold crossing triggers auto-suspension.
+    assert_eq!(
+        client.increment_resolved_against_count(&refund_manager, &merchant_id),
+        2
+    );
+    let suspended = client.get_merchant(&merchant_id);
+    assert!(!suspended.active);
+    assert_eq!(suspended.resolved_against_count, 2);
+    assert_eq!(suspended.lost_disputes_count, 2);
+    assert_eq!(
+        suspended.suspension_reason,
+        Some(String::from_str(
+            &env,
+            "Auto-suspended due to dispute threshold"
+        ))
+    );
+
+    // Reinstatement restores merchant and resets counters appropriately.
+    client.reinstate_merchant(&admin, &merchant_id);
+    let reinstated = client.get_merchant(&merchant_id);
+    assert!(reinstated.active);
+    assert!(reinstated.suspension_reason.is_none());
+    assert_eq!(reinstated.dispute_count, 0);
+    assert_eq!(reinstated.lost_disputes_count, 0);
+    assert_eq!(reinstated.resolved_against_count, 0);
+}
+
+#[test]
+fn test_set_suspension_threshold_respected_for_vote_suspension() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.grant_role(&admin, &crate::access_control::role_arbitrator(&env), &arbitrator);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    // Configured suspension threshold is respected by vote-based suspension.
+    client.set_suspension_threshold(&admin, &1);
+    let proposal_id = client.propose_merchant_suspension(
+        &arbitrator,
+        &merchant_id,
+        &String::from_str(&env, "policy violation"),
+    );
+    client.vote_suspension(&arbitrator, &proposal_id, &true);
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert!(!merchant.active);
 }

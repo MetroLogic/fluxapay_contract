@@ -126,5 +126,67 @@ const payload = buildMetaTransactionPayload({
 const signature = signMetaTransaction(payload, merchant);
 ```
 
+### Submitting
+
 The relayer then calls `execute_meta_transaction` with `payload` and the
-64-byte `signature`.
+64-byte `signature`. The relayer is the one whose Stellar account authorizes
+and pays the fee for this outer call, so `client.contract` must be configured
+to sign with the **relayer's** keypair, not the merchant's — the merchant's
+authorization is already captured in `signature`.
+
+`FluxapayClient.contract` is the generated Soroban contract client
+(`sdk/src/index.ts`), so `execute_meta_transaction` is invoked the same way
+every other contract method on it is — the field names below
+(`merchant_id`, `target_function`, `call_data`, `domain_separator`) are the
+contract's snake_case field names, not the camelCase ones used by the
+`MetaTransactionPayload` TS type above:
+
+```ts
+import { FluxapayClient } from "@fluxapay/sdk";
+
+// `client` must be constructed with the relayer's signing keypair/callback —
+// the relayer pays the network fee and authorizes this call.
+const client = new FluxapayClient("testnet" /* , relayerSignerOptions */);
+
+const receipt = await client.contract.execute_meta_transaction({
+  relayer: relayer.publicKey(),
+  payload: {
+    merchant_id: payload.merchantId,
+    target_function: payload.targetFunction,
+    call_data: payload.callData,
+    nonce: payload.nonce,
+    deadline: payload.deadline,
+    domain_separator: payload.domainSeparator,
+  },
+  signature,
+});
+```
+
+`receipt` is `meta_transaction::MetaTxReceipt` — it reports whether the inner
+action succeeded even when the overall call doesn't throw (an envelope that
+verifies correctly but whose inner action fails still consumes the nonce and
+emits `META_TX/FAILED`, as described below).
+
+## Issue #1020: replay-hardening audit
+
+This section documents an audit of the replay-protection properties
+requested in Issue #1020, against the implementation in
+`fluxapay/src/meta_transaction.rs`.
+
+| Requested hardening | Status | Where |
+| --- | --- | --- |
+| Signed message binds the contract address | **Already enforced** | `domain_separator` hashes `contract_id_hash` (derived from `env.current_contract_address()`) into the separator, which is itself part of the signed preimage (`signing_preimage`). A signature produced against one contract's separator fails `payload.domain_separator != expected_domain` (`InvalidDomain`) on any other contract. |
+| Signed message binds the network | **Already enforced** | `domain_separator` also hashes `env.ledger().network_id()` (SHA-256 of the network passphrase) into the separator, so a signature cannot be replayed across networks (e.g. testnet → mainnet) either. |
+| `expires_at` / deadline enforcement | **Already enforced** | `execute` rejects with `MetaTxError::Expired` when `env.ledger().timestamp() > payload.deadline`, checked before signature verification. |
+| Nonce replay protection | **Already enforced** | Nonces are strictly sequential per merchant (`expected_nonce`), rejected with `MetaTxError::InvalidNonce` on mismatch, and consumed (advanced) even when the inner action fails, so a used envelope can never be replayed. |
+| Nonce scoped "per (user, contract_address)" | **Structurally already true, now also explicit** | Each Soroban contract instance has its own isolated persistent storage, so a `Nonce(merchant)` entry in one deployed contract can never collide with the same merchant's nonce in a different deployed contract — there is no shared storage to collide in. Combined with the domain-separator check above (belt-and-braces), cross-contract nonce reuse was already structurally impossible, not merely nonce-scheme-dependent. |
+
+**Conclusion:** the specific vulnerability described in Issue #1020 ("a signed
+meta-tx for contract A could be replayed on contract B") does not reproduce
+against the current implementation — `domain_separator_for` already binds
+both the contract address and the network, and `test_wrong_domain_separator_is_rejected`
+(`fluxapay/src/meta_transaction_test.rs`, `fluxapay/tests/meta_transaction.rs`)
+already covers it, alongside `test_expired_deadline_is_rejected` and
+`test_replayed_nonce_is_rejected`. No functional change was required here;
+this section exists so the hardening is documented explicitly rather than
+only implied by the code.

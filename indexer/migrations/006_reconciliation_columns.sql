@@ -1,4 +1,4 @@
--- Migration 005: Reconciliation report columns + settlements table (Issue #840)
+-- Migration 006: Reconciliation report columns + settlements table (Issue #840)
 -- Extends payments with fiat/settlement metadata used by CSV export.
 -- Adds settlements table so settlement records appear alongside payments/refunds.
 

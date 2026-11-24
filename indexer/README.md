@@ -5,9 +5,10 @@ This directory contains the FluxaPay Soroban Event Indexer service that syncs ev
 ## Features
 
 - **Multi-Contract Event Indexing (#618)**: Subscribes simultaneously to events across all 5 FluxaPay contracts (`PaymentProcessor`, `RefundManager`, `MerchantRegistry`, `FXOracle`, `PaymentLinkManager`).
-- **REST API Server (#616)**: HTTP API for querying payments, merchant payments (with pagination & status filter), disputes, refunds, events, and health status. Protected with API key authentication (`x-api-key` header or `Authorization: Bearer <API_KEY>`).
-- **Scoped API Keys (#854)**: Restrict API keys to specific operations (`read:payments`, `write:payments`, `read:analytics`, `manage:webhooks`, `admin`). Requests without required scopes return `403 Insufficient Scope`.
-- **Real-Time Payment Event Streaming (#855)**: Server-Sent Events (SSE) endpoint (`GET /v1/events/stream`) delivering real-time payment updates to merchant dashboards. Features SEP-10 JWT authentication, query-based event filtering (`?event_types=...`), a 5 concurrent connection cap per merchant (`429`), and 30-second ping keepalives.
+- **REST API Server (#616)**: HTTP API for querying payments, disputes, refunds, events, settlements, liveness, and dependency readiness.
+- **SEP-24 Settlement Handoff**: Persists anchor interactive withdrawal sessions and resumes authoritative status polling after merchant return from the anchor UI.
+- **Merchant Onboarding Checklist (#1074)**: SEP-10-authenticated checklist endpoint derived from indexed merchant registration and verification data.
+- **Reconciliation Report Export (#1081)**: Merchant-scoped date-range reports with settlement, refund, dispute adjustment, fiat conversion, and CSV output.
 - **Dead-Letter Queue & Automatic Retry (#617)**: Persists failed events to `dead_letter_events` with error tracking and retry counters. Includes an automatic retry worker and an authenticated `POST /admin/replay-dlq` manual replay endpoint.
 - **Dispute Lifecycle Persistence (#615)**: Persists dispute status transitions (`RESOLVED`, `REJECTED`, `ESCALATED`) with `resolved_at` timestamps, idempotency, and safe unknown dispute handling.
 - **Reconciliation CSV Export (#840)**: `GET /v1/reports/reconciliation?from=&to=` streams a CSV of payments, refunds, and settlements for accounting tools (QuickBooks, Wave, Excel). Authenticated via SEP-10 JWT; large reports use a PostgreSQL cursor so rows are not buffered in memory.

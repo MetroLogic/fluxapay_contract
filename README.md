@@ -6,6 +6,16 @@ FluxaPay bridges the gap between crypto payments and real-world commerce—makin
 
 New to FluxaPay? Follow the **[Merchant Quickstart Guide](docs/quickstart.md)** to go from SDK install to your first confirmed USDC payment in minutes.
 
+## Interactive API Reference
+
+Browse the full, interactive API reference (with runnable request/response examples for checkout and payment links) at **`/api-docs`** once the backend is running locally:
+
+```
+http://localhost:3000/api-docs
+```
+
+The reference is served offline from the bundled OpenAPI spec (`docs/openapi.yaml`) — no CDN or network access required.
+
 ## TypeScript SDK
 
 [![npm version](https://img.shields.io/npm/v/@fluxapay/sdk.svg)](https://www.npmjs.com/package/@fluxapay/sdk)
@@ -38,6 +48,46 @@ Automated in CI workflow (`ci.yml`) and runnable locally:
 ### Bounded Property Tests (Local)
 
 - `PROPTEST_CASES=64 cargo test -p fluxapay proptests:: --all-features -- --test-threads=1`
+
+---
+
+## Feature Status
+
+A quick reference for integrators: what's production-ready today versus
+still in progress, verified directly against the current contract code
+(not just this README's prose). Every "Implemented" row below ships behind
+its own Soroban feature flag or lives in the primary `PaymentProcessor`
+contract — see [docs/feature-flags.md](docs/feature-flags.md) for which.
+
+This table is checked for drift in code review whenever `fluxapay/src/*.rs`
+changes; see [CONTRIBUTING.md](CONTRIBUTING.md) for the review checklist
+item that keeps it in sync.
+
+| Feature | Status | Code / Guide |
+|---|---|---|
+| Core payments (create / verify / settle) | Implemented | [docs/architecture.md](docs/architecture.md) |
+| Refunds (full & partial) | Implemented | [Refunds](#refunds) below, `fluxapay/src/refund_manager.rs` |
+| Payment links (fixed USDC amount) | Implemented | `fluxapay/src/payment_link.rs` |
+| Payment links — multi-currency / fiat (FX oracle conversion) | Implemented | `fluxapay/src/fx_oracle.rs`, `fluxapay/src/payment_link.rs` (property-tested: `fluxapay/src/proptests.rs`) |
+| Invoices | Implemented | `fluxapay/src/payment_link.rs`, `fluxapay/src/invoice_test.rs` |
+| Subscriptions / recurring billing | Implemented | [docs/subscription-guide.md](docs/subscription-guide.md) |
+| Dispute resolution | Implemented | [docs/disputes.md](docs/disputes.md), [docs/dispute-resolution-guide.md](docs/dispute-resolution-guide.md) |
+| Payment streams (payroll / milestones) | Implemented | [docs/payment-streams-guide.md](docs/payment-streams-guide.md) |
+| Merkle batch payments (bulk payroll / airdrops) | Implemented | [docs/merkle-batch-payments.md](docs/merkle-batch-payments.md) |
+| HTLC escrow (cross-chain atomic swaps) | Implemented | [docs/htlc-guide.md](docs/htlc-guide.md) — feature-gated (`contract-htlc`), see note there |
+| DEX router / token swaps | **Partial (simulated)** | [docs/ADR-0005: DEX Simulation-to-Real Migration](docs/ADR-0005-dex-simulation-to-real-migration.md) — quotes and settlement are simulated locally, not yet routed through a real on-chain DEX |
+| Account abstraction — session keys & spending policies | Implemented | [docs/account-abstraction.md](docs/account-abstraction.md) |
+| Merchant → sub-account delegation | Implemented | [docs/account-abstraction.md](docs/account-abstraction.md) (see "Merchant → sub-account delegation") |
+| Sponsored meta-transactions | Implemented | [docs/sponsored-meta-transactions.md](docs/sponsored-meta-transactions.md) |
+| Offline signing (air-gapped transactions) | Implemented | [docs/account-abstraction.md](docs/account-abstraction.md#offline-signing-air-gapped-transactions) |
+| Merchant registry / KYC tiers | Implemented | [docs/merchant-registry-api-reference.md](docs/merchant-registry-api-reference.md) |
+| Webhooks | Implemented | [docs/webhooks.md](docs/webhooks.md) |
+| SEP-10 authentication | Implemented | [docs/quickstart.md](docs/quickstart.md#1-authenticate-with-sep-10-issue-675) |
+| SEP-6 / SEP-24 anchor settlement (fiat off-ramp) | Implemented | [docs/sep6-sep24-anchor-integration.md](docs/sep6-sep24-anchor-integration.md), `indexer/src/settlement.ts` |
+| Treasury governance / multisig admin | Implemented | [ADR-0004: Multi-Sig Admin Governance](docs/ADR-0004-multisig-admin-governance.md), [docs/treasury-governance.md](docs/treasury-governance.md) |
+
+Anything not listed above (including items under "Tech Stack (Planned)" and
+"Roadmap" below) should be treated as **planned** — not yet started on-chain.
 
 ---
 
@@ -146,6 +196,15 @@ Merchant lifecycle and response steps: [docs/disputes.md](docs/disputes.md). For
 
 See the full guide: [docs/payment-streams-guide.md](docs/payment-streams-guide.md)
 
+### 6) Merkle batch payments (payroll / airdrops)
+
+•⁠ ⁠Payer commits one 32-byte Merkle root over `(index, recipient, amount)` allocations and funds the total in a single transaction
+•⁠ ⁠Each recipient claims their own allocation with an O(log N) inclusion proof — no per-recipient transaction from the payer
+•⁠ ⁠Claims are tracked with a per-distribution bitmap to reject double-claims
+•⁠ ⁠After expiry, the creator reclaims any unclaimed balance
+
+See the full guide: [docs/merkle-batch-payments.md](docs/merkle-batch-payments.md)
+
 ## Tech Stack (Planned)
 
 •⁠ ⁠*Blockchain:* Stellar  
@@ -195,21 +254,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: local setup, build an
 1. **Environment Variables**: Copy `.env.example` to `.env` and populate with your testnet credentials (do not commit `.env`):
    ```bash
    cp .env.example .env
-   # Edit .env with your Stellar testnet keys and contract IDs
+   # Edit .env with your credentials
    ```
 
-2. **Local Contract Invocation**: See [docs/local-invoke.md](docs/local-invoke.md) for step-by-step recipes to test `create_payment`, `register_merchant`, and other contract functions on testnet.
-
-3. **Running Tests**:
+2. **Install dependencies**:
    ```bash
-   cd fluxapay && make test
+   npm install
    ```
 
-4. **Code Quality**: Format, lint, and audit before submitting:
+3. **Run the backend**:
    ```bash
-   cd fluxapay && make fmt && cargo clippy --all-targets --all-features && cargo audit
+   npm run dev
    ```
 
+4. **Explore the API**: Open `http://localhost:3000/api-docs` for the interactive API reference.
 ## Security
 
 Please refer to our [Security Policy](SECURITY.md) for information on reporting vulnerabilities and our current audit status.
@@ -299,7 +357,20 @@ FluxaPay emits the following on-chain events for refund lifecycle tracking:
 
 ## Architecture
 
-For a detailed understanding of the contract structure, cross-contract interactions, role model, and payment lifecycle, see [docs/architecture.md](docs/architecture.md).
+For a detailed understanding of the contract structure, cross-contract interactions, role model, payment lifecycle, and the storage ownership map, see [docs/architecture.md](docs/architecture.md).
+
+## Architecture Decision Records
+
+- [ADR-0001: Access Control Split](docs/ADR-0001-access-control-split.md)
+- [ADR-0002: Payment Stream Design](docs/ADR-0002-payment-stream-design.md)
+- [ADR-0003: KYC Tier System](docs/ADR-0003-kyc-tier-system.md)
+- [ADR-0004: Multi-Sig Admin Governance](docs/ADR-0004-multisig-admin-governance.md)
+- [ADR-0005: DEX Simulation-to-Real (Soroswap) Migration](docs/ADR-0005-dex-simulation-to-real-migration.md)
+- [ADR-0006: Module Boundaries for `lib.rs`](docs/ADR-0006-module-boundaries-lib-rs.md)
+
+## Event Topics
+
+The on-chain event topic naming convention and indexer-compatible migration plan are documented in [docs/events.md](docs/events.md).
 
 ## Error Codes
 
@@ -331,3 +402,25 @@ Operational scripts for deployment, SDK generation, and CI: [scripts/README.md](
 - #805: bug: merchant_registry_test.rs tests share a single Soroban test environment, causing test order dependency
 <!-- handsoff-issue-826 -->
 - #826: bug: refund_manager.rs process_refund deducts 1% fee from the refund amount but does not update the treasury balance atomically
+
+<!-- handsoff-issue-989 -->
+- #989: test: add Playwright end-to-end tests for payment link checkout flow
+<!-- handsoff-issue-996 -->
+- #996: feat: add dashboard 'Copy Payment Link' button directly to payments table row
+<!-- handsoff-issue-973 -->
+- #973: feat: implement Soroban smart contract event listener for on-chain escrow releases in streams
+<!-- handsoff-issue-980 -->
+- #980: feat: add input validation for payment amount field on checkout page
+<!-- handsoff-issue-969 -->
+- #969: feat: add date range and currency filters to dashboard transactions table
+
+<!-- handsoff-issue-1140 -->
+- #1140: tech-debt: migrate env.events().publish calls to #[contractevent] structs
+
+<!-- handsoff-issue-1141 -->
+- #1141: refactor: remove shadowed refund helper duplicates and #[allow(dead_code)]
+<!-- handsoff-issue-1131 -->
+- #1131: test: wire htlc_test.rs into the test build or delete it
+
+<!-- handsoff-issue-1134 -->
+- #1134: test: wire treasury_multisig_test.rs into the test build

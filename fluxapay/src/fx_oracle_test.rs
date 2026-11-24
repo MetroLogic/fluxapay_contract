@@ -48,6 +48,26 @@ fn test_unauthorized_set_rate() {
 }
 
 #[test]
+fn test_set_rate_rejects_non_positive_rates_and_unsupported_precision() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    let pair = Symbol::new(&env, "USDC_NGN");
+    assert_eq!(
+        client.try_set_rate(&oracle, &pair, &0, &7),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+    assert_eq!(
+        client.try_set_rate(&oracle, &pair, &100, &39),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+}
+
+#[test]
 fn test_staleness_check() {
     let env = Env::default();
     env.mock_all_auths();

@@ -1870,6 +1870,166 @@ fn test_process_refund_sends_fee_to_admin() {
     assert_eq!(token_client.balance(&admin), fee);
 }
 
+// ── Issue #1016: Tiered refund fee enforcement based on merchant KYC tier ────
+
+/// Sets up a RefundManager wired to a MerchantRegistry, with a merchant
+/// already registered and placed at the given KYC tier.
+fn setup_refund_manager_with_tier<'a>(
+    env: &'a Env,
+    tier: &crate::merchant_registry::KycTier,
+) -> (
+    Address,
+    RefundManagerClient<'a>,
+    Address,
+    Address,
+) {
+    let (admin, client, usdc_token) = setup_refund_manager_with_token(env);
+
+    let registry_contract = env.register(crate::merchant_registry::MerchantRegistry, ());
+    let registry_client =
+        crate::merchant_registry::MerchantRegistryClient::new(env, &registry_contract);
+    registry_client.initialize(&admin);
+
+    client.set_merchant_registry_address(&admin, &registry_contract);
+
+    let merchant = Address::generate(env);
+    registry_client.register_merchant(
+        &merchant,
+        &String::from_str(env, "Tiered Fee Test Merchant"),
+        &String::from_str(env, "USDC"),
+        &None::<Address>,
+        &None::<String>,
+        &None,
+    );
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        tier,
+        &Some(String::from_str(env, "sig")),
+    );
+
+    (admin, client, usdc_token, merchant)
+}
+
+/// Extracts the `fee_bps` field (4th element) from the most recently emitted
+/// `REFUND/COMPLETED` event's data payload.
+fn last_refund_completed_fee_bps(env: &Env) -> i128 {
+    let events = env.events().all();
+    let completed = events
+        .iter()
+        .rev()
+        .find(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 {
+                return false;
+            }
+            let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(env);
+            let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(env);
+            matches!(
+                (t0, t1),
+                (Ok(a), Ok(b))
+                    if a == Symbol::new(env, "REFUND") && b == Symbol::new(env, "COMPLETED")
+            )
+        })
+        .expect("expected a REFUND/COMPLETED event");
+
+    let data: (String, String, i128, i128) = completed.2.clone().try_into_val(env).unwrap();
+    data.3
+}
+
+#[test]
+fn test_process_refund_applies_basic_tier_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client, usdc_token, merchant) =
+        setup_refund_manager_with_tier(&env, &crate::merchant_registry::KycTier::Basic);
+
+    let payment_id = String::from_str(&env, "payment_tier_basic");
+    let refund_amount = 10_000i128;
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant, &refund_amount, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(
+        &payment_id,
+        &refund_amount,
+        &String::from_str(&env, "basic tier fee test"),
+        &requester,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    client.process_refund(&operator, &refund_id);
+
+    let token_client = token::TokenClient::new(&env, &usdc_token);
+    let fee = refund_amount * REFUND_FEE_BPS_BASIC / 10_000; // 1.0%
+    assert_eq!(fee, 100i128);
+    assert_eq!(token_client.balance(&requester), refund_amount - fee);
+    assert_eq!(client.get_treasury_balance(), fee);
+    assert_eq!(last_refund_completed_fee_bps(&env), REFUND_FEE_BPS_BASIC);
+}
+
+#[test]
+fn test_process_refund_applies_full_tier_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client, usdc_token, merchant) =
+        setup_refund_manager_with_tier(&env, &crate::merchant_registry::KycTier::Full);
+
+    let payment_id = String::from_str(&env, "payment_tier_full");
+    let refund_amount = 10_000i128;
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant, &refund_amount, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(
+        &payment_id,
+        &refund_amount,
+        &String::from_str(&env, "full tier fee test"),
+        &requester,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    client.process_refund(&operator, &refund_id);
+
+    let token_client = token::TokenClient::new(&env, &usdc_token);
+    let fee = refund_amount * REFUND_FEE_BPS_FULL / 10_000; // 0.8%
+    assert_eq!(fee, 80i128);
+    assert_eq!(token_client.balance(&requester), refund_amount - fee);
+    assert_eq!(client.get_treasury_balance(), fee);
+    assert_eq!(last_refund_completed_fee_bps(&env), REFUND_FEE_BPS_FULL);
+}
+
+#[test]
+fn test_process_refund_applies_business_tier_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client, usdc_token, merchant) =
+        setup_refund_manager_with_tier(&env, &crate::merchant_registry::KycTier::Business);
+
+    let payment_id = String::from_str(&env, "payment_tier_business");
+    let refund_amount = 10_000i128;
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant, &refund_amount, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(
+        &payment_id,
+        &refund_amount,
+        &String::from_str(&env, "business tier fee test"),
+        &requester,
+    );
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    client.process_refund(&operator, &refund_id);
+
+    let token_client = token::TokenClient::new(&env, &usdc_token);
+    let fee = refund_amount * REFUND_FEE_BPS_BUSINESS / 10_000; // 0.5%
+    assert_eq!(fee, 50i128);
+    assert_eq!(token_client.balance(&requester), refund_amount - fee);
+    assert_eq!(client.get_treasury_balance(), fee);
+    assert_eq!(last_refund_completed_fee_bps(&env), REFUND_FEE_BPS_BUSINESS);
+}
+
 #[test]
 fn test_cancel_refund_by_requester() {
     let env = Env::default();
@@ -3869,7 +4029,10 @@ fn test_verify_payment_rejects_stale_fx_rate() {
         &1000i128,
         &None::<u64>,
     );
-    assert_eq!(result, Err(Ok(Error::StaleOracleRate)));
+    // Issue #1033: the PaymentProcessor's own staleness guard now reports
+    // `OracleStale` (previously `StaleOracleRate`), and no longer requires a
+    // merchant registry to be configured for the check to run.
+    assert_eq!(result, Err(Ok(Error::OracleStale)));
 }
 
 #[test]
@@ -3973,6 +4136,166 @@ fn test_verify_payment_no_fx_oracle_config_skips_check() {
     let payment = client.get_payment(&payment_id);
     assert_eq!(payment.fx_rate, None);
     assert_eq!(payment.fx_rate_at, None);
+}
+
+// -----------------------------------------------------------------------------
+// Issue #1033: oracle staleness is enforced even without a merchant registry,
+// and the admin-configurable threshold is independent of the oracle's own cap.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_verify_payment_rejects_stale_fx_rate_without_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+
+    let (admin, client) = setup_payment_processor(&env);
+    let oracle_contract = env.register(crate::FXOracle, ());
+    let oracle_client = crate::FXOracleClient::new(&env, &oracle_contract);
+    oracle_client.oracle_initialize(&admin, &86400);
+
+    // Note: no merchant registry is configured here at all. Prior to Issue
+    // #1033 this meant the staleness check was skipped entirely for both
+    // `set_fx_oracle` and `set_fx_oracle_address` setups that enforced via
+    // the registry-gated block; the per-contract guard now runs regardless.
+    client.set_fx_oracle_address(&admin, &oracle_contract);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let oracle_role = Symbol::new(&env, "ORACLE");
+    let oracle = Address::generate(&env);
+    oracle_client.oracle_grant_role(&admin, &oracle_role, &oracle);
+    let pair = Symbol::new(&env, "USDC");
+    oracle_client.set_rate(&oracle, &pair, &1500_0000000i128, &7);
+
+    // Advance past the oracle's own 24h cap so `try_get_rate` itself reports
+    // `RateStale` — the fix maps that straight to `Error::OracleStale`.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 25 * 3600);
+
+    let payment_id = String::from_str(&env, "fx_stale_no_registry");
+    let args = create_payment_args(&env, &payment_id, &merchant, 1000i128);
+    client.create_payment(&args);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &operator);
+    let tx_hash = BytesN::from_array(&env, &[0u8; 32]);
+    let payer = Address::generate(&env);
+    let result = client.try_verify_payment(
+        &operator,
+        &payment_id,
+        &tx_hash,
+        &payer,
+        &1000i128,
+        &None::<u64>,
+    );
+    assert_eq!(result, Err(Ok(Error::OracleStale)));
+}
+
+#[test]
+fn test_verify_payment_rejects_rate_older_than_configured_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+
+    let (admin, client) = setup_payment_processor(&env);
+    let oracle_contract = env.register(crate::FXOracle, ());
+    let oracle_client = crate::FXOracleClient::new(&env, &oracle_contract);
+    // Oracle's own cap is the generous 24h default.
+    oracle_client.oracle_initialize(&admin, &86400);
+    client.set_fx_oracle_address(&admin, &oracle_contract);
+
+    // PaymentProcessor tightens its own guard to 60 seconds, well inside the
+    // oracle's own 24h cap.
+    client.set_oracle_staleness_threshold(&admin, &60u64);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let oracle_role = Symbol::new(&env, "ORACLE");
+    let oracle = Address::generate(&env);
+    oracle_client.oracle_grant_role(&admin, &oracle_role, &oracle);
+    let pair = Symbol::new(&env, "USDC");
+    oracle_client.set_rate(&oracle, &pair, &1500_0000000i128, &7);
+
+    // 61 seconds old: still fresh by the oracle's own 24h cap, but stale by
+    // the PaymentProcessor's own configured 60s threshold.
+    env.ledger().set_timestamp(env.ledger().timestamp() + 61);
+
+    let payment_id = String::from_str(&env, "fx_stale_own_threshold");
+    let args = create_payment_args(&env, &payment_id, &merchant, 1000i128);
+    client.create_payment(&args);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &operator);
+    let tx_hash = BytesN::from_array(&env, &[0u8; 32]);
+    let payer = Address::generate(&env);
+    let result = client.try_verify_payment(
+        &operator,
+        &payment_id,
+        &tx_hash,
+        &payer,
+        &1000i128,
+        &None::<u64>,
+    );
+    assert_eq!(result, Err(Ok(Error::OracleStale)));
+}
+
+// -----------------------------------------------------------------------------
+// Issue #1032: deposit_address reuse prevention.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_create_payment_rejects_deposit_address_reuse_while_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let shared_deposit_address = Address::generate(&env);
+
+    let payment_id_1 = String::from_str(&env, "dep_addr_first");
+    let mut args1 = create_payment_args(&env, &payment_id_1, &merchant, 1000i128);
+    args1.deposit_address = shared_deposit_address.clone();
+    client.create_payment(&args1);
+
+    // Second payment with the same deposit_address, while the first is still
+    // Pending, must be rejected.
+    let payment_id_2 = String::from_str(&env, "dep_addr_second");
+    let mut args2 = create_payment_args(&env, &payment_id_2, &merchant, 500i128);
+    args2.deposit_address = shared_deposit_address.clone();
+    let result = client.try_create_payment(&args2);
+    assert_eq!(result, Err(Ok(Error::DepositAddressInUse)));
+}
+
+#[test]
+fn test_create_payment_allows_deposit_address_reuse_after_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let shared_deposit_address = Address::generate(&env);
+
+    let payment_id_1 = String::from_str(&env, "dep_addr_expired");
+    let mut args1 = create_payment_args(&env, &payment_id_1, &merchant, 1000i128);
+    args1.deposit_address = shared_deposit_address.clone();
+    client.create_payment(&args1);
+
+    // Let the first payment's expiry pass.
+    env.ledger().with_mut(|ledger| ledger.timestamp += 3_601);
+
+    // A new payment reusing the same deposit_address is now accepted, since
+    // the first payment is no longer an active Pending payment.
+    let payment_id_2 = String::from_str(&env, "dep_addr_reused");
+    let mut args2 = create_payment_args(&env, &payment_id_2, &merchant, 500i128);
+    args2.deposit_address = shared_deposit_address.clone();
+    client.create_payment(&args2);
+
+    assert_eq!(client.get_payment(&payment_id_2).deposit_address, shared_deposit_address);
 }
 
 #[test]
@@ -4157,6 +4480,115 @@ fn test_version_after_init() {
 
     let get_ver: soroban_sdk::String = client.get_version();
     assert_eq!(get_ver, String::from_str(&env, "1.0.0"));
+}
+
+/// Issue #1205: get_contract_info aggregates version, pause state, the
+/// configured settlement token, admin, and multi-sig config into one
+/// read-only view, and reflects config changes made after initialization.
+#[test]
+fn test_get_contract_info_reflects_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    // Freshly initialized: no token configured yet, not paused, default
+    // (unconfigured) multi-sig settings.
+    let info = client.get_contract_info();
+    assert_eq!(info.version, String::from_str(&env, "1.0.0"));
+    assert_eq!(info.admin, Some(admin.clone()));
+    assert!(!info.pause_info.global.paused);
+    assert!(!info.pause_info.creation.paused);
+    assert_eq!(info.token, None);
+    assert_eq!(info.multisig_threshold, 1);
+    assert_eq!(info.multisig_signers.len(), 0);
+
+    // Configure the settlement token; get_contract_info should reflect it.
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    client.set_usdc_token(&admin, &token);
+
+    let info2 = client.get_contract_info();
+    assert_eq!(info2.token, Some(token));
+
+    // Pausing globally should be reflected too.
+    client.set_global_pause(&admin, &true, &String::from_str(&env, "maintenance"));
+    let info3 = client.get_contract_info();
+    assert!(info3.pause_info.global.paused);
+}
+
+#[test]
+fn test_payment_processor_set_version_validates_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    assert_eq!(client.version(), String::from_str(&env, "1.0.0"));
+    let new_version = String::from_str(&env, "2.3.1");
+    client.set_version(&admin, &new_version);
+    assert_eq!(client.version(), new_version);
+    let version_event_emitted = env.events().all().events().iter().any(|event| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = event.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let topic0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let topic1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (topic0, topic1),
+            (Ok(namespace), Ok(name))
+                if namespace == Symbol::new(&env, "CONTRACT")
+                    && name == Symbol::new(&env, "VERSION_UPDATED")
+        )
+    });
+    assert!(version_event_emitted);
+
+    assert_eq!(
+        client.try_set_version(&admin, &String::from_str(&env, "")),
+        Err(Ok(Error::InvalidVersion))
+    );
+    assert_eq!(
+        client.try_set_version(
+            &admin,
+            &String::from_str(&env, "123456789012345678901234567890123")
+        ),
+        Err(Ok(Error::InvalidVersion))
+    );
+    assert_eq!(
+        client.try_set_version(&admin, &String::from_str(&env, "2.3")),
+        Err(Ok(Error::InvalidVersion))
+    );
+    assert_eq!(client.version(), new_version);
+
+    let non_admin = Address::generate(&env);
+    assert_eq!(
+        client.try_set_version(&non_admin, &String::from_str(&env, "3.0.0")),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_refund_manager_set_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_refund_manager(&env);
+
+    assert_eq!(client.version(), String::from_str(&env, "1.0.0"));
+    let new_version = String::from_str(&env, "1.4.0");
+    client.set_version(&admin, &new_version);
+    assert_eq!(client.version(), new_version);
+    assert_eq!(
+        client.try_set_version(&admin, &String::from_str(&env, "1..0")),
+        Err(Ok(Error::InvalidVersion))
+    );
+    assert_eq!(client.version(), new_version);
+
+    let non_admin = Address::generate(&env);
+    assert_eq!(
+        client.try_set_version(&non_admin, &String::from_str(&env, "2.0.0")),
+        Err(Ok(Error::Unauthorized))
+    );
 }
 
 // =============================================================================
@@ -4963,6 +5395,60 @@ fn test_idempotency_still_blocks_during_active_window() {
     args2.payment_id = String::from_str(&env, "pay_active_other");
     let result = client.try_create_payment(&args2);
     assert_eq!(result, Err(Ok(Error::DuplicateIdempotencyKey)));
+}
+
+/// Issue #1184: the client_token -> payment_id key is payment-scoped, has a
+/// TTL, blocks active-window reuse with a different id, and is freed on cancel
+/// so the token can be reused.
+#[test]
+fn test_idempotency_ttl_and_token_reuse_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token = String::from_str(&env, "tok_ttl_lifecycle");
+    let payment_id = String::from_str(&env, "pay_ttl_lifecycle");
+    let mut args = create_payment_args(&env, &payment_id, &merchant_id, 1000);
+    args.client_token = Some(token.clone());
+    client.create_payment(&args);
+
+    let key = DataKey::IdempotencyKey(crate::data_keys::idempotency_key_to_key(&env, &token));
+    let ttl_at_creation = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&key).unwrap()
+    });
+    assert!(ttl_at_creation > 0, "idempotency key must carry a TTL");
+
+    // Active-window retry with the same token AND payment_id returns the same
+    // payment and must not shorten the key's lifetime.
+    let retry = client.create_payment(&args);
+    assert_eq!(retry.payment_id, payment_id);
+    let ttl_after_retry = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&key).unwrap()
+    });
+    assert!(ttl_after_retry >= ttl_at_creation);
+
+    // A different payment_id with the same live token is blocked.
+    let mut conflicting = args.clone();
+    conflicting.payment_id = String::from_str(&env, "pay_ttl_conflict");
+    assert_eq!(
+        client.try_create_payment(&conflicting),
+        Err(Ok(Error::DuplicateIdempotencyKey))
+    );
+
+    // Cancelling releases the reverse map and the forward key.
+    client.cancel_payment(&merchant_id, &payment_id);
+    let stored = env.as_contract(&client.address, || {
+        env.storage().persistent().get::<DataKey, String>(&key)
+    });
+    assert!(stored.is_none(), "cancelled payment must free its client_token");
+
+    let reused_id = String::from_str(&env, "pay_ttl_reused");
+    let mut reused_args = create_payment_args(&env, &reused_id, &merchant_id, 1000);
+    reused_args.client_token = Some(token.clone());
+    assert_eq!(client.create_payment(&reused_args).payment_id, reused_id);
 }
 
 // =============================================================================
@@ -6730,6 +7216,70 @@ fn test_batch_expire_payments_confirmed_payment_not_expired() {
 
     let count = client.batch_expire_payments(&batch_ids).unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn test_batch_expire_payments_exactly_50_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+    let mut payment_ids = vec![&env];
+    for i in 0..50 {
+        let id_buf = [b'a', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+    assert_eq!(payment_ids.len(), 50);
+
+    env.ledger().set_timestamp(initial_ts + 2000);
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
+
+    for id in payment_ids.iter() {
+        assert_eq!(
+            client.get_payment(&id).status,
+            PaymentStatus::Expired,
+            "all 50 payments should be expired"
+        );
+    }
+}
+
+#[test]
+fn test_batch_expire_payments_51_is_capped_at_50() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let initial_ts = env.ledger().timestamp();
+    let mut payment_ids = vec![&env];
+    for i in 0..51 {
+        let id_buf = [b'b', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let payment_id = String::from_str(&env, core::str::from_utf8(&id_buf).unwrap());
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 100_000_000i128);
+        args.expires_at = Some(initial_ts + 1000);
+        client.create_payment(&args);
+        payment_ids.push_back(payment_id);
+    }
+
+    env.ledger().set_timestamp(initial_ts + 2000);
+    // The implementation trims batches to the 50-item cap (no error).
+    assert_eq!(client.batch_expire_payments(&payment_ids), 50);
+
+    let expired = payment_ids
+        .iter()
+        .filter(|id| client.get_payment(&id).status == PaymentStatus::Expired)
+        .count();
+    assert_eq!(expired, 50, "exactly 50 payments must be expired per call");
 }
 
 #[test]

@@ -1109,6 +1109,29 @@ Contract IDs written to .env.testnet
 
 ---
 
+## Indexer: Bulk FX Rates (`GET /v1/fx/rates`)
+
+Returns every FX pair currently held in the indexer's rate cache, so clients
+need one call instead of one `/v1/fx/convert` call per currency. Requires an
+API key and shares the 60 req/min limit, counted per key.
+
+```bash
+curl -H "Authorization: Bearer $INDEXER_API_KEY" http://localhost:3000/v1/fx/rates
+```
+
+```json
+{
+  "rates": [
+    { "from": "USDC", "to": "NGN", "rate": "1620.5", "updated_at": "2026-10-15T20:00:00.000Z", "stale": false }
+  ],
+  "staleness_threshold_secs": 300
+}
+```
+
+A pair is `"stale": true` once it is older than `FX_STALENESS_SECS` (default 300).
+
+---
+
 ## Additional Resources
 
 - [Stellar CLI Documentation](https://github.com/stellar/rs-soroban-cli)

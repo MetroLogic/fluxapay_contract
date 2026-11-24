@@ -56,11 +56,36 @@ export class WebhookStore {
     };
   }
 
+  async listEnabledEndpointsForEvent(
+    merchantId: string,
+    eventType: string,
+  ): Promise<WebhookEndpoint[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, merchant_id, url, signing_secret, event_types, enabled,
+              COALESCE(signing_algorithm, 'hmac_sha256') AS signing_algorithm
+         FROM webhook_endpoints
+        WHERE merchant_id = $1
+          AND enabled = TRUE
+          AND (cardinality(event_types) = 0 OR $2 = ANY(event_types))`,
+      [merchantId, eventType],
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      merchantId: row.merchant_id,
+      url: row.url,
+      signingSecret: row.signing_secret,
+      eventTypes: row.event_types ?? [],
+      enabled: row.enabled,
+      signingAlgorithm: (row.signing_algorithm as "hmac_sha256" | "ed25519") ?? "hmac_sha256",
+    }));
+  }
+
   async recordAttempt(attempt: DeliveryAttempt): Promise<string> {
     const { rows } = await this.pool.query(
       `INSERT INTO webhook_delivery_log
          (endpoint_id, event_type, payment_id, attempt_number,
-          http_status, response_body, duration_ms, success, livemode, event_id)
+          http_status, response_body, duration_ms, success, livemode)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
@@ -73,7 +98,6 @@ export class WebhookStore {
         attempt.durationMs,
         attempt.success,
         attempt.livemode,
-        buildEventId(attempt.paymentId, attempt.eventType),
       ],
     );
     return rows[0].id;

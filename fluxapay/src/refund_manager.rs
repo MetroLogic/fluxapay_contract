@@ -11,6 +11,17 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+/// Issue #1024: Shared refund-fee helper for `process_refund` /
+/// `process_refund_direct`. Previously each call site computed
+/// `refund_amount * fee_bps / 10_000` inline with the plain (non-saturating)
+/// `*` operator. `fee_bps` is always admin-bounded to 0..=1000 via
+/// `set_refund_fee_bps`, but `refund_amount` is an unconstrained `i128` read
+/// back from storage, so an implausibly large stored amount could overflow
+/// the multiplication and panic. This saturates instead.
+pub fn compute_refund_fee(refund_amount: i128, fee_bps: i128) -> i128 {
+    refund_amount.saturating_mul(fee_bps) / BPS_DENOMINATOR
+}
+
 #[contract]
 pub struct RefundManager;
 
@@ -20,8 +31,46 @@ pub struct RefundManager;
 )]
 #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl RefundManager {
-    pub fn version() -> u32 {
-        1
+    pub fn version(env: Env) -> String {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION))
+    }
+
+    /// Admin-only: update the stored contract version after a WASM upgrade.
+    pub fn set_version(env: Env, admin: Address, version: String) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if !utils::is_valid_contract_version(&version) {
+            return Err(Error::InvalidVersion);
+        }
+
+        let old_version = Self::version(env.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &version);
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &version,
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ContractVersion, threshold, LONG_LIVE_TTL);
+        env.storage()
+            .instance()
+            .extend_ttl(threshold, LONG_LIVE_TTL);
+        env.events().publish(
+            (
+                Symbol::new(&env, "CONTRACT"),
+                Symbol::new(&env, "VERSION_UPDATED"),
+            ),
+            (old_version, version),
+        );
+        Ok(())
     }
     fn require_not_paused(env: &Env) -> Result<(), Error> {
         let pause_state: PauseState =
@@ -59,6 +108,18 @@ impl RefundManager {
             .persistent()
             .get(&DataKey::DisputeBondAmount)
             .unwrap_or(DISPUTE_BOND_AMOUNT)
+    }
+
+    /// Issue #1024 / #820: Proportional minimum dispute bond for a disputed
+    /// payment of `disputed_amount` — `max(ABSOLUTE_MIN_BOND, disputed_amount
+    /// * MIN_BOND_BPS / BPS_DENOMINATOR)`. These constants (issue #820) were
+    /// previously declared but never read anywhere; this is the first
+    /// consumer. Saturates and clamps rather than panicking for extreme or
+    /// negative `disputed_amount` values — a non-positive amount simply
+    /// yields the absolute floor.
+    pub fn min_bond_for(_env: Env, disputed_amount: i128) -> i128 {
+        let proportional = disputed_amount.max(0).saturating_mul(MIN_BOND_BPS) / BPS_DENOMINATOR;
+        proportional.max(ABSOLUTE_MIN_BOND)
     }
 
     /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
@@ -142,6 +203,10 @@ impl RefundManager {
     ) -> Result<(), Error> {
         Self::validate_admin_and_token(&env, admin.clone(), usdc_token_address.clone())?;
         AccessControl::initialize(&env, admin);
+        env.storage().persistent().set(
+            &DataKey::ContractVersion,
+            &String::from_str(&env, INITIAL_CONTRACT_VERSION),
+        );
         env.storage()
             .persistent()
             .set(&DataKey::UsdcToken, &usdc_token_address);
@@ -157,7 +222,7 @@ impl RefundManager {
         );
         env.storage().instance().set(
             &DataKey::ContractMetadata(Symbol::new(&env, "version")),
-            &String::from_str(&env, "1"),
+            &String::from_str(&env, INITIAL_CONTRACT_VERSION),
         );
         env.storage().instance().set(
             &DataKey::ContractMetadata(Symbol::new(&env, "deployed_at")),
@@ -916,23 +981,31 @@ impl RefundManager {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
-        // Issue #174: Check cooldown period after payment confirmation
+        // Issue #174 / #1207: Enforce a cooldown after payment confirmation, and a
+        // configurable cooldown between consecutive refunds on the same payment.
+        // The baseline is the most recent non-rejected/non-cancelled refund's
+        // `created_at` when one exists, otherwise the payment's `confirmed_at`.
         let confirmed_at = payment.confirmed_at.ok_or(Error::PaymentAlreadyProcessed)?;
         let now = env.ledger().timestamp();
         let cooldown_secs = Self::get_refund_cooldown_secs(env);
-        if now < confirmed_at + cooldown_secs {
-            return Err(Error::RefundCooldownNotElapsed);
-        }
 
-        // Sum existing refund amounts for this payment
+        // Sum existing refund amounts for this payment and track the most recent
+        // qualifying refund's timestamp for the cooldown baseline.
         let existing_refunds = Self::get_payment_refunds_internal(env, &payment_id);
         let mut total_refunded: i128 = 0;
+        let mut last_refund_at: Option<u64> = None;
         for id in existing_refunds.iter() {
             if let Ok(r) = Self::get_refund_internal(env, &id) {
                 if r.status != RefundStatus::Rejected && r.status != RefundStatus::Cancelled {
                     total_refunded += r.amount;
+                    last_refund_at = Some(last_refund_at.map_or(r.created_at, |t| t.max(r.created_at)));
                 }
             }
+        }
+
+        let cooldown_baseline = last_refund_at.unwrap_or(confirmed_at);
+        if now < cooldown_baseline.saturating_add(cooldown_secs) {
+            return Err(Error::RefundCooldownNotElapsed);
         }
 
         if total_refunded + refund_amount > payment.amount {
@@ -1069,6 +1142,117 @@ impl RefundManager {
         page
     }
 
+    /// Issue #1013: amount (in the token's smallest unit) below which
+    /// `withdraw_treasury` may still be executed by a single admin without
+    /// multisig approval, when no explicit threshold has been configured via
+    /// `set_treasury_single_admin_threshold`. Assumes a 7-decimal USDC-style
+    /// token: 1000 * 10^7.
+    pub const DEFAULT_TREASURY_SINGLE_ADMIN_THRESHOLD: i128 = 10_000_000_000;
+
+    /// Admin-only: configure the amount below which `withdraw_treasury` may
+    /// bypass multisig governance. Withdrawals above this amount must go
+    /// through `propose_treasury_withdrawal` / `approve_treasury_withdrawal`
+    /// / `execute_treasury_withdrawal` instead.
+    pub fn set_treasury_single_admin_threshold(
+        env: Env,
+        admin: Address,
+        threshold: i128,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if threshold < 0 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasurySingleAdminThreshold, &threshold);
+        Ok(())
+    }
+
+    /// The current single-admin withdrawal threshold, falling back to
+    /// `DEFAULT_TREASURY_SINGLE_ADMIN_THRESHOLD` when unset.
+    pub fn get_treasury_single_admin_threshold(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TreasurySingleAdminThreshold)
+            .unwrap_or(Self::DEFAULT_TREASURY_SINGLE_ADMIN_THRESHOLD)
+    }
+
+    /// Admin-only: add a new authorized treasury multisig signer.
+    pub fn add_treasury_signer(env: Env, admin: Address, signer: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        let mut config: TreasuryMultisigConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryMultisigConfig)
+            .ok_or(Error::TreasuryMultisigNotConfigured)?;
+
+        if config.admin_signers.iter().any(|s| s == signer) {
+            return Ok(()); // Already a signer; idempotent no-op.
+        }
+        if config.admin_signers.len() >= MAX_TREASURY_SIGNERS {
+            return Err(Error::InvalidTreasuryThreshold);
+        }
+        config.admin_signers.push_back(signer.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryMultisigConfig, &config);
+
+        env.events().publish(
+            (Symbol::new(&env, "TREASURY"), Symbol::new(&env, "SIGNER_ADDED")),
+            signer,
+        );
+        Ok(())
+    }
+
+    /// Admin-only: remove an authorized treasury multisig signer. Rejected if
+    /// removing the signer would drop the signer count below
+    /// `required_approvals`, which would make the quorum unreachable.
+    pub fn remove_treasury_signer(env: Env, admin: Address, signer: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        let mut config: TreasuryMultisigConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryMultisigConfig)
+            .ok_or(Error::TreasuryMultisigNotConfigured)?;
+
+        if !config.admin_signers.iter().any(|s| s == signer) {
+            return Err(Error::NotAuthorizedTreasurySigner);
+        }
+        if config.admin_signers.len().saturating_sub(1) < config.required_approvals {
+            return Err(Error::InvalidTreasuryThreshold);
+        }
+
+        let mut remaining: Vec<Address> = vec![&env];
+        for s in config.admin_signers.iter() {
+            if s != signer {
+                remaining.push_back(s);
+            }
+        }
+        config.admin_signers = remaining;
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryMultisigConfig, &config);
+
+        env.events().publish(
+            (Symbol::new(&env, "TREASURY"), Symbol::new(&env, "SIGNER_REMOVED")),
+            signer,
+        );
+        Ok(())
+    }
+
+    /// Admin withdrawal of accumulated treasury fees, bypassing multisig
+    /// governance. Issue #1013: only amounts at or below the configured
+    /// single-admin threshold may use this path — larger withdrawals must go
+    /// through `propose_treasury_withdrawal` and collect M-of-N approvals.
     pub fn withdraw_treasury(
         env: Env,
         admin: Address,
@@ -1083,13 +1267,16 @@ impl RefundManager {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
+        if amount > Self::get_treasury_single_admin_threshold(env.clone()) {
+            return Err(Error::TreasuryExceedsSingleAdminThreshold);
+        }
 
         let usdc_token_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::UsdcToken)
             .ok_or(Error::Unauthorized)?;
-        
+
         let treasury_balance = Self::get_token_treasury_balance(env.clone(), usdc_token_address.clone());
         if amount > treasury_balance {
             return Err(Error::InsufficientTreasuryBalance);
@@ -1662,7 +1849,7 @@ impl RefundManager {
             default_fee_bps
         };
 
-        let fee = refund.amount * fee_bps / 10_000;
+        let fee = compute_refund_fee(refund.amount, fee_bps);
         let net_amount = refund.amount - fee;
 
         // Issue #173: Multi-token swap refund router
@@ -2032,7 +2219,7 @@ impl RefundManager {
         let token_client = token::TokenClient::new(&env, &usdc_token_address);
 
         let default_fee_bps = Self::get_refund_fee_bps_internal(&env);
-        let fee = refund_amount * default_fee_bps / 10_000;
+        let fee = compute_refund_fee(refund_amount, default_fee_bps);
         let net_amount = refund_amount - fee;
 
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
@@ -2110,6 +2297,69 @@ impl RefundManager {
             }
         }
         Ok(refunds)
+    }
+
+    /// Issue #1201: Returns paginated `Refund` records for every payment the
+    /// merchant owns, for dashboard reconciliation — the refund-side
+    /// counterpart to `PaymentProcessor::get_merchant_payments_full`.
+    ///
+    /// Refunds are indexed per-payment (`DataKey::PaymentRefunds`), not
+    /// per-merchant, so this walks the merchant's own payment-id index
+    /// (`DataKey::MerchantPayments`, the same one `get_merchant_payments_full`
+    /// pages over) and collects every refund attached to those payments.
+    ///
+    /// `limit` is capped at 50 to avoid ledger compute limits. Returns an
+    /// empty vec (not an error) when `offset` is at or beyond the total
+    /// matching-refund count. When `status` is provided, only refunds in that
+    /// `RefundStatus` are included (and counted for pagination purposes).
+    pub fn get_merchant_refunds(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+        status: Option<RefundStatus>,
+    ) -> Vec<Refund> {
+        let capped_limit = core::cmp::min(limit, 50);
+        if capped_limit == 0 {
+            return vec![&env];
+        }
+
+        let payment_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPayments(merchant_id))
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut matching: Vec<Refund> = vec![&env];
+        for payment_id in payment_ids.iter() {
+            let refund_ids = Self::get_payment_refunds_internal(&env, &payment_id);
+            for refund_id in refund_ids.iter() {
+                if let Ok(refund) = Self::get_refund_internal(&env, &refund_id) {
+                    let status_match = match &status {
+                        Some(want) => refund.status == *want,
+                        None => true,
+                    };
+                    if status_match {
+                        matching.push_back(refund);
+                    }
+                }
+            }
+        }
+
+        if offset >= matching.len() {
+            return vec![&env];
+        }
+
+        let end = core::cmp::min(matching.len(), offset.saturating_add(capped_limit));
+        let mut result: Vec<Refund> = vec![&env];
+        let mut i = offset;
+        while i < end {
+            if let Some(refund) = matching.get(i) {
+                result.push_back(refund.clone());
+            }
+            i += 1;
+        }
+        result
     }
 
     fn get_next_refund_id(env: &Env) -> u64 {
@@ -2363,7 +2613,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
 
         let mut payment_disputes = Self::get_payment_disputes_internal(env, &payment_id);
         payment_disputes.push_back(dispute_id.clone());
@@ -2496,7 +2746,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Issue #27: emit DISPUTE_REVIEWED event
@@ -2698,7 +2948,7 @@ impl RefundManager {
             dispute.escalated = true;
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
             Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
             env.events().publish(
                 (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "ESCALATED")),
@@ -2711,7 +2961,7 @@ impl RefundManager {
         } else {
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
             Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
         }
 
@@ -2760,7 +3010,7 @@ impl RefundManager {
         dispute.payout_splits = splits;
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         Ok(())
@@ -2792,7 +3042,7 @@ impl RefundManager {
         dispute.escalated = true;
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &*dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &*dispute);
         Self::bump_dispute_ttl(env, dispute_id, &dispute.status);
         env.events().publish(
             (Symbol::new(env, "DISPUTE"), Symbol::new(env, "ESCALATED")),
@@ -2891,7 +3141,7 @@ impl RefundManager {
 
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
             Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
             env.events().publish(
@@ -2967,7 +3217,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
         Self::release_open_dispute_slot(&env, &dispute.disputer);
 
@@ -3047,7 +3297,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
         // Store resolution note for record-keeping
@@ -3239,7 +3489,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
         Self::release_open_dispute_slot(&env, &dispute.disputer);
 
@@ -3579,7 +3829,7 @@ impl RefundManager {
             d.resolved_at = Some(env.ledger().timestamp());
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &d);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &d);
             Self::bump_dispute_ttl(&env, &dispute_id, &d.status);
             Self::release_open_dispute_slot(&env, &d.disputer);
         } else {
@@ -3588,7 +3838,7 @@ impl RefundManager {
             d.resolved_at = Some(env.ledger().timestamp());
             env.storage()
                 .persistent()
-                .set(&DataKey::Dispute(dispute_id.clone()), &d);
+                .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &d);
             Self::bump_dispute_ttl(&env, &dispute_id, &d.status);
             Self::release_open_dispute_slot(&env, &d.disputer);
         }
@@ -3747,7 +3997,7 @@ impl RefundManager {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+            .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
         Self::bump_dispute_ttl(env, dispute_id, &dispute.status);
 
         env.events().publish(
@@ -3914,7 +4164,7 @@ impl RefundManager {
     fn get_dispute_internal(env: &Env, dispute_id: &String) -> Result<Dispute, Error> {
         env.storage()
             .persistent()
-            .get(&DataKey::Dispute(dispute_id.clone()))
+            .get(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)))
             .ok_or(Error::DisputeNotFound)
     }
 
@@ -4116,7 +4366,7 @@ impl RefundManager {
         };
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -4167,7 +4417,7 @@ impl RefundManager {
         if env
             .storage()
             .persistent()
-            .has(&DataKey::Subscription(subscription_id.clone()))
+            .has(&DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)))
         {
             return Err(Error::PaymentAlreadyExists);
         }
@@ -4214,7 +4464,7 @@ impl RefundManager {
         };
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -4334,7 +4584,7 @@ impl RefundManager {
 
         subscription.status = SubscriptionStatus::Paused;
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -4371,7 +4621,7 @@ impl RefundManager {
         subscription.resume_at = Some(resume_timestamp);
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -4447,7 +4697,7 @@ impl RefundManager {
         // Only charge Active subscriptions.
         if subscription.status != SubscriptionStatus::Active {
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
             return Ok(subscription.status);
@@ -4457,7 +4707,7 @@ impl RefundManager {
         if let Some(trial_ends) = subscription.trial_ends_at {
             if now < trial_ends {
                 env.storage().persistent().set(
-                    &DataKey::Subscription(subscription_id.clone()),
+                    &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                     &subscription,
                 );
                 return Err(Error::TrialActive);
@@ -4475,7 +4725,7 @@ impl RefundManager {
         if now < due {
             // Not yet due — nothing to do.
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
             return Ok(subscription.status);
@@ -4569,7 +4819,7 @@ impl RefundManager {
             }
 
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
 
@@ -4610,7 +4860,7 @@ impl RefundManager {
                 Self::remove_active_subscription(&env, &subscription_id);
 
                 env.storage().persistent().set(
-                    &DataKey::Subscription(subscription_id.clone()),
+                    &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                     &subscription,
                 );
 
@@ -4634,7 +4884,7 @@ impl RefundManager {
                 subscription.next_retry_at = Some(next_retry);
 
                 env.storage().persistent().set(
-                    &DataKey::Subscription(subscription_id.clone()),
+                    &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                     &subscription,
                 );
 
@@ -4714,7 +4964,7 @@ impl RefundManager {
             .timestamp()
             .saturating_add(subscription.interval_secs);
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -4782,7 +5032,7 @@ impl RefundManager {
 
         subscription.status = SubscriptionStatus::Cancelled;
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -4943,7 +5193,7 @@ impl RefundManager {
         subscription.next_payment_at = now.saturating_add(subscription.interval_secs);
 
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -5009,7 +5259,7 @@ impl RefundManager {
         let metered_amount = units_used.saturating_mul(unit_price);
         subscription.amount = metered_amount;
         env.storage().persistent().set(
-            &DataKey::Subscription(subscription_id.clone()),
+            &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
             &subscription,
         );
 
@@ -5178,7 +5428,7 @@ impl RefundManager {
             let mut subscription = match env
                 .storage()
                 .persistent()
-                .get::<DataKey, Subscription>(&DataKey::Subscription(subscription_id.clone()))
+                .get::<DataKey, Subscription>(&DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)))
             {
                 Some(s) => s,
                 None => continue,
@@ -5277,7 +5527,7 @@ impl RefundManager {
             }
 
             env.storage().persistent().set(
-                &DataKey::Subscription(subscription_id.clone()),
+                &DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)),
                 &subscription,
             );
 
@@ -5316,7 +5566,7 @@ impl RefundManager {
     ) -> Result<Subscription, Error> {
         env.storage()
             .persistent()
-            .get(&DataKey::Subscription(subscription_id.clone()))
+            .get(&DataKey::Subscription(subscription_id_to_key(&env, &subscription_id)))
             .ok_or(Error::PaymentNotFound)
     }
 
@@ -5349,7 +5599,7 @@ impl RefundManager {
     }
 
     fn bump_dispute_ttl(env: &Env, dispute_id: &String, status: &DisputeStatus) {
-        let key = DataKey::Dispute(dispute_id.clone());
+        let key = DataKey::Dispute(dispute_id_to_key(&env, &dispute_id));
         Self::bump_ttl(env, &key, Self::dispute_ttl(status));
     }
 
@@ -5410,8 +5660,8 @@ impl RefundManager {
     }
 
     /// Issue #846: Execute a pending upgrade after the timelock.
-    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), Error> {
-        crate::payment_processor::PaymentProcessor::execute_upgrade(env, admin)
+    pub fn execute_upgrade(env: Env, admin: Address, new_version: String) -> Result<(), Error> {
+        crate::payment_processor::PaymentProcessor::execute_upgrade(env, admin, new_version)
     }
 
     /// Issue #846: Cancel a pending upgrade proposal.

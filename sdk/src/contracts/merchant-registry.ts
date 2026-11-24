@@ -163,6 +163,22 @@ export class MerchantRegistryClient {
   }
 
   /**
+   * Get the merchant's accumulated pending settlement balance (the amount
+   * collected from confirmed payments that has not yet been swept to the
+   * merchant's payout address).
+   *
+   * Used by the `useMerchantBalance` React hook for dashboard balance
+   * widgets; returns `0n` for a merchant with nothing pending.
+   */
+  async getPendingSettlement(merchantId: string): Promise<bigint> {
+    return withMappedContractError(() =>
+      this.getContract().get_pending_settlement({
+        merchant_id: merchantId,
+      }),
+    );
+  }
+
+  /**
    * Update merchant details.
    */
   async updateMerchant(params: UpdateMerchantParams): Promise<void> {

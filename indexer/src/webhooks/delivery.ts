@@ -150,14 +150,16 @@ export function buildEnvelope(
   data: Record<string, unknown>,
   livemode: boolean,
   now: () => number = Date.now,
+  options: { eventId?: string; replayed?: boolean } = {},
 ): WebhookEnvelope {
   return {
     id: `whd_${randomUUID()}`,
-    event_id: `evt_${randomUUID()}`,
+    event_id: options.eventId ?? `evt_${randomUUID()}`,
     type,
     createdAt: new Date(now()).toISOString(),
     livemode,
     data,
+    ...(options.replayed ? { replayed: true } : {}),
   };
 }
 

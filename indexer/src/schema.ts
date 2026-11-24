@@ -15,6 +15,7 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -47,6 +48,10 @@ export const payments = pgTable(
     amount: bigint("amount", { mode: "bigint" }).notNull(),
     currency: varchar("currency", { length: 50 }),
     status: varchar("status", { length: 50 }),
+    // Fee charged on the payment (stroops). Refund records do not carry a
+    // separate fee, so refund views report the fee of the source payment.
+    feeAmount: bigint("fee_amount", { mode: "bigint" }),
+    paymentLinkId: varchar("payment_link_id", { length: 255 }),
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at").defaultNow(),
     // Issue #840: reconciliation export columns
@@ -55,11 +60,40 @@ export const payments = pgTable(
     settledAt: timestamp("settled_at"),
     customerRef: varchar("customer_ref", { length: 255 }),
     tags: text("tags"),
+    // Issue #1035: sub-account ID extracted from the payer's M-address, for
+    // reconciliation and `GET /v1/transactions?payer_muxed_id=` filtering.
+    payerMuxedId: bigint("payer_muxed_id", { mode: "bigint" }),
   },
   (t) => ({
     paymentIdIdx: index("idx_payment_id").on(t.paymentId),
     merchantIdIdx: index("idx_merchant_id").on(t.merchantId),
     statusIdx: index("idx_status").on(t.status),
+    paymentLinkIdIdx: index("idx_payments_payment_link_id").on(t.paymentLinkId),
+    payerMuxedIdIdx: index("idx_payments_payer_muxed_id").on(t.payerMuxedId),
+  }),
+);
+
+export const paymentLinks = pgTable(
+  "payment_links",
+  {
+    linkId: varchar("link_id", { length: 255 }).primaryKey(),
+    merchantId: varchar("merchant_id", { length: 255 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    merchantCreatedIdx: index("idx_payment_links_merchant").on(t.merchantId, t.createdAt),
+  }),
+);
+
+export const paymentLinkViews = pgTable(
+  "payment_link_views",
+  {
+    id: serial("id").primaryKey(),
+    linkId: varchar("link_id", { length: 255 }).notNull(),
+    viewedAt: timestamp("viewed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    linkViewedAtIdx: index("idx_payment_link_views_link_time").on(t.linkId, t.viewedAt),
   }),
 );
 
@@ -87,11 +121,13 @@ export const disputes = pgTable(
     disputeId: varchar("dispute_id", { length: 255 }).notNull().unique(),
     paymentId: varchar("payment_id", { length: 255 }).notNull(),
     amount: bigint("amount", { mode: "bigint" }).notNull(),
+    disputer: varchar("disputer", { length: 255 }),
     status: varchar("status", { length: 50 }),
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at").defaultNow(),
     escalated: boolean("escalated").default(false),
     resolvedAt: timestamp("resolved_at"),
+    evidence: jsonb("evidence").notNull().default([]),
   },
 );
 
@@ -120,17 +156,56 @@ export const streamWithdrawals = pgTable("stream_withdrawals", {
   recipient: varchar("recipient", { length: 255 }),
   amount: bigint("amount", { mode: "bigint" }),
   remainingDeposit: bigint("remaining_deposit", { mode: "bigint" }),
+  memo: varchar("memo", { length: 255 }),
   createdAt: timestamp("created_at"),
 });
 
 export const subscriptions = pgTable("subscriptions", {
   id: serial("id").primaryKey(),
   subscriptionId: varchar("subscription_id", { length: 255 }).notNull().unique(),
+  merchantId: varchar("merchant_id", { length: 255 }),
+  planId: varchar("plan_id", { length: 255 }),
   payer: varchar("payer", { length: 255 }),
   status: varchar("status", { length: 50 }),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
+
+export const subscriptionPlans = pgTable(
+  "subscription_plans",
+  {
+    planId: varchar("plan_id", { length: 255 }).primaryKey(),
+    merchantId: varchar("merchant_id", { length: 255 }).notNull(),
+    amount: bigint("amount", { mode: "bigint" }).notNull(),
+    intervalSecs: bigint("interval_secs", { mode: "bigint" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    merchantIdIdx: index("idx_subscription_plans_merchant").on(t.merchantId),
+  }),
+);
+
+export const subscriptionMetricEvents = pgTable(
+  "subscription_metric_events",
+  {
+    eventId: varchar("event_id", { length: 255 }).primaryKey(),
+    subscriptionId: varchar("subscription_id", { length: 255 }).notNull(),
+    merchantId: varchar("merchant_id", { length: 255 }).notNull(),
+    planId: varchar("plan_id", { length: 255 }),
+    eventType: varchar("event_type", { length: 50 }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    merchantTimeIdx: index("idx_subscription_metric_events_merchant_time").on(
+      t.merchantId,
+      t.occurredAt,
+    ),
+    subscriptionTimeIdx: index("idx_subscription_metric_events_subscription_time").on(
+      t.subscriptionId,
+      t.occurredAt,
+    ),
+  }),
+);
 
 export const invoices = pgTable("invoices", {
   id: serial("id").primaryKey(),
@@ -142,12 +217,20 @@ export const invoices = pgTable("invoices", {
   paidAt: timestamp("paid_at"),
   voidedAt: timestamp("voided_at"),
   linkedPaymentId: varchar("linked_payment_id", { length: 255 }),
+  subscriptionId: varchar("subscription_id", { length: 255 }),
+  cycleNumber: integer("cycle_number"),
+  invoiceNumber: varchar("invoice_number", { length: 64 }),
+  subscriber: varchar("subscriber", { length: 255 }),
+  subscriberEmail: varchar("subscriber_email", { length: 320 }),
+  billingPeriodStart: timestamp("billing_period_start"),
+  billingPeriodEnd: timestamp("billing_period_end"),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at").defaultNow(),
 },
 (t) => ({
   merchantIdIdx: index("idx_invoice_merchant_id").on(t.merchantId),
   statusIdx: index("idx_invoice_status").on(t.status),
+  merchantNumberIdx: uniqueIndex("idx_invoice_merchant_number").on(t.merchantId, t.invoiceNumber),
 }),
 );
 
@@ -158,6 +241,11 @@ export const disputeBonds = pgTable("dispute_bonds", {
   amount: bigint("amount", { mode: "bigint" }),
   status: varchar("status", { length: 50 }),
   createdAt: timestamp("created_at"),
+});
+
+export const merchantInvoiceSequences = pgTable("merchant_invoice_sequences", {
+  merchantId: varchar("merchant_id", { length: 255 }).primaryKey(),
+  nextNumber: integer("next_number").notNull().default(1),
 });
 
 export const deadLetterEvents = pgTable("dead_letter_events", {
@@ -181,7 +269,12 @@ export const settlements = pgTable("settlements", {
   id: serial("id").primaryKey(),
   paymentId: varchar("payment_id", { length: 255 }).notNull(),
   merchantId: varchar("merchant_id", { length: 255 }).notNull(),
+  anchorDomain: varchar("anchor_domain", { length: 255 }).notNull(),
+  anchorTxnId: varchar("anchor_txn_id", { length: 255 }),
+  sep24Endpoint: text("sep24_endpoint"),
+  interactiveUrl: text("interactive_url"),
   amount: bigint("amount", { mode: "bigint" }).notNull(),
+  currency: varchar("currency", { length: 50 }),
   status: varchar("status", { length: 50 }),
   createdAt: timestamp("created_at"),
   settledAt: timestamp("settled_at"),

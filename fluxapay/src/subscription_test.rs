@@ -282,6 +282,42 @@ fn test_get_payer_subscriptions_returns_all_for_payer() {
     );
 }
 
+/// Issue #1204: get_active_subscriptions_for_payer returns only the payer's
+/// Active subscriptions, paginated.
+#[test]
+fn test_get_active_subscriptions_for_payer_filters_and_paginates() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _merchant, plan_id, _usdc_token) = setup_with_plan(&env);
+
+    let payer = Address::generate(&env);
+
+    let sub_1 = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let sub_2 = client.subscribe(&payer, &plan_id, &None, &None, &None);
+    let sub_3 = client.subscribe(&payer, &plan_id, &None, &None, &None);
+
+    // Cancel the second subscription; it should no longer appear.
+    client.cancel_subscription(&payer, &sub_2, &false);
+
+    let active = client.get_active_subscriptions_for_payer(&payer, &0u32, &50u32);
+    assert_eq!(active.len(), 2);
+    let ids: soroban_sdk::Vec<String> = {
+        let mut v = vec![&env];
+        for s in active.iter() {
+            v.push_back(s.subscription_id.clone());
+        }
+        v
+    };
+    assert!(ids.contains(&sub_1));
+    assert!(ids.contains(&sub_3));
+    assert!(!ids.contains(&sub_2));
+
+    // Pagination: limit 1 returns just the first active subscription.
+    let page = client.get_active_subscriptions_for_payer(&payer, &0u32, &1u32);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().subscription_id, sub_1);
+}
+
 /// Issue #633: get_plan_subscribers returns the plan's subscribers, paginated,
 /// with cancelled subscriptions filterable.
 #[test]

@@ -170,6 +170,11 @@ Roll back immediately if:
 
 ## 🛠 Upgrade Process
 
+> **Step-by-step upgrade and admin-recovery commands** (propose → timelock →
+> execute, plus admin transfer and rollback considerations) now live in
+> [docs/operations-runbook.md](docs/operations-runbook.md) — the network
+> details below are referenced from there.
+
 ### Stellar Testnet
 
 - **Horizon URL**: `https://horizon-testnet.stellar.org`
@@ -318,6 +323,10 @@ stellar contract invoke --id <PAYMENT_LINK_ID> --network testnet --source <ADMIN
 ## 🔑 Admin Key Rotation
 
 Administrative roles for `PaymentProcessor` and `RefundManager` are managed via the `AccessControl` module.
+
+> For the full propose → timelock → accept/cancel flow (including the
+> ledger-based timelock window and what to do, and not do, if the admin key
+> is lost), see [docs/operations-runbook.md](docs/operations-runbook.md).
 
 ### Rotating the Admin Role
 

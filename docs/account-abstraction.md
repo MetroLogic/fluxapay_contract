@@ -22,6 +22,100 @@ An empty allowlist is the unrestricted default. It does not mean "allow nothing"
 
 Re-registering a key replaces the policy and clears spend already counted against the previous window. `revoke_session_key` deletes the policy and the spend counter, and a later execution of that signer still fails with `SignerRevoked` until the key is registered again.
 
+## Policy format examples (Issue #1194)
+
+Every example below registers the policy for `account` on `session_key` with
+`register_session_key_with_policy(account, session_key, expires_at, policy)`.
+`contract_id` is the deployed `PaymentProcessor` (or other contract) address
+the key is scoped to.
+
+### Read-only policy
+
+A key that may only call read-only view functions and can never move funds.
+`SessionInvocation.amount` is required by the XDR shape even for a read call,
+so the pattern is: restrict `allowed_functions` to the read-only entry points,
+and pin `max_amount_per_tx` (and the window budget) to `0` so any call
+carrying a non-zero `amount` is rejected regardless of which function it
+names.
+
+```rust
+let read_only_policy = SessionPolicy {
+    max_amount_per_tx: Some(0),
+    max_amount_per_window: Some(0),
+    window_secs: 0,
+    allowed_contracts: vec![&env, contract_id.clone()],
+    allowed_functions: vec![
+        &env,
+        Symbol::new(&env, "get_payment"),
+        Symbol::new(&env, "get_link_analytics"),
+    ],
+};
+client.register_session_key_with_policy(
+    &account,
+    &session_key,
+    &expires_at,
+    &read_only_policy,
+);
+```
+
+A call with `amount: 0` to `get_payment` or `get_link_analytics` on
+`contract_id` is accepted; any other function, any other contract, or any
+call with `amount > 0` is rejected (`FunctionNotAllowed`, `ContractNotAllowed`,
+or `SpendLimitExceeded` respectively).
+
+### Payment-create policy
+
+A checkout key that may only call `create_payment` on one contract, with a
+per-transaction cap and no cumulative window budget (every call is checked
+independently):
+
+```rust
+let payment_create_policy = SessionPolicy {
+    max_amount_per_tx: Some(500_000_000_000i128), // 50,000 USDC (7 decimals)
+    max_amount_per_window: None,
+    window_secs: 0,
+    allowed_contracts: vec![&env, contract_id.clone()],
+    allowed_functions: vec![&env, Symbol::new(&env, "create_payment")],
+};
+client.register_session_key_with_policy(
+    &account,
+    &session_key,
+    &expires_at,
+    &payment_create_policy,
+);
+```
+
+A `create_payment` call for up to 50,000 USDC succeeds; a larger single call
+fails with `SpendLimitExceeded`; a call to any other function or contract
+fails with `FunctionNotAllowed`/`ContractNotAllowed`.
+
+### Capped (rolling-window budget) policy
+
+A key with no contract/function restriction, but a rolling daily spend
+budget - suited to an automated agent that calls several different contract
+methods but must never move more than a fixed amount per day in total:
+
+```rust
+let capped_policy = SessionPolicy {
+    max_amount_per_tx: Some(100_000_000_000i128),    // 10,000 USDC per call
+    max_amount_per_window: Some(1_000_000_000_000i128), // 100,000 USDC per day
+    window_secs: 86_400,                             // 24h rolling window
+    allowed_contracts: vec![&env],                    // empty = any contract
+    allowed_functions: vec![&env],                    // empty = any function
+};
+client.register_session_key_with_policy(
+    &account,
+    &session_key,
+    &expires_at,
+    &capped_policy,
+);
+```
+
+Any single call over 10,000 USDC fails with `SpendLimitExceeded`. Once the
+rolling window's cumulative total would exceed 100,000 USDC, the next call
+fails with `WindowBudgetExceeded` until the window rolls over (see
+"Invocation payload" above for the exact reset rule).
+
 ## Invocation payload
 
 Unrestricted keys accept any non-empty payload.
@@ -72,6 +166,43 @@ Topics are `(SESSION, ACTION, account)`, the same shape as `SESSION/REGISTERED`,
 
 Registration, expiry, and revocation still return `Unauthorized`, `SessionNotFound`, `SessionExpired`, and `SignerRevoked`.
 
+## Merchant → sub-account delegation (Issue #1029)
+
+Separate from session keys above: a merchant can delegate specific payment
+operations to a sub-account (a POS terminal, an employee key, etc.). The
+sub-account signs the delegated call directly with its own key — the
+merchant does not sign again at call time.
+
+### Scopes
+
+| Scope | Covers |
+|-------|--------|
+| `CreatePayment` | `PaymentProcessor::create_payment_delegated` |
+| `CreateRefund` | `PaymentProcessor::create_refund_delegated` |
+| `ReadOnly` | Reserved for future read-only delegated queries; not enforced on any write path yet |
+| `All` | Every delegated operation above |
+
+### Entry points
+
+| Function | Caller | Effect |
+|----------|--------|--------|
+| `grant_delegation(merchant, sub_account, scope, expires_at)` | Merchant | Creates or replaces the sub-account's delegation |
+| `revoke_delegation(merchant, sub_account)` | Merchant | Marks the delegation revoked (idempotent) |
+| `list_delegations(merchant)` | Anyone | Read-only audit view, including revoked/expired entries |
+| `create_payment_delegated(sub_account, args)` | Sub-account | Creates a payment for `args.merchant_id`, requiring a live `CreatePayment` (or `All`) delegation |
+| `create_refund_delegated(sub_account, payment_id, refund_amount, reason, receipt_hash)` | Sub-account | Creates a refund for the payment's merchant, requiring a live `CreateRefund` (or `All`) delegation |
+
+### Errors
+
+| Name | When |
+|------|------|
+| `Error::DelegationExpired` | `now > delegation.expires_at` |
+| `Error::DelegationRevoked` | The merchant called `revoke_delegation` for this sub-account |
+| `Error::Unauthorized` | No delegation exists, or the granted scope does not cover the requested operation |
+
+A re-`grant_delegation` call for the same `(merchant, sub_account)` pair
+replaces the previous grant (new scope/expiry, `revoked` reset to `false`),
+mirroring `register_session_key`'s re-registration semantics above.
 
 ## Offline signing (air-gapped transactions)
 

@@ -1,10 +1,253 @@
 import { getLocalizedErrorMessage } from "./locales/index.js";
 
+export interface FluxapayErrorMeta {
+  code: string;
+  contractCode: number;
+  message: string;
+  hint: string;
+  docsUrl: string;
+}
+
+const DOCS_BASE = "https://docs.fluxapay.com/errors";
+
+function buildDocsUrl(code: string): string {
+  return `${DOCS_BASE}#${code}`;
+}
+
+/**
+ * Canonical mapping of contract error codes to human-readable metadata.
+ * Every entry must include a specific, actionable `hint` and a `docsUrl`.
+ * Keep in sync with docs/error-codes.md (enforced by scripts/check-error-map-sync.ts).
+ */
+export const ERROR_MAP: Record<number, FluxapayErrorMeta> = {
+  1: {
+    code: "UNAUTHORIZED",
+    contractCode: 1,
+    message: "The caller is not authorized to perform this action.",
+    hint: "Ensure the transaction is signed by the merchant or admin address that owns this resource.",
+    docsUrl: buildDocsUrl("UNAUTHORIZED"),
+  },
+  2: {
+    code: "PAYMENT_ALREADY_EXISTS",
+    contractCode: 2,
+    message: "A payment with this ID already exists.",
+    hint: "Generate a new unique payment ID or reuse the existing payment instead of creating a duplicate.",
+    docsUrl: buildDocsUrl("PAYMENT_ALREADY_EXISTS"),
+  },
+  3: {
+    code: "PAYMENT_EXPIRED",
+    contractCode: 3,
+    message: "The payment has expired and can no longer be processed.",
+    hint: "Create a new payment with a future expiry timestamp before attempting settlement.",
+    docsUrl: buildDocsUrl("PAYMENT_EXPIRED"),
+  },
+  4: {
+    code: "INVALID_PAYMENT_ID",
+    contractCode: 4,
+    message: "The provided payment ID is invalid.",
+    hint: "Verify the payment ID is a 32-byte hex string returned by create_payment.",
+    docsUrl: buildDocsUrl("INVALID_PAYMENT_ID"),
+  },
+  8: {
+    code: "REFUND_ALREADY_PROCESSED",
+    contractCode: 8,
+    message: "This refund has already been processed.",
+    hint: "Query the refund status before retrying; do not resubmit a refund that already completed.",
+    docsUrl: buildDocsUrl("REFUND_ALREADY_PROCESSED"),
+  },
+  9: {
+    code: "DISPUTE_NOT_FOUND",
+    contractCode: 9,
+    message: "The referenced dispute does not exist.",
+    hint: "Confirm the dispute ID was returned by open_dispute before resolving it.",
+    docsUrl: buildDocsUrl("DISPUTE_NOT_FOUND"),
+  },
+  12: {
+    code: "DISPUTE_ALREADY_RESOLVED",
+    contractCode: 12,
+    message: "The dispute has already been resolved.",
+    hint: "Fetch the dispute to read its resolution before attempting to resolve it again.",
+    docsUrl: buildDocsUrl("DISPUTE_ALREADY_RESOLVED"),
+  },
+  14: {
+    code: "PAYMENT_ALREADY_PROCESSED",
+    contractCode: 14,
+    message: "The payment has already been processed.",
+    hint: "Check the payment status; only pending payments can be settled or refunded.",
+    docsUrl: buildDocsUrl("PAYMENT_ALREADY_PROCESSED"),
+  },
+  15: {
+    code: "ACCESS_CONTROL_ERROR",
+    contractCode: 15,
+    message: "The access control check failed.",
+    hint: "Verify the caller holds the required role (admin/merchant) via the access control contract.",
+    docsUrl: buildDocsUrl("ACCESS_CONTROL_ERROR"),
+  },
+  16: {
+    code: "REFUND_EXCEEDS_PAYMENT",
+    contractCode: 16,
+    message: "The total refund amount exceeds the original payment amount.",
+    hint: "Check the sum of all pending and completed refunds for this payment before creating a new one.",
+    docsUrl: buildDocsUrl("REFUND_EXCEEDS_PAYMENT"),
+  },
+  17: {
+    code: "CONTRACT_PAUSED",
+    contractCode: 17,
+    message: "The contract is currently paused.",
+    hint: "Wait for the admin to unpause the contract before retrying the transaction.",
+    docsUrl: buildDocsUrl("CONTRACT_PAUSED"),
+  },
+  18: {
+    code: "RATE_LIMIT_EXCEEDED",
+    contractCode: 18,
+    message: "The rate limit for this operation has been exceeded.",
+    hint: "Back off and retry after the rate-limit window resets; batch requests where possible.",
+    docsUrl: buildDocsUrl("RATE_LIMIT_EXCEEDED"),
+  },
+  19: {
+    code: "REFUND_CANCELLED",
+    contractCode: 19,
+    message: "The refund has been cancelled.",
+    hint: "Create a new refund request instead of retrying a cancelled refund.",
+    docsUrl: buildDocsUrl("REFUND_CANCELLED"),
+  },
+  20: {
+    code: "UNSUPPORTED_TOKEN",
+    contractCode: 20,
+    message: "The token is not supported by this contract.",
+    hint: "Use a token address from the supported-token allowlist configured on the contract.",
+    docsUrl: buildDocsUrl("UNSUPPORTED_TOKEN"),
+  },
+  21: {
+    code: "AMOUNT_BELOW_MIN",
+    contractCode: 21,
+    message: "The amount is below the minimum allowed.",
+    hint: "Increase the amount to at least the contract's configured minimum before retrying.",
+    docsUrl: buildDocsUrl("AMOUNT_BELOW_MIN"),
+  },
+  22: {
+    code: "AMOUNT_ABOVE_MAX",
+    contractCode: 22,
+    message: "The amount is above the maximum allowed.",
+    hint: "Reduce the amount to at most the contract's configured maximum before retrying.",
+    docsUrl: buildDocsUrl("AMOUNT_ABOVE_MAX"),
+  },
+  23: {
+    code: "INVALID_EXPIRY",
+    contractCode: 23,
+    message: "The expiry timestamp is invalid.",
+    hint: "Provide an expiry timestamp strictly greater than the current ledger time.",
+    docsUrl: buildDocsUrl("INVALID_EXPIRY"),
+  },
+  24: {
+    code: "INVALID_SETTLEMENT",
+    contractCode: 24,
+    message: "The settlement parameters are invalid.",
+    hint: "Verify the settlement asset and destination address match the payment's configuration.",
+    docsUrl: buildDocsUrl("INVALID_SETTLEMENT"),
+  },
+  25: {
+    code: "DUPLICATE_IDEMPOTENCY_KEY",
+    contractCode: 25,
+    message: "The idempotency key has already been used.",
+    hint: "Reuse the original response for this key or generate a fresh idempotency key.",
+    docsUrl: buildDocsUrl("DUPLICATE_IDEMPOTENCY_KEY"),
+  },
+  26: {
+    code: "INVALID_ADDRESS",
+    contractCode: 26,
+    message: "The provided address is invalid.",
+    hint: "Ensure the address is a valid Stellar account (G...) or contract (C...) address.",
+    docsUrl: buildDocsUrl("INVALID_ADDRESS"),
+  },
+  27: {
+    code: "ARBITRAGE_DETECTED",
+    contractCode: 27,
+    message: "Arbitrage was detected in the swap.",
+    hint: "Adjust the swap path or slippage tolerance so the quoted rate matches the oracle price.",
+    docsUrl: buildDocsUrl("ARBITRAGE_DETECTED"),
+  },
+  28: {
+    code: "SWAP_PATH_INVALID",
+    contractCode: 28,
+    message: "The swap path is invalid.",
+    hint: "Verify each hop in the swap path references a supported liquidity pool.",
+    docsUrl: buildDocsUrl("SWAP_PATH_INVALID"),
+  },
+  29: {
+    code: "ORACLE_PRICE_DEVIATION",
+    contractCode: 29,
+    message: "The oracle price deviates beyond the allowed threshold.",
+    hint: "Wait for the oracle to refresh or widen the deviation threshold before retrying.",
+    docsUrl: buildDocsUrl("ORACLE_PRICE_DEVIATION"),
+  },
+  30: {
+    code: "SUBSCRIPTION_IN_GRACE_PERIOD",
+    contractCode: 30,
+    message: "The subscription is in its grace period.",
+    hint: "Top up the subscription balance to exit the grace period before charging again.",
+    docsUrl: buildDocsUrl("SUBSCRIPTION_IN_GRACE_PERIOD"),
+  },
+  31: {
+    code: "SUBSCRIPTION_RETRY_EXHAUSTED",
+    contractCode: 31,
+    message: "The subscription retry limit has been exhausted.",
+    hint: "Re-enable the subscription with a valid payment method before the next billing cycle.",
+    docsUrl: buildDocsUrl("SUBSCRIPTION_RETRY_EXHAUSTED"),
+  },
+  32: {
+    code: "INVALID_RESUME_TIMESTAMP",
+    contractCode: 32,
+    message: "The resume timestamp is invalid.",
+    hint: "Provide a resume timestamp in the future relative to the current ledger time.",
+    docsUrl: buildDocsUrl("INVALID_RESUME_TIMESTAMP"),
+  },
+  33: {
+    code: "MERCHANT_AUTH_ERROR",
+    contractCode: 33,
+    message: "Merchant authentication failed.",
+    hint: "Confirm the merchant is registered and the signing key matches the registered merchant key.",
+    docsUrl: buildDocsUrl("MERCHANT_AUTH_ERROR"),
+  },
+  34: {
+    code: "INVALID_SPLIT_SUM",
+    contractCode: 34,
+    message: "The split amounts do not sum to the payment total.",
+    hint: "Ensure all split amounts sum exactly to the payment amount before submitting.",
+    docsUrl: buildDocsUrl("INVALID_SPLIT_SUM"),
+  },
+  35: {
+    code: "MISSING_RECEIPT_HASH",
+    contractCode: 35,
+    message: "The receipt hash is missing.",
+    hint: "Attach a valid receipt hash to the payment before attempting settlement.",
+    docsUrl: buildDocsUrl("MISSING_RECEIPT_HASH"),
+  },
+  36: {
+    code: "REFUND_EXPIRED",
+    contractCode: 36,
+    message: "The refund window has expired.",
+    hint: "Create a new refund request within the allowed refund window.",
+    docsUrl: buildDocsUrl("REFUND_EXPIRED"),
+  },
+  37: {
+    code: "ALREADY_VOTED",
+    contractCode: 37,
+    message: "This address has already voted on the dispute.",
+    hint: "Use a different authorized voter address or wait for the dispute to be resolved.",
+    docsUrl: buildDocsUrl("ALREADY_VOTED"),
+  },
+};
+
 export class FluxapayError extends Error {
   readonly code: number;
   readonly contractErrorName: string;
   readonly cause?: unknown;
   readonly locale: string;
+  readonly errorCode: string;
+  readonly contractCode: number;
+  readonly hint: string;
+  readonly docsUrl: string;
 
   constructor(
     code: number,
@@ -13,12 +256,18 @@ export class FluxapayError extends Error {
     cause?: unknown,
     locale = "en",
   ) {
-    super(message ?? contractErrorName);
+    const meta = ERROR_MAP[code];
+    const resolvedMessage = message ?? meta?.message ?? contractErrorName;
+    super(resolvedMessage);
     this.name = `${contractErrorName}Error`;
     this.code = code;
     this.contractErrorName = contractErrorName;
     this.cause = cause;
     this.locale = locale;
+    this.errorCode = meta?.code ?? contractErrorName.toUpperCase();
+    this.contractCode = code;
+    this.hint = meta?.hint ?? "Inspect the transaction result and retry after correcting the inputs.";
+    this.docsUrl = meta?.docsUrl ?? buildDocsUrl(this.errorCode);
   }
 
   get localizedMessage(): string {
@@ -242,456 +491,3 @@ export class AlreadyVotedError extends FluxapayError {
     this.name = "AlreadyVotedError";
   }
 }
-
-export class TierVolumeLimitExceededError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(38, "TierVolumeLimitExceeded", message, cause, locale);
-    this.name = "TierVolumeLimitExceededError";
-  }
-}
-
-export class BatchTooLargeContractError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(39, "BatchTooLarge", message, cause, locale);
-    this.name = "BatchTooLargeContractError";
-  }
-}
-
-export class InsufficientArbitratorsError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(40, "InsufficientArbitrators", message, cause, locale);
-    this.name = "InsufficientArbitratorsError";
-  }
-}
-
-export class ArbitrationVotingThresholdNotMetError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(41, "ArbitrationVotingThresholdNotMet", message, cause, locale);
-    this.name = "ArbitrationVotingThresholdNotMetError";
-  }
-}
-
-export class RefundCooldownNotElapsedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(42, "RefundCooldownNotElapsed", message, cause, locale);
-    this.name = "RefundCooldownNotElapsedError";
-  }
-}
-
-export class FeeProposalNotReadyError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(43, "FeeProposalNotReady", message, cause, locale);
-    this.name = "FeeProposalNotReadyError";
-  }
-}
-
-export class NoFeeProposalError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(44, "NoFeeProposal", message, cause, locale);
-    this.name = "NoFeeProposalError";
-  }
-}
-
-export class InvalidEvidenceFormatError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(45, "InvalidEvidenceFormat", message, cause, locale);
-    this.name = "InvalidEvidenceFormatError";
-  }
-}
-
-export class DisputeRateLimitExceededError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(46, "DisputeRateLimitExceeded", message, cause, locale);
-    this.name = "DisputeRateLimitExceededError";
-  }
-}
-
-export class InvalidSettlementSignatureError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(47, "InvalidSettlementSignature", message, cause, locale);
-    this.name = "InvalidSettlementSignatureError";
-  }
-}
-
-export class StaleOracleRateError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(48, "StaleOracleRate", message, cause, locale);
-    this.name = "StaleOracleRateError";
-  }
-}
-
-export class LinkExpiredError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(49, "LinkExpired", message, cause, locale);
-    this.name = "LinkExpiredError";
-  }
-}
-
-export class ReentrancyError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(50, "Reentrancy", message, cause, locale);
-    this.name = "ReentrancyError";
-  }
-}
-
-export class UpgradeFailedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(51, "UpgradeFailed", message, cause, locale);
-    this.name = "UpgradeFailedError";
-  }
-}
-
-export class InsufficientTreasuryBalanceError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(52, "InsufficientTreasuryBalance", message, cause, locale);
-    this.name = "InsufficientTreasuryBalanceError";
-  }
-}
-
-export class MetadataTooLargeError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(53, "MetadataTooLarge", message, cause, locale);
-    this.name = "MetadataTooLargeError";
-  }
-}
-
-export class MetadataValueTooLongError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(54, "MetadataValueTooLong", message, cause, locale);
-    this.name = "MetadataValueTooLongError";
-  }
-}
-
-export class InvalidMemoTypeError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(55, "InvalidMemoType", message, cause, locale);
-    this.name = "InvalidMemoTypeError";
-  }
-}
-
-export class MemoTooLongError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(56, "MemoTooLong", message, cause, locale);
-    this.name = "MemoTooLongError";
-  }
-}
-
-export class InvalidMemoIdError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(57, "InvalidMemoId", message, cause, locale);
-    this.name = "InvalidMemoIdError";
-  }
-}
-
-export class PayerNotWhitelistedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(58, "PayerNotWhitelisted", message, cause, locale);
-    this.name = "PayerNotWhitelistedError";
-  }
-}
-
-export class LinkMaxUsesReachedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(59, "LinkMaxUsesReached", message, cause, locale);
-    this.name = "LinkMaxUsesReachedError";
-  }
-}
-
-export class DirectTransferNotDisputableError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(60, "DirectTransferNotDisputable", message, cause, locale);
-    this.name = "DirectTransferNotDisputableError";
-  }
-}
-
-export class MaxRetriesExceededError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(61, "MaxRetriesExceeded", message, cause, locale);
-    this.name = "MaxRetriesExceededError";
-  }
-}
-
-export class RetryChainTooDeepError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(347, "RetryChainTooDeep", message, cause, locale);
-    this.name = "RetryChainTooDeepError";
-  }
-}
-
-export class InvalidStatusTransitionError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(62, "InvalidStatusTransition", message, cause, locale);
-    this.name = "InvalidStatusTransitionError";
-  }
-}
-
-export class RefundNotApprovedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(63, "RefundNotApproved", message, cause, locale);
-    this.name = "RefundNotApprovedError";
-  }
-}
-
-export class RouterNotAllowedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(64, "RouterNotAllowed", message, cause, locale);
-    this.name = "RouterNotAllowedError";
-  }
-}
-
-export class RouteOutputInsufficientError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(65, "RouteOutputInsufficient", message, cause, locale);
-    this.name = "RouteOutputInsufficientError";
-  }
-}
-
-export class BatchContainsDuplicatesError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(66, "BatchContainsDuplicates", message, cause, locale);
-    this.name = "BatchContainsDuplicatesError";
-  }
-}
-
-export class InputTooLongError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(67, "InputTooLong", message, cause, locale);
-    this.name = "InputTooLongError";
-  }
-}
-
-export class TimelockNotExpiredError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(68, "TimelockNotExpired", message, cause, locale);
-    this.name = "TimelockNotExpiredError";
-  }
-}
-
-export class InvalidEvidenceCidError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(69, "InvalidEvidenceCid", message, cause, locale);
-    this.name = "InvalidEvidenceCidError";
-  }
-}
-
-export class MuxedAccountMismatchError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(70, "MuxedAccountMismatch", message, cause, locale);
-    this.name = "MuxedAccountMismatchError";
-  }
-}
-
-export class TreasuryMultisigNotConfiguredError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(71, "TreasuryMultisigNotConfigured", message, cause, locale);
-    this.name = "TreasuryMultisigNotConfiguredError";
-  }
-}
-
-export class NotAuthorizedTreasurySignerError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(72, "NotAuthorizedTreasurySigner", message, cause, locale);
-    this.name = "NotAuthorizedTreasurySignerError";
-  }
-}
-
-export class TreasuryProposalNotFoundError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(73, "TreasuryProposalNotFound", message, cause, locale);
-    this.name = "TreasuryProposalNotFoundError";
-  }
-}
-
-export class TreasuryProposalAlreadyExecutedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(74, "TreasuryProposalAlreadyExecuted", message, cause, locale);
-    this.name = "TreasuryProposalAlreadyExecutedError";
-  }
-}
-
-export class TreasuryProposalCancelledError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(75, "TreasuryProposalCancelled", message, cause, locale);
-    this.name = "TreasuryProposalCancelledError";
-  }
-}
-
-export class TreasuryTimelockNotExpiredError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(76, "TreasuryTimelockNotExpired", message, cause, locale);
-    this.name = "TreasuryTimelockNotExpiredError";
-  }
-}
-
-export class TreasuryProposalExpiredError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(77, "TreasuryProposalExpired", message, cause, locale);
-    this.name = "TreasuryProposalExpiredError";
-  }
-}
-
-export class TreasuryAlreadyApprovedError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(78, "TreasuryAlreadyApproved", message, cause, locale);
-    this.name = "TreasuryAlreadyApprovedError";
-  }
-}
-
-export class TreasuryInsufficientApprovalsError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(79, "TreasuryInsufficientApprovals", message, cause, locale);
-    this.name = "TreasuryInsufficientApprovalsError";
-  }
-}
-
-export class InvalidTreasuryThresholdError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(80, "InvalidTreasuryThreshold", message, cause, locale);
-    this.name = "InvalidTreasuryThresholdError";
-  }
-}
-
-export class InsufficientTokenTreasuryBalanceError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(81, "InsufficientTokenTreasuryBalance", message, cause, locale);
-    this.name = "InsufficientTokenTreasuryBalanceError";
-  }
-}
-
-export class TrialActiveError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(82, "TrialActive", message, cause, locale);
-    this.name = "TrialActiveError";
-  }
-}
-
-export class TrialTooLongError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(83, "TrialTooLong", message, cause, locale);
-    this.name = "TrialTooLongError";
-  }
-}
-
-export class InvalidPaymentLinkError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(84, "InvalidPaymentLink", message, cause, locale);
-    this.name = "InvalidPaymentLinkError";
-  }
-}
-
-export class KycLimitExceededError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(85, "KycLimitExceeded", message, cause, locale);
-    this.name = "KycLimitExceededError";
-  }
-}
-
-export class PaymentNotFoundError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(404, "PaymentNotFound", message, cause, locale);
-    this.name = "PaymentNotFoundError";
-  }
-}
-
-export class RefundNotFoundError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(405, "RefundNotFound", message, cause, locale);
-    this.name = "RefundNotFoundError";
-  }
-}
-
-export class InvalidAmountError extends FluxapayError {
-  constructor(message?: string, cause?: unknown, locale = "en") {
-    super(406, "InvalidAmount", message, cause, locale);
-    this.name = "InvalidAmountError";
-  }
-}
-
-export const ERROR_CONSTRUCTOR_MAP: Record<
-  number,
-  new (message?: string, cause?: unknown, locale?: string) => FluxapayError
-> = {
-  1: UnauthorizedError,
-  2: PaymentAlreadyExistsError,
-  3: PaymentExpiredError,
-  4: InvalidPaymentIdError,
-  8: RefundAlreadyProcessedError,
-  9: DisputeNotFoundError,
-  12: DisputeAlreadyResolvedError,
-  14: PaymentAlreadyProcessedError,
-  15: AccessControlContractError,
-  16: RefundExceedsPaymentError,
-  17: ContractPausedError,
-  18: RateLimitExceededError,
-  19: RefundCancelledError,
-  20: UnsupportedTokenError,
-  21: AmountBelowMinError,
-  22: AmountAboveMaxError,
-  23: InvalidExpiryError,
-  24: InvalidSettlementError,
-  25: DuplicateIdempotencyKeyError,
-  26: InvalidAddressError,
-  27: ArbitrageDetectedError,
-  28: SwapPathInvalidError,
-  29: OraclePriceDeviationError,
-  30: SubscriptionInGracePeriodError,
-  31: SubscriptionRetryExhaustedError,
-  32: InvalidResumeTimestampError,
-  33: MerchantAuthContractError,
-  34: InvalidSplitSumError,
-  35: MissingReceiptHashError,
-  36: RefundExpiredError,
-  37: AlreadyVotedError,
-  38: TierVolumeLimitExceededError,
-  39: BatchTooLargeContractError,
-  40: InsufficientArbitratorsError,
-  41: ArbitrationVotingThresholdNotMetError,
-  42: RefundCooldownNotElapsedError,
-  43: FeeProposalNotReadyError,
-  44: NoFeeProposalError,
-  45: InvalidEvidenceFormatError,
-  46: DisputeRateLimitExceededError,
-  47: InvalidSettlementSignatureError,
-  48: StaleOracleRateError,
-  49: LinkExpiredError,
-  50: ReentrancyError,
-  51: UpgradeFailedError,
-  52: InsufficientTreasuryBalanceError,
-  53: MetadataTooLargeError,
-  54: MetadataValueTooLongError,
-  55: InvalidMemoTypeError,
-  56: MemoTooLongError,
-  57: InvalidMemoIdError,
-  58: PayerNotWhitelistedError,
-  59: LinkMaxUsesReachedError,
-  60: DirectTransferNotDisputableError,
-  61: MaxRetriesExceededError,
-  347: RetryChainTooDeepError,
-  62: InvalidStatusTransitionError,
-  63: RefundNotApprovedError,
-  64: RouterNotAllowedError,
-  65: RouteOutputInsufficientError,
-  66: BatchContainsDuplicatesError,
-  67: InputTooLongError,
-  68: TimelockNotExpiredError,
-  69: InvalidEvidenceCidError,
-  70: MuxedAccountMismatchError,
-  71: TreasuryMultisigNotConfiguredError,
-  72: NotAuthorizedTreasurySignerError,
-  73: TreasuryProposalNotFoundError,
-  74: TreasuryProposalAlreadyExecutedError,
-  75: TreasuryProposalCancelledError,
-  76: TreasuryTimelockNotExpiredError,
-  77: TreasuryProposalExpiredError,
-  78: TreasuryAlreadyApprovedError,
-  79: TreasuryInsufficientApprovalsError,
-  80: InvalidTreasuryThresholdError,
-  81: InsufficientTokenTreasuryBalanceError,
-  82: TrialActiveError,
-  83: TrialTooLongError,
-  84: InvalidPaymentLinkError,
-  85: KycLimitExceededError,
-  404: PaymentNotFoundError,
-  405: RefundNotFoundError,
-  406: InvalidAmountError,
-};

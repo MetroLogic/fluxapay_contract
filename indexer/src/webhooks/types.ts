@@ -18,7 +18,11 @@ export const WEBHOOK_EVENT_TYPES = [
   "refund.created",
   "refund.completed",
   "dispute.opened",
+  "dispute.responded",
+  "dispute.escalated",
+  "dispute.vote_cast",
   "dispute.resolved",
+  "dispute.auto_resolved",
 ] as const;
 
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
@@ -46,8 +50,10 @@ export interface WebhookEnvelope {
    * deliveries (see docs/webhooks.md).
    */
   id: string;
+  event_id: string;
   type: WebhookEventType;
   createdAt: string;
+  replayed?: boolean;
   /**
    * False for synthetic deliveries from the test endpoint. Merchants are told
    * in the docs to branch on this so a test cannot move real money.

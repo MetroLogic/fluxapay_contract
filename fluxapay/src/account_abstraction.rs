@@ -471,6 +471,206 @@ fn contains_symbol(list: &Vec<Symbol>, value: &Symbol) -> bool {
     list.iter().any(|item| item == *value)
 }
 
+/* ------------------------------------------------------------------ */
+/*  Issue #1029: Merchant → sub-account payment delegation             */
+/* ------------------------------------------------------------------ */
+//
+// Separate from the session-key system above. A merchant grants a
+// sub-account (e.g. a POS terminal or employee key) authority to perform a
+// scoped set of payment operations on the merchant's behalf. The sub-account
+// signs the delegated call directly with its own key — there is no second
+// merchant signature at call time. See `PaymentProcessor::create_payment_delegated`
+// and `PaymentProcessor::create_refund_delegated` for the integration points.
+
+/// Operation scope a merchant may delegate to a sub-account.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DelegationScope {
+    /// May call `create_payment_delegated`.
+    CreatePayment,
+    /// May call `create_refund_delegated`.
+    CreateRefund,
+    /// May only read merchant/payment data; not enforced on any write path yet.
+    ReadOnly,
+    /// May perform any delegated payment operation.
+    All,
+}
+
+impl DelegationScope {
+    /// Whether this granted scope covers `required`.
+    fn allows(&self, required: &DelegationScope) -> bool {
+        matches!(self, DelegationScope::All) || self == required
+    }
+}
+
+/// A merchant's delegation grant to a sub-account, scoped to specific
+/// payment operations and bounded by an expiry timestamp.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Delegation {
+    pub merchant: Address,
+    pub sub_account: Address,
+    pub scope: DelegationScope,
+    pub expires_at: u64,
+    pub revoked: bool,
+    pub granted_at: u64,
+}
+
+#[contracttype]
+pub enum MerchantDelegationDataKey {
+    /// Maps (merchant, sub_account) -> Delegation
+    Delegation(Address, Address),
+    /// Maps merchant -> Vec<Address> of every sub_account ever delegated to,
+    /// for `list_delegations` enumeration (includes revoked/expired entries).
+    DelegationList(Address),
+}
+
+/// Grant `sub_account` delegated authority to perform `scope` operations on
+/// behalf of `merchant` until `expires_at`. Requires the merchant's own
+/// authorization. Re-granting the same sub-account replaces the previous
+/// delegation (and clears any prior revocation).
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn grant_delegation(
+    env: Env,
+    merchant: Address,
+    sub_account: Address,
+    scope: DelegationScope,
+    expires_at: u64,
+) -> Result<(), crate::Error> {
+    merchant.require_auth();
+
+    if expires_at <= env.ledger().timestamp() {
+        return Err(crate::Error::InvalidExpiry);
+    }
+
+    let delegation = Delegation {
+        merchant: merchant.clone(),
+        sub_account: sub_account.clone(),
+        scope: scope.clone(),
+        expires_at,
+        revoked: false,
+        granted_at: env.ledger().timestamp(),
+    };
+
+    env.storage().persistent().set(
+        &MerchantDelegationDataKey::Delegation(merchant.clone(), sub_account.clone()),
+        &delegation,
+    );
+    add_to_delegation_list(&env, &merchant, &sub_account);
+
+    env.events().publish(
+        (
+            Symbol::new(&env, "DELEGATION"),
+            Symbol::new(&env, "GRANTED"),
+            merchant,
+        ),
+        (sub_account, scope, expires_at),
+    );
+
+    Ok(())
+}
+
+/// Revoke a previously granted delegation. Requires the merchant's own
+/// authorization. Idempotent — revoking an unknown or already-revoked
+/// sub-account is not an error.
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+pub fn revoke_delegation(
+    env: Env,
+    merchant: Address,
+    sub_account: Address,
+) -> Result<(), crate::Error> {
+    merchant.require_auth();
+
+    let key = MerchantDelegationDataKey::Delegation(merchant.clone(), sub_account.clone());
+    if let Some(mut delegation) = env.storage().persistent().get::<_, Delegation>(&key) {
+        delegation.revoked = true;
+        env.storage().persistent().set(&key, &delegation);
+    }
+
+    env.events().publish(
+        (
+            Symbol::new(&env, "DELEGATION"),
+            Symbol::new(&env, "REVOKED"),
+            merchant,
+        ),
+        sub_account,
+    );
+
+    Ok(())
+}
+
+/// List every sub-account delegation a merchant has ever granted, for audit
+/// purposes. Includes revoked and expired entries so operators can see the
+/// full history, not just the currently-active grants.
+pub fn list_delegations(env: Env, merchant: Address) -> Vec<Delegation> {
+    let sub_accounts: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&MerchantDelegationDataKey::DelegationList(merchant.clone()))
+        .unwrap_or_else(|| Vec::new(&env));
+
+    let mut out = Vec::new(&env);
+    for sub_account in sub_accounts.iter() {
+        if let Some(delegation) = env
+            .storage()
+            .persistent()
+            .get::<_, Delegation>(&MerchantDelegationDataKey::Delegation(
+                merchant.clone(),
+                sub_account,
+            ))
+        {
+            out.push_back(delegation);
+        }
+    }
+    out
+}
+
+fn add_to_delegation_list(env: &Env, merchant: &Address, sub_account: &Address) {
+    let key = MerchantDelegationDataKey::DelegationList(merchant.clone());
+    let mut list: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !contains_address(&list, sub_account) {
+        list.push_back(sub_account.clone());
+        env.storage().persistent().set(&key, &list);
+    }
+}
+
+/// Verify that `sub_account` holds a live (non-expired, non-revoked)
+/// delegation from `merchant` covering `required_scope`, and that
+/// `sub_account` itself has authorized this invocation. This is the
+/// integration point payment_processor.rs's delegated entry points call
+/// before proceeding with the underlying operation.
+pub fn require_delegation(
+    env: &Env,
+    merchant: &Address,
+    sub_account: &Address,
+    required_scope: &DelegationScope,
+) -> Result<(), crate::Error> {
+    sub_account.require_auth();
+
+    let key = MerchantDelegationDataKey::Delegation(merchant.clone(), sub_account.clone());
+    let delegation: Delegation = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(crate::Error::Unauthorized)?;
+
+    if delegation.revoked {
+        return Err(crate::Error::DelegationRevoked);
+    }
+    if env.ledger().timestamp() > delegation.expires_at {
+        return Err(crate::Error::DelegationExpired);
+    }
+    if !delegation.scope.allows(required_scope) {
+        return Err(crate::Error::Unauthorized);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

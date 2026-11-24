@@ -1,4 +1,4 @@
-import { createHmac, createPublicKey, timingSafeEqual, verify, type KeyObject } from "node:crypto";
+import { createHmac, createPublicKey, timingSafeEqual, verify } from "node:crypto";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 
 export const SIGNATURE_TOLERANCE_SECONDS = 300;
@@ -7,6 +7,19 @@ export interface ParsedWebhookSignature {
   algorithm: "hmac_sha256" | "ed25519";
   signature: string;
   timestamp?: number;
+}
+
+export interface VerifyWebhookSignatureOptions {
+  /** Raw webhook request body (Buffer or string). */
+  payload: Buffer | string;
+  /** Value of the X-FluxaPay-Signature header. */
+  signature: string;
+  /** Merchant webhook secret used for HMAC-SHA256. */
+  secret: string;
+  /** Replay protection tolerance in seconds (default 300). */
+  toleranceSecs?: number;
+  /** Current Unix epoch in seconds (optional, defaults to now). */
+  nowSecs?: number;
 }
 
 /**
@@ -86,6 +99,37 @@ export function verifyWebhookSignature(
     }
 
     return verifyHmac(payload, parsed.signature, parsed.timestamp, secretOrPublicKey, toleranceSeconds, nowSeconds);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify an incoming FluxaPay webhook signature using an options object.
+ *
+ * HMAC-SHA256 of the raw payload is compared against the signature header.
+ * When the header carries a timestamp (`t=<unix>,v1=<hex>`), the timestamp is
+ * enforced against `toleranceSecs` to prevent replay attacks.
+ *
+ * Returns `false` (never throws) for invalid signatures.
+ */
+export function verifyWebhookSignatureWithOptions(options: VerifyWebhookSignatureOptions): boolean {
+  try {
+    const { payload, signature, secret, toleranceSecs, nowSecs } = options;
+    if (!signature || !secret) return false;
+
+    const payloadStr = typeof payload === "string" ? payload : payload.toString("utf8");
+    const tolerance = toleranceSecs ?? SIGNATURE_TOLERANCE_SECONDS;
+    const now = nowSecs ?? Math.floor(Date.now() / 1000);
+
+    const parsed = parseWebhookSignatureHeader(signature);
+    if (!parsed) return false;
+
+    if (parsed.algorithm === "ed25519") {
+      return verifyEd25519(payloadStr, parsed.signature, secret);
+    }
+
+    return verifyHmac(payloadStr, parsed.signature, parsed.timestamp, secret, tolerance, now);
   } catch {
     return false;
   }
