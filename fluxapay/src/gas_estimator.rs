@@ -203,7 +203,10 @@ pub enum DataKey {
 #[contract]
 pub struct GasEstimator;
 
-#[contractimpl]
+#[cfg_attr(
+    any(not(target_arch = "wasm32"), feature = "contract-gas-estimator"),
+    contractimpl
+)]
 impl GasEstimator {
     /// Link this estimator to the PaymentProcessor that owns the global pause flag.
     ///
