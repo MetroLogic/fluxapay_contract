@@ -15,6 +15,42 @@
 //!   refund request in the sequence coming from a distinct requester address
 //!   against the same `payment_id`, modeling multiple parties racing to
 //!   refund one payment before any request is approved or rejected.
+//!
+//! ## Fee-split arithmetic invariants (added for #590)
+//! - `proptest_fee_split_sums_to_platform_fee` — for every valid BPS
+//!   configuration, `treasury_share + developer_share` must equal
+//!   `platform_fee` (no tokens lost to rounding).
+//! - `proptest_merchant_net_never_exceeds_gross` — the merchant's net
+//!   amount after fees must never exceed the gross payment amount.
+//!
+//! ## Stream accrual invariants (added for #589)
+//! - `proptest_stream_accrued_bounded_by_deposit` — accrued amount must
+//!   never exceed the total deposit, regardless of rate or duration.
+//! - `proptest_stream_zero_rate_returns_checkpoint` — with rate=0 the
+//!   accrued value equals the checkpoint (clamped to deposit).
+//! - `proptest_stream_withdraw_clamped` — remaining deposit after
+//!   withdrawal is always in `[0, remaining]`.
+//!
+//! ## FX conversion invariants for payment links (added for #1186)
+//! - `proptest_fiat_to_usdc_conversion_matches_oracle_rate` — for any
+//!   positive rate/decimals/fiat_amount, `use_link` accepts exactly
+//!   `fiat_amount * 10^decimals / rate` (floor) USDC and records it in
+//!   `total_revenue`.
+//! - `proptest_fiat_to_usdc_rounding_is_floor_and_tight` — the accepted
+//!   amount, multiplied back by the rate, never exceeds the fiat numerator,
+//!   and one more stroop would; i.e. rounding is a tight floor, not merely
+//!   "some value close enough".
+//! - `proptest_fiat_to_usdc_rejects_mismatched_amount` — any USDC amount
+//!   other than the exact resolved equivalent is rejected with
+//!   `InvalidAmount` and leaves link state untouched.
+//! - `proptest_fiat_to_usdc_overflow_never_panics` — decimals/fiat_amount
+//!   pushed toward `i128::MAX` (guaranteed saturation) still resolve
+//!   deterministically rather than panicking, exercising the
+//!   `saturating_mul`/`checked_div` guard in `payment_link.rs`.
+//! - `proptest_stale_fiat_rate_rejected_at_use_time` — once the ledger
+//!   clock passes the configured staleness threshold with no new
+//!   `set_rate`, `use_link` rejects with `StaleOracleRate` regardless of
+//!   rate/decimals/fiat amount.
 
 extern crate alloc;
 use crate::format_id;
@@ -28,9 +64,13 @@ use soroban_sdk::{
 
 use crate::{
     access_control::{role_merchant, role_oracle, role_settlement_operator},
-    BillingInterval, Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
-    RefundManagerClient, RefundStatus, SubscriptionStatus, PAYMENT_TOLERANCE,
-    SUBSCRIPTION_RETRY_INTERVAL_SECS,
+    merchant_registry::KycTier,
+    BillingInterval, Error, FXOracle, FXOracleClient, FiatConfig, MaybeFiatConfig,
+    PaymentLinkManager, PaymentLinkManagerClient, PaymentProcessor, PaymentProcessorClient,
+    PaymentStatus, RefundManager, RefundManagerClient, RefundStatus, SubscriptionStatus,
+    PAYMENT_TOLERANCE, SUBSCRIPTION_RETRY_INTERVAL_SECS, TIER_CAP_BASIC, TIER_CAP_BUSINESS,
+    TIER_CAP_FULL,
+    TIER_CAP_UNVERIFIED,
 };
 
 fn setup_payment_processor(env: &Env) -> (Address, PaymentProcessorClient<'_>) {
@@ -98,6 +138,83 @@ fn setup_subscription_env(
     }
 
     (admin, client, merchant, usdc_token, payer, operator)
+}
+
+/// Shared helper for the payment-state-machine property tests (#1034).
+/// Spins up a fresh `PaymentProcessor`, grants merchant/oracle roles, and
+/// creates a single `Pending` payment for `amount` with `allow_partial` set
+/// as requested. No merchant registry is wired up, matching
+/// `setup_payment_processor` above, so partial-payment policy always
+/// resolves to "not allowed" when `allow_partial` is `false`.
+fn setup_pending_payment(
+    env: &Env,
+    amount: i128,
+    allow_partial: bool,
+) -> (Address, PaymentProcessorClient<'_>, String) {
+    let (admin, client) = setup_payment_processor(env);
+    let merchant = Address::generate(env);
+    let oracle = Address::generate(env);
+    client.grant_role(&admin, &role_merchant(env), &merchant);
+    client.grant_role(&admin, &role_oracle(env), &oracle);
+
+    let payment_id = format_id(env, "sm_prop_", 0u64);
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        payer: None,
+        amount,
+        currency: Symbol::new(env, "USDC"),
+        deposit_address: Address::generate(env),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        idempotency_key: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        allow_partial: Some(allow_partial),
+        tip_enabled: false,
+    };
+    client.create_payment(&args);
+
+    (oracle, client, payment_id)
+}
+
+/// Issue #1186: deploys a `PaymentLinkManager` (with the caller merchant
+/// already granted the merchant role) alongside a fresh `FXOracle`
+/// initialized with `staleness_threshold` (clamped server-side to
+/// `[MIN_RATE_AGE_SECS, MAX_RATE_AGE_SECS]`, i.e. `[60, 86_400]`), and an
+/// oracle operator address already granted the `ORACLE` role so the caller
+/// can publish rates with `oracle_client.set_rate(...)`.
+fn setup_fiat_payment_link(
+    env: &Env,
+    staleness_threshold: u64,
+) -> (
+    Address,
+    PaymentLinkManagerClient<'_>,
+    Address,
+    Address,
+    FXOracleClient<'_>,
+) {
+    let link_contract = env.register(PaymentLinkManager, ());
+    let link_client = PaymentLinkManagerClient::new(env, &link_contract);
+    let merchant = Address::generate(env);
+    link_client.initialize(&merchant).unwrap();
+    link_client.grant_merchant_role(&merchant, &merchant);
+
+    let oracle_id = env.register(FXOracle, ());
+    let oracle_client = FXOracleClient::new(env, &oracle_id);
+    let oracle_admin = Address::generate(env);
+    oracle_client.oracle_initialize(&oracle_admin, &staleness_threshold);
+    let oracle_operator = Address::generate(env);
+    oracle_client.oracle_grant_role(&oracle_admin, &Symbol::new(env, "ORACLE"), &oracle_operator);
+
+    (merchant, link_client, oracle_id, oracle_operator, oracle_client)
 }
 
 proptest! {
@@ -176,11 +293,13 @@ proptest! {
             memo_type: None,
             token_address: None,
             client_token: None,
+            idempotency_key: None,
             metadata_hash: None, metadata: None,
             fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
-        };
+                tip_enabled: false,
+    };
 
         client.create_payment(&args);
 
@@ -231,11 +350,13 @@ proptest! {
             memo_type: None,
             token_address: None,
             client_token: None,
+            idempotency_key: None,
             metadata_hash: None, metadata: None,
             fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
-        };
+                tip_enabled: false,
+    };
 
         client.create_payment(&args);
 
@@ -321,8 +442,8 @@ proptest! {
 
         let t1 = last_at.saturating_add(delta1);
         let t2 = t1.saturating_add(delta2);
-        let a1 = compute_total_accrued(checkpoint, last_at, t1, rate, deposit);
-        let a2 = compute_total_accrued(checkpoint, last_at, t2, rate, deposit);
+        let a1 = compute_total_accrued(checkpoint, last_at, t1, rate, deposit, None);
+        let a2 = compute_total_accrued(checkpoint, last_at, t2, rate, deposit, None);
         prop_assert!(a2 >= a1, "accrual decreased: {} -> {} (t {} -> {})", a1, a2, t1, t2);
     }
 
@@ -338,7 +459,7 @@ proptest! {
         use crate::stream::compute_total_accrued;
 
         let now = last_at.saturating_add(now_offset);
-        let accrued = compute_total_accrued(checkpoint, last_at, now, rate, deposit);
+        let accrued = compute_total_accrued(checkpoint, last_at, now, rate, deposit, None);
         prop_assert!(accrued >= 0);
         prop_assert!(accrued <= deposit.max(0));
     }
@@ -371,7 +492,7 @@ proptest! {
 
         let payment_id = format_id(&env, "refund_inv_", nonce);
         let merchant_id = Address::generate(&env);
-        let requester = Address::generate(&env);
+        let requester = merchant_id.clone();
 
         client.register_payment(
             &payment_id,
@@ -451,7 +572,7 @@ proptest! {
         // all targeting the same payment_id before any are approved/rejected.
         let mut accepted_total: i128 = 0;
         for &amount in refund_amounts.iter() {
-            let requester = Address::generate(&env);
+            let requester = merchant_id.clone();
             let reason = soroban_sdk::String::from_str(&env, "concurrent refund");
             let result = client.try_create_refund(&payment_id, &amount, &reason, &requester);
 
@@ -468,6 +589,152 @@ proptest! {
             .map(|r| r.amount)
             .sum();
         prop_assert!(tracked_total <= payment_amount);
+    }
+
+    /// Issue #591: A merchant's running monthly volume must never exceed the
+    /// effective cap for their current KYC tier, regardless of payment count or
+    /// individual payment size.
+    #[test]
+    fn prop_monthly_volume_never_exceeds_tier_cap(
+        tier in prop_oneof![
+            Just(KycTier::Unverified),
+            Just(KycTier::Basic),
+            Just(KycTier::Full),
+            Just(KycTier::Business),
+        ],
+        amounts in prop::collection::vec(1i128..=10_000_000_000_000i128, 1..=50),
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+
+        let payment_contract = env.register(crate::PaymentProcessor, ());
+        let registry_contract = env.register(crate::merchant_registry::MerchantRegistry, ());
+
+        let payment_client = PaymentProcessorClient::new(&env, &payment_contract);
+        let registry_client = crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_contract);
+
+        let admin = Address::generate(&env);
+        payment_client.initialize_payment_processor(&admin);
+        registry_client.initialize(&admin);
+        payment_client.set_merchant_registry_address(&admin, &registry_contract);
+
+        let merchant = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+        payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+        registry_client.register_merchant(
+            &merchant,
+            &String::from_str(&env, "Prop Merchant"),
+            &String::from_str(&env, "USDC"),
+            &None::<Address>,
+            &None::<String>,
+            &crate::MaybeFeeConfig::None,
+        );
+
+        registry_client.set_kyc_tier_with_signature(
+            &admin,
+            &merchant,
+            &tier,
+            &Some(String::from_str(&env, "sig")),
+        );
+        payment_client.set_merchant_rate_limit(&admin, &merchant, &60u64, &100u32);
+
+        let cap = match &tier {
+            KycTier::Unverified => TIER_CAP_UNVERIFIED,
+            KycTier::Basic => TIER_CAP_BASIC,
+            KycTier::Full => TIER_CAP_FULL,
+            KycTier::Business => TIER_CAP_BUSINESS,
+        };
+
+        let deposit = Address::generate(&env);
+        let mut running_total: i128 = 0;
+
+        for (idx, &generated_amount) in amounts.iter().enumerate() {
+            // Unverified merchants have a separate $100 per-payment ceiling.
+            // Keep every generated payment valid so this property isolates the
+            // monthly-volume invariant rather than the per-payment limit.
+            let amount = match &tier {
+                KycTier::Unverified => generated_amount.min(1_000_000_000),
+                KycTier::Basic => generated_amount.min(TIER_CAP_BASIC),
+                KycTier::Full => generated_amount.min(TIER_CAP_FULL),
+                KycTier::Business => generated_amount,
+            };
+            let payment_id = format_id(
+                &env,
+                "prop_cap_",
+                nonce.wrapping_add(idx as u64),
+            );
+            // Payment creation requires a verified merchant. Create while the
+            // merchant is Basic, then restore the generated tier before the
+            // verification path applies its monthly cap.
+            registry_client.set_kyc_tier_with_signature(
+                &admin,
+                &merchant,
+                &KycTier::Basic,
+                &Some(String::from_str(&env, "sig")),
+            );
+            payment_client.create_payment(&crate::CreatePaymentArgs {
+                payment_id: payment_id.clone(),
+                merchant_id: merchant.clone(),
+                payer: None,
+                amount,
+                currency: Symbol::new(&env, "USDC"),
+                deposit_address: deposit.clone(),
+                expires_at: Some(env.ledger().timestamp() + 3600),
+                duration_secs: None,
+                memo: None,
+                memo_type: None,
+                token_address: None,
+                client_token: None,
+                metadata_hash: None,
+                metadata: None,
+                fee_waiver_code: None,
+                retry_of_payment_id: None,
+                payer_muxed_id: None,
+                    tip_enabled: false,
+    });
+            registry_client.set_kyc_tier_with_signature(
+                &admin,
+                &merchant,
+                &tier,
+                &Some(String::from_str(&env, "sig")),
+            );
+
+            let result = payment_client.try_verify_payment(
+                &oracle,
+                &payment_id,
+                &BytesN::<32>::random(&env),
+                &Address::generate(&env),
+                &amount,
+                &None,
+            );
+
+            match result {
+                Ok(_) => {
+                    running_total = running_total.saturating_add(amount);
+                    prop_assert!(running_total <= cap,
+                        "tier {:?} exceeded cap {} with running total {} after amount {}",
+                        tier,
+                        cap,
+                        running_total,
+                        amount,
+                    );
+                }
+                Err(Ok(Error::TierVolumeLimitExceeded)) => {
+                    prop_assert!(
+                        running_total + amount > cap,
+                        "cap exceeded should be rejected only when {} + {} > {} (running_total={})",
+                        running_total,
+                        amount,
+                        cap,
+                        running_total,
+                    );
+                }
+                other => prop_assert!(false, "unexpected verification result for {:?}: {:?}", tier, other),
+            }
+        }
     }
 
     /// Issue #681: Subscription cannot be charged before the billing interval has elapsed.
@@ -489,6 +756,7 @@ proptest! {
             &amount,
             &Symbol::new(&env, "USDC"),
             &BillingInterval::Weekly,
+            &None,
         );
 
         let sub_id = client.subscribe(
@@ -542,6 +810,7 @@ proptest! {
             &amount,
             &Symbol::new(&env, "USDC"),
             &BillingInterval::Weekly,
+            &None,
         );
 
         let sub_id = client.subscribe(
@@ -588,6 +857,7 @@ proptest! {
             &amount,
             &Symbol::new(&env, "USDC"),
             &BillingInterval::Weekly,
+            &None,
         );
 
         let sub_id = client.subscribe(
@@ -612,4 +882,669 @@ proptest! {
             "next_retry_at {:?} should equal now + SUBSCRIPTION_RETRY_INTERVAL_SECS ({})",
             sub.next_retry_at, expected_retry);
     }
+
+    // ── Fee-split arithmetic invariants (issue #590) ────────────────────────────
+
+    /// `platform_fee = treasury_share + developer_share` for every valid BPS
+    /// configuration. Mirrors the integer-division formula in
+    /// `PaymentProcessor::settle_payment`:
+    ///   dev  = fee * developer_bps / 10_000
+    ///   treasury = fee - dev   (remainder / rounding dust)
+    #[test]
+    fn proptest_fee_split_sums_to_platform_fee(
+        fee in 0i128..=1_000_000_000_000i128,
+        treasury_bps in 0u32..=10_000u32,
+        developer_bps in 0u32..=10_000u32,
+    ) {
+        prop_assume!(treasury_bps as u64 + developer_bps as u64 <= 10_000);
+
+        let dev_amount: i128 = fee * developer_bps as i128 / 10_000;
+        let treasury_total: i128 = fee - dev_amount;
+
+        // Core invariant: the two shares must reconstruct the original fee.
+        prop_assert_eq!(
+            treasury_total + dev_amount, fee,
+            "treasury {} + dev {} != fee {}",
+            treasury_total, dev_amount, fee
+        );
+
+        // Neither share may be negative.
+        prop_assert!(treasury_total >= 0, "treasury_total negative: {}", treasury_total);
+        prop_assert!(dev_amount >= 0, "dev_amount negative: {}", dev_amount);
+
+        // Each share must not exceed the fee itself.
+        prop_assert!(treasury_total <= fee, "treasury_total {} > fee {}", treasury_total, fee);
+        prop_assert!(dev_amount <= fee, "dev_amount {} > fee {}", dev_amount, fee);
+    }
+
+    /// Merchant net amount after platform fee never exceeds gross payment amount.
+    #[test]
+    fn proptest_merchant_net_never_exceeds_gross(
+        amount in 1i128..=1_000_000_000_000i128,
+        fee_bps in 0i128..=10_000i128,
+    ) {
+        let fee = amount * fee_bps / 10_000;
+        let net = amount - fee;
+
+        prop_assert!(net >= 0, "net went negative: {}", net);
+        prop_assert!(net <= amount, "net {} > amount {}", net, amount);
+        prop_assert!(fee >= 0, "fee negative: {}", fee);
+    }
+
+    // ── Stream accrual bounded-by-deposit invariant (issue #589) ─────────────────
+
+    /// Accrued amount must never exceed the total deposit, regardless of
+    /// rate, elapsed time, or checkpoint values.
+    #[test]
+    fn proptest_stream_accrued_bounded_by_deposit(
+        checkpoint in 0i128..=i128::MAX / 4,
+        last_at in 0u64..u64::MAX / 4,
+        elapsed in 0u64..=86_400u64,
+        rate in 0i128..=i128::MAX / 86_400,
+        deposit in 1i128..=i128::MAX / 4,
+    ) {
+        use crate::stream::compute_total_accrued;
+
+        let now = last_at.saturating_add(elapsed);
+        let accrued = compute_total_accrued(checkpoint, last_at, now, rate, deposit);
+        prop_assert!(accrued >= 0, "accrual negative: {}", accrued);
+        prop_assert!(
+            accrued <= deposit.max(0),
+            "accrual {} exceeded deposit {}",
+            accrued, deposit
+        );
+    }
+
+    /// Compute_total_accrued with zero rate always returns the checkpoint value
+    /// (clamped to deposit).
+    #[test]
+    fn proptest_stream_zero_rate_returns_checkpoint(
+        checkpoint in 0i128..=1_000_000_000i128,
+        last_at in 0u64..=1_000_000u64,
+        elapsed in 0u64..=10_000u64,
+        deposit in 1i128..=i128::MAX / 4,
+    ) {
+        use crate::stream::compute_total_accrued;
+
+        let now = last_at.saturating_add(elapsed);
+        let accrued = compute_total_accrued(checkpoint, last_at, now, 0, deposit);
+
+        let expected = checkpoint.min(deposit.max(0)).max(0);
+        prop_assert_eq!(accrued, expected);
+    }
+
+    /// Remaining deposit after withdrawal is always in [0, remaining].
+    #[test]
+    fn proptest_stream_withdraw_clamped(
+        remaining in 0i128..=i128::MAX / 2,
+        withdraw in 0i128..=i128::MAX / 2,
+    ) {
+        use crate::stream::compute_remaining_after_withdraw;
+
+        let after = compute_remaining_after_withdraw(remaining, withdraw);
+        prop_assert!(after >= 0, "remaining went negative: {}", after);
+        prop_assert!(after <= remaining.max(0), "after {} > remaining {}", after, remaining);
+    }
+
+    /// Issue #853: payment_id_to_key helper produces consistent 32-byte keys
+    /// and exhibits collision resistance for distinct payment IDs.
+    #[test]
+    fn proptest_payment_id_to_key_collision_resistance(
+        id1 in "[a-zA-Z0-9_-]{1,64}",
+        id2 in "[a-zA-Z0-9_-]{1,64}",
+    ) {
+        use crate::data_keys::payment_id_to_key;
+        let env = Env::default();
+        let s1 = String::from_str(&env, &id1);
+        let s2 = String::from_str(&env, &id2);
+
+        let key1 = payment_id_to_key(&env, &s1);
+        let key2 = payment_id_to_key(&env, &s2);
+
+        // Determinism: hashing the same id yields identical key
+        let key1_again = payment_id_to_key(&env, &s1);
+        prop_assert_eq!(key1.clone(), key1_again);
+
+        // Collision resistance: distinct IDs must produce distinct keys
+        if id1 != id2 {
+            prop_assert_ne!(key1, key2);
+        } else {
+            prop_assert_eq!(key1, key2);
+        }
+    }
+
+    /// Issue #772: Accrual across many pause/resume cycles exhibits no negative drift.
+    #[test]
+    fn proptest_stream_pause_resume_many_cycles_no_drift(
+        rate in 1i128..=10_000,
+        cycles in 1usize..=100,
+        active_step in 1u64..=100,
+        pause_step in 1u64..=500,
+    ) {
+        use crate::stream::compute_total_accrued;
+
+        let deposit = i128::MAX / 4;
+        let mut baseline_accrued = 0i128;
+        let mut last_checkpoint = 1000u64;
+        let mut current_time = 1000u64;
+        let mut total_active_elapsed = 0u64;
+
+        for _ in 0..cycles {
+            // Active period
+            current_time = current_time.saturating_add(active_step);
+            total_active_elapsed = total_active_elapsed.saturating_add(active_step);
+
+            // Snapshot at pause
+            let accrued_at_pause = compute_total_accrued(
+                baseline_accrued,
+                last_checkpoint,
+                current_time,
+                rate,
+                deposit,
+            );
+            prop_assert!(
+                accrued_at_pause >= baseline_accrued,
+                "Accrual drifted negatively at pause"
+            );
+
+            // Paused interval: time passes, no accrual happens
+            current_time = current_time.saturating_add(pause_step);
+
+            // Resume carries accrued_at_pause forward as new baseline
+            baseline_accrued = accrued_at_pause;
+            last_checkpoint = current_time;
+        }
+
+        let expected_total = (total_active_elapsed as i128).saturating_mul(rate);
+        prop_assert_eq!(baseline_accrued, expected_total);
+    }
+
+    // ---- Issue #1034: payment state machine transition properties ----
+    //
+    // `payment_state_machine.rs` is the single source of truth for which
+    // `PaymentStatus` transitions are legal. These properties fuzz both the
+    // pure transition table directly and `verify_payment`'s use of it, so a
+    // change that silently allows (or forbids) a transition is caught here
+    // even if no discrete unit test happens to cover that exact pair.
+
+    /// Property: no invalid transitions. For every pair of `PaymentStatus`
+    /// variants, `validate_transition` must agree with the transition table
+    /// documented at the top of `payment_state_machine.rs` - it can never
+    /// accept an edge that isn't listed there, and never reject one that is.
+    #[test]
+    fn proptest_state_machine_matches_documented_transition_table(
+        from_idx in 0usize..8,
+        to_idx in 0usize..8,
+    ) {
+        use crate::PaymentStatus::*;
+
+        let statuses = [
+            Pending, Confirmed, Settled, Expired, Failed, PartiallyPaid, Overpaid, Disputed,
+        ];
+        let from = statuses[from_idx].clone();
+        let to = statuses[to_idx].clone();
+
+        // Mirrors the `| (From, To)` arms in `payment_state_machine::is_valid_transition`.
+        let documented_valid = matches!(
+            (&from, &to),
+            (Pending, Confirmed)
+                | (Pending, Expired)
+                | (Pending, Failed)
+                | (Pending, PartiallyPaid)
+                | (Pending, Overpaid)
+                | (PartiallyPaid, PartiallyPaid)
+                | (PartiallyPaid, Confirmed)
+                | (PartiallyPaid, Overpaid)
+                | (PartiallyPaid, Expired)
+                | (PartiallyPaid, Failed)
+                | (Confirmed, Settled)
+                | (Confirmed, Disputed)
+                | (Disputed, Settled)
+        );
+
+        let result = crate::payment_state_machine::validate_transition(from, to);
+        prop_assert_eq!(result.is_ok(), documented_valid);
+    }
+
+    /// Property: idempotency. Calling `verify_payment` a second time against
+    /// an already-`Confirmed` payment must return the same status and must
+    /// not re-accumulate `amount_received` or move `confirmed_at`, no matter
+    /// what amount, tx hash, or payer is passed the second time (Issue #75).
+    #[test]
+    fn proptest_verify_payment_confirmed_is_idempotent(
+        amount in 10i128..1_000_000i128,
+        second_amount in 0i128..1_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (oracle, client, payment_id) = setup_pending_payment(&env, amount, false);
+
+        let first_status = client.verify_payment(
+            &oracle,
+            &payment_id,
+            &BytesN::<32>::random(&env),
+            &Address::generate(&env),
+            &amount,
+            &None,
+        );
+        prop_assert_eq!(first_status, PaymentStatus::Confirmed);
+
+        let after_first = client.get_payment(&payment_id);
+        prop_assert_eq!(after_first.status.clone(), PaymentStatus::Confirmed);
+        prop_assert_eq!(after_first.amount_received, Some(amount));
+
+        let second_status = client.verify_payment(
+            &oracle,
+            &payment_id,
+            &BytesN::<32>::random(&env),
+            &Address::generate(&env),
+            &second_amount,
+            &None,
+        );
+        prop_assert_eq!(second_status, PaymentStatus::Confirmed);
+
+        let after_second = client.get_payment(&payment_id);
+        prop_assert_eq!(after_second.status, PaymentStatus::Confirmed);
+        prop_assert_eq!(after_second.amount_received, Some(amount));
+        prop_assert_eq!(after_second.confirmed_at, after_first.confirmed_at);
+    }
+
+    /// Property: monotonicity. A payment's `confirmed_at` (once set) is
+    /// always >= its `created_at`, and `created_at` never changes once the
+    /// payment exists, regardless of how far the ledger clock advances
+    /// before confirmation.
+    #[test]
+    fn proptest_payment_timestamps_non_decreasing(
+        amount in 10i128..1_000_000i128,
+        ledger_advance in 0u64..3000u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (oracle, client, payment_id) = setup_pending_payment(&env, amount, false);
+
+        let before = client.get_payment(&payment_id);
+        prop_assert!(before.confirmed_at.is_none());
+
+        let advanced_timestamp = env.ledger().timestamp() + ledger_advance;
+        env.ledger().set_timestamp(advanced_timestamp);
+
+        let status = client.verify_payment(
+            &oracle,
+            &payment_id,
+            &BytesN::<32>::random(&env),
+            &Address::generate(&env),
+            &amount,
+            &None,
+        );
+        prop_assert_eq!(status, PaymentStatus::Confirmed);
+
+        let after = client.get_payment(&payment_id);
+        prop_assert_eq!(after.created_at, before.created_at);
+        let confirmed_at = after.confirmed_at.expect("Confirmed payment must set confirmed_at");
+        prop_assert!(confirmed_at >= after.created_at);
+    }
+
+    /// Property: conservation. In non-partial-payment mode `amount_received`
+    /// is never silently accumulated across calls the way it is when
+    /// `allow_partial = true` (Issue #767) - it always reflects exactly the
+    /// most recent `verify_payment` call, and once an under-payment settles
+    /// the payment into a terminal `Failed` state (no partial policy
+    /// configured), a later call is rejected rather than adding on top of
+    /// the first amount.
+    #[test]
+    fn proptest_non_partial_amount_received_is_not_accumulated(
+        amount in 1_000i128..1_000_000i128,
+        first_amount in 1i128..500i128,
+        second_amount in 1i128..500_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (oracle, client, payment_id) = setup_pending_payment(&env, amount, false);
+
+        // first_amount is well below `amount - PAYMENT_TOLERANCE`, so this
+        // call under-pays and (with no partial-payment policy configured)
+        // resolves to the terminal `Failed` status rather than `Confirmed`.
+        prop_assume!(first_amount < amount - PAYMENT_TOLERANCE);
+
+        let first_status = client.verify_payment(
+            &oracle,
+            &payment_id,
+            &BytesN::<32>::random(&env),
+            &Address::generate(&env),
+            &first_amount,
+            &None,
+        );
+        prop_assert_eq!(first_status, PaymentStatus::Failed);
+
+        let after_first = client.get_payment(&payment_id);
+        prop_assert_eq!(after_first.amount_received, Some(first_amount));
+
+        // The payment is now terminal; a second attempt must be rejected
+        // and must not touch the stored amount_received.
+        let second_result = client.try_verify_payment(
+            &oracle,
+            &payment_id,
+            &BytesN::<32>::random(&env),
+            &Address::generate(&env),
+            &second_amount,
+            &None,
+        );
+        prop_assert!(second_result.is_err());
+
+        let after_second = client.get_payment(&payment_id);
+        prop_assert_eq!(after_second.amount_received, Some(first_amount));
+    }
+
+    // ---- Issue #1186: FX conversion properties for payment links ----
+    //
+    // `PaymentLinkManager::use_link` resolves a fiat-denominated link's USDC
+    // equivalent with `fiat_cfg.amount.saturating_mul(10^decimals).checked_div(rate)`
+    // (see `payment_link.rs`). These properties fuzz `rate`, `decimals`, and
+    // `fiat_amount` to pin down that formula end-to-end through the real
+    // contract (not a reimplementation), confirm the division always floors
+    // (and is tight, i.e. the true mathematical quotient), confirm a caller
+    // who guesses any other USDC amount is rejected, confirm extreme
+    // magnitudes near `i128::MAX` never panic/trap (the production code uses
+    // only `saturating_mul`/`checked_div`, never a bare `*` or `.unwrap()` on
+    // the division), and confirm a stale oracle rate is rejected at
+    // `use_link` time regardless of the configured staleness threshold.
+
+    /// Property: the USDC amount accepted by `use_link` for a fiat-priced
+    /// link is exactly `fiat_amount * 10^decimals / rate` (floor), for any
+    /// positive rate/decimals/fiat_amount combination, and that amount is
+    /// recorded verbatim in the link's `total_revenue`.
+    #[test]
+    fn proptest_fiat_to_usdc_conversion_matches_oracle_rate(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=12u32,
+        fiat_amount in 1i128..1_000_000_000i128,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        // Mirror `use_link`'s exact saturating-arithmetic formula.
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+        prop_assume!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxprop_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX conversion property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        let payment_id = link_client.use_link(&payer, &link_id, &expected_usdc, &None);
+        prop_assert!(!payment_id.is_empty());
+
+        let link = link_client.get_link(&link_id);
+        prop_assert_eq!(link.total_revenue, expected_usdc);
+        prop_assert_eq!(link.use_count, 1);
+    }
+
+    /// Property: rounding is a *tight* floor. The USDC amount `use_link`
+    /// accepts, multiplied back by `rate`, must never exceed the fiat
+    /// numerator (`fiat_amount * 10^decimals`) - and one additional USDC
+    /// stroop would overshoot it. This pins down the direction and
+    /// tightness of the division's rounding, not just that *some* value is
+    /// accepted.
+    #[test]
+    fn proptest_fiat_to_usdc_rounding_is_floor_and_tight(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=12u32,
+        fiat_amount in 1i128..1_000_000_000i128,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let numerator = fiat_amount.saturating_mul(divisor);
+        let expected_usdc = numerator.checked_div(rate).unwrap();
+        prop_assume!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxround_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX rounding property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        link_client.use_link(&payer, &link_id, &expected_usdc, &None);
+        let resolved = link_client.get_link(&link_id).total_revenue;
+
+        // Floor: the resolved amount times the rate never overshoots the
+        // fiat numerator...
+        prop_assert!(resolved.saturating_mul(rate) <= numerator);
+        // ...and tight: one more USDC stroop would overshoot it, so
+        // `resolved` is the unique floor quotient, not merely *a* valid one.
+        prop_assert!((resolved + 1).saturating_mul(rate) > numerator);
+    }
+
+    /// Property: a payer who sends any USDC amount other than the exact
+    /// oracle-resolved equivalent is rejected with `InvalidAmount`,
+    /// regardless of rate/decimals/fiat amount, and the link's state
+    /// (use_count, total_revenue) is left untouched.
+    #[test]
+    fn proptest_fiat_to_usdc_rejects_mismatched_amount(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=12u32,
+        fiat_amount in 1i128..1_000_000_000i128,
+        delta in 1i128..1_000i128,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+
+        let link_id = format_id(&env, "fxwrong_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX mismatch property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        let wrong_amount = expected_usdc.saturating_add(delta);
+        prop_assume!(wrong_amount != expected_usdc);
+
+        let result = link_client.try_use_link(&payer, &link_id, &wrong_amount, &None);
+        prop_assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+        let link = link_client.get_link(&link_id);
+        prop_assert_eq!(link.use_count, 0);
+        prop_assert_eq!(link.total_revenue, 0);
+    }
+
+    /// Property: overflow guard. Even when `decimals` and `fiat_amount` are
+    /// both pushed toward `i128::MAX` (so `fiat_amount * 10^decimals`
+    /// necessarily saturates), `use_link` must resolve deterministically -
+    /// to the identical saturated value our own saturating-arithmetic
+    /// reference computes - rather than panicking/trapping. This is a
+    /// regression guard for the production code's `saturating_mul` /
+    /// `checked_div` chain (`payment_link.rs`), which has no bare arithmetic
+    /// operator or `.unwrap()` on the division in the fiat-conversion path.
+    #[test]
+    fn proptest_fiat_to_usdc_overflow_never_panics(
+        rate in 1i128..1_000i128,
+        decimals in 30u32..=38u32,
+        fiat_amount in (i128::MAX / 2)..i128::MAX,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, 86_400);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+        prop_assert!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxoverflow_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX overflow guard property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        let payer = Address::generate(&env);
+        let result = link_client.try_use_link(&payer, &link_id, &expected_usdc, &None);
+        prop_assert!(
+            result.is_ok(),
+            "overflow-range rate/decimals/fiat_amount must resolve deterministically, not trap: {:?}",
+            result
+        );
+    }
+
+    /// Property: a rate that has gone stale (ledger time advanced strictly
+    /// past the configured staleness threshold, with no new `set_rate`
+    /// call) is rejected at `use_link` time with `StaleOracleRate`,
+    /// regardless of the specific threshold, rate, decimals, or fiat
+    /// amount.
+    #[test]
+    fn proptest_stale_fiat_rate_rejected_at_use_time(
+        rate in 1i128..1_000_000_000i128,
+        decimals in 0u32..=7u32,
+        fiat_amount in 1i128..1_000_000i128,
+        threshold in 60u64..=86_400u64,
+        overage in 1u64..10_000u64,
+        nonce in 0u64..u64::MAX,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (merchant, link_client, oracle_id, oracle_operator, oracle_client) =
+            setup_fiat_payment_link(&env, threshold);
+
+        let currency = Symbol::new(&env, "USD");
+        oracle_client.set_rate(&oracle_operator, &currency, &rate, &decimals);
+
+        let mut divisor = 1i128;
+        for _ in 0..decimals {
+            divisor = divisor.saturating_mul(10);
+        }
+        let expected_usdc = fiat_amount.saturating_mul(divisor).checked_div(rate).unwrap();
+        prop_assume!(expected_usdc > 0);
+
+        let link_id = format_id(&env, "fxstale_", nonce);
+        let fiat = FiatConfig {
+            amount: fiat_amount,
+            currency,
+            oracle: oracle_id,
+        };
+        link_client.create_link(
+            &merchant,
+            &link_id,
+            &None,
+            &Symbol::new(&env, "USDC"),
+            &String::from_str(&env, "FX stale rate property test"),
+            &None,
+            &None,
+            &false,
+            &None,
+            &MaybeFiatConfig::Some(fiat),
+            &None,
+        );
+
+        // Advance the ledger clock strictly past the configured staleness
+        // threshold, with no further `set_rate` call, so the stored rate
+        // goes stale.
+        let now = env.ledger().timestamp();
+        env.ledger().set_timestamp(now + threshold + overage);
+
+        let payer = Address::generate(&env);
+        let result = link_client.try_use_link(&payer, &link_id, &expected_usdc, &None);
+        prop_assert_eq!(result, Err(Ok(Error::StaleOracleRate)));
+
+        let link = link_client.get_link(&link_id);
+        prop_assert_eq!(link.use_count, 0);
+        prop_assert_eq!(link.total_revenue, 0);
+    }
 }
+

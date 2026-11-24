@@ -1,6 +1,6 @@
-# @fluxapay/sdk
+# FluxaPay SDK
 
-Official TypeScript SDK for interacting with FluxaPay's Soroban smart contracts on the Stellar network.
+TypeScript SDK for interacting with FluxaPay Soroban contracts on Stellar.
 
 ## Installation
 
@@ -8,53 +8,58 @@ Official TypeScript SDK for interacting with FluxaPay's Soroban smart contracts 
 npm install @fluxapay/sdk
 ```
 
-## Release Notes
-
-See [CHANGELOG.md](./CHANGELOG.md) for version history.
-
-Upgrading between major versions? See the
-[SDK Migration Guide](../docs/sdk-migration-guide.md) for breaking changes
-and before/after code snippets.
-
 ## Quick Start
 
 ```typescript
-import { FluxapayClient } from "@fluxapay/sdk";
+import { FluxaPayClient } from '@fluxapay/sdk';
 
-const client = new FluxapayClient({
-  network: "testnet",
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  contractId: "C...", // PaymentProcessor contract ID
-  merchantRegistryContractId: "C...", // MerchantRegistry contract ID (optional)
+const client = new FluxaPayClient({
+  rpcUrl: 'https://soroban-testnet.stellar.org',
+  networkPassphrase: 'Test SDF Network ; September 2015',
+  contractId: 'C...',
 });
 
-async function main() {
-  // Create a payment with full CreatePaymentArgs support
-  const payment = await client.createPayment({
-    paymentId: "pay_123",
-    merchantId: "G...",
-    amount: 1000000n, // 1 USDC
-    currency: "USDC",
-    depositAddress: "G...",
-    expiresAt: BigInt(Math.floor(Date.now() / 1000) + 3600),
-    durationSecs: 3600n,           // optional: alternative to expiresAt
-    memo: "Order #42",             // optional
-    memoType: "Text",              // optional: Text | Id | Hash | Return
-    tokenAddress: "C...",          // optional: custom token
-    clientToken: "idempotency-key", // optional: idempotency key
+const payment = await client.payments.createPayment({
+  amount: '100.00',
+  asset: 'USDC',
+  destination: 'G...',
+});
+```
+
+## Pre-flight Simulation
+
+All write operations run a Soroban `simulateTransaction` pre-flight check before
+submission. This predicts failures (insufficient balance, invalid state,
+authorization errors) before a base transaction fee is consumed, and surfaces
+them as typed `FluxaPayError` instances with human-readable messages.
+
+```typescript
+try {
+  const payment = await client.payments.createPayment({
+    amount: '100.00',
+    asset: 'USDC',
+    destination: 'G...',
   });
-
-  console.log("Payment created:", payment);
-
-  // Get payment status
-  const status = await client.getPayment("pay_123");
-  console.log("Payment status:", status);
+} catch (err) {
+  if (err instanceof FluxaPayError) {
+    console.error(err.code, err.message);
+  }
 }
 ```
 
+Duplicate IDs are collapsed into a single read; the returned Map is keyed by ID
+either way.
+
+> The reads are issued concurrently against the same RPC rather than as one
+> contract invocation. A true single-call batch needs an on-chain view taking a
+> vector of IDs, and `get_payment` takes one — so batching on-chain would mean a
+> contract change and a redeploy. This gets the latency win without that. If
+> such a view lands later, the method signature does not change; only its body
+> does.
+
 ## Contract IDs
 
-Every network environment (`mainnet`, `testnet`, `standalone`) has a canonical
+Every network environment (`mainnet`, `testnet`, `sandbox`, `standalone`) has a canonical
 set of deployed contract addresses exported as `FLUXAPAY_CONTRACT_IDS`:
 
 ```typescript
@@ -88,12 +93,25 @@ rather than making an RPC call to a nonsense address. CI runs
 placeholders — a reminder to update `sdk/src/network-profiles.ts` once the
 mainnet deployment lands.
 
+## Network profiles
+
+Select `mainnet`, `testnet`, or `sandbox` with the `network` option. The
+`sandbox` profile uses the local Soroban RPC endpoint; pass the contract ID
+from your local deployment:
+
+```typescript
+const client = new FluxapayClient({
+  network: "sandbox",
+  contractId: "C...", // locally deployed PaymentProcessor
+});
+```
+
 ## Features
 
 - **High-level Wrapper**: `FluxapayClient`, `RefundManagerClient`, `MerchantRegistryClient`, and `FxOracleClient` simplify complex contract interactions.
 - **Typed Interfaces**: Full TypeScript support for all contract models (`Merchant`, `PaymentCharge`, `Refund`, `FeeConfig`, etc.).
 - **Automatic Simulation**: Built-in support for Soroban transaction simulation.
-- **Network Presets**: Easy switching between `testnet` and `mainnet`.
+- **Network Presets**: Easy switching between `testnet`, `mainnet`, and local `sandbox`.
 - **SEP-10 Authentication**: Merchant API access via Stellar Web Authentication standard.
 
 ## SEP-10 Merchant Authentication
@@ -232,7 +250,10 @@ await client.resolveDisputeWithRefund("G...", "dispute_001", "Refund approved");
 
 // Query disputes
 const dispute = await client.getDispute("dispute_001");
-const paymentDisputes = await client.getPaymentDisputes("pay_123");
+const allDisputes = await client.getPaymentDisputes("pay_123");
+// Filter disputes by status (Issue #575)
+const openDisputes = await client.getPaymentDisputes("pay_123", "Open");
+const resolvedDisputes = await client.getPaymentDisputesByStatus("pay_123", "Resolved");
 ```
 
 ## Partial / Overpaid Payments (FluxapayClient)
@@ -348,6 +369,38 @@ const settlement = await client.getCollaborativeSettlement("dispute_001");
 
 An invalid or mismatched signature surfaces as a mapped `InvalidSettlementSignature`
 `FluxapayError` (see `docs/error-codes.md`).
+
+## Subscription Management
+
+Create a merchant plan, subscribe a payer, and let an authorized billing
+operator process charges when they become due:
+
+```typescript
+const planId = await client.createSubscriptionPlan({
+  merchant: "GMERCHANT...",
+  planId: "pro_monthly",
+  name: "Pro",
+  description: "Monthly Pro subscription",
+  amount: 2_000_000n,
+  currency: "USDC",
+  billingInterval: "Monthly",
+});
+
+const subscriptionId = await client.subscribe({
+  payer: "GPAYER...",
+  planId,
+  maxPayments: 12,
+});
+
+await client.chargeSubscription("GBILLING_OPERATOR...", subscriptionId);
+const subscription = await client.getSubscription(subscriptionId);
+// Pause, resume, or cancel from the payer (or merchant for cancellation).
+await client.pauseSubscription("GPAYER...", subscriptionId);
+```
+
+`getPayerSubscriptions(payer)` returns all subscriptions associated with a
+payer. Subscription charge failures surface the mapped
+`SubscriptionInGracePeriod` and `SubscriptionRetryExhausted` errors.
 
 ## Usage-Based Billing (Metered Subscriptions) (issue #664)
 
@@ -539,7 +592,11 @@ const rate = await oracle.getRate("USDCNGN");
 
 ## Payment Links (FluxapayClient)
 
-Payment links let merchants share a reusable URL that payers can settle against. Pass `paymentLinkContractId` in config to enable these methods.
+Payment links let merchants share a reusable URL that payers can settle against.
+Pass `paymentLinkContractId` in config to enable these methods.
+The `PaymentLinkManager` must be initialized by its admin, who must grant the
+merchant role on that contract before `createLink`, `createPaymentLink`, or
+`batchCreateLinks` is called.
 
 ### Create a payment link
 
@@ -652,93 +709,42 @@ await linkClient.useLink("G_payer...", linkId, 10_000_000n, "C...");
 await linkClient.deactivateLink("G_merchant...", linkId);
 const active = await linkClient.verifyBatch([linkId]);
 ```
+### Dry run (simulation only)
 
-## Payment Streams
-
-`FluxapayClient` exposes wrappers for continuous payment streaming (`PaymentProcessor.create_stream` and related on-chain methods).
-
-```typescript
-const stream = await client.createStream({
-  sender: "G_SENDER...",
-  receiver: "G_RECEIVER...",
-  token: "C_USDC_TOKEN...",
-  ratePerSecond: 100n,
-  deposit: 1_000_000n,
-  streamId: "stream_001",
-});
-
-await client.topUpStream("G_SENDER...", "stream_001", 500_000n);
-await client.pauseStream("G_SENDER...", "stream_001");
-await client.resumeStream("G_SENDER...", "stream_001");
-
-// Withdraw everything accrued so far to the receiver
-await client.withdrawStream("G_RECEIVER...", "stream_001");
-
-const details = await client.getStream("stream_001");
-const senderStreams = await client.getSenderStreams("G_SENDER...");
-
-await client.cancelStream("G_SENDER...", "stream_001");
-```
-
-## Gas Estimation
-
-`GasEstimatorClient` queries the on-chain `GasEstimator` contract for predicted Soroban resource costs (instructions, ledger reads/writes, events, and resource fee in stroops) before submitting a transaction.
+Pass `simulate: true` to any write method to run the pre-flight simulation
+without submitting the transaction. The method returns the simulation result
+instead of a submitted transaction, which is useful for validating inputs and
+estimating resource usage before committing fees.
 
 ```typescript
-import { GasEstimatorClient } from "@fluxapay/sdk";
-
-const gasEstimator = new GasEstimatorClient({
-  network: "testnet",
-  gasEstimatorContractId: "C...", // GasEstimator contract ID
+const sim = await client.payments.createPayment({
+  amount: '100.00',
+  asset: 'USDC',
+  destination: 'G...',
+  simulate: true,
 });
 
-const estimate = await gasEstimator.estimate("CreatePayment");
-console.log(estimate.resourceFeeStroops);
-
-const allEstimates = await gasEstimator.estimateAll();
+console.log(sim.success); // true when the transaction would succeed
+console.log(sim.gasEstimate); // estimated resource cost
 ```
 
-## Offline / Hardware Wallet Signing
+### Skipping simulation
 
-`FluxapayClient.offlineSigner()` returns a `FluxapayOfflineSigner` that builds unsigned transaction payloads (XDR + JSON snapshot + required signers) for offline or hardware-wallet signing workflows, without submitting them.
+Set the `SKIP_SIMULATION=true` environment variable to bypass pre-flight
+simulation entirely. This is intended for testing only.
 
-Supported operations: `create_payment`, `verify_payment`, `create_refund`, and (for backend billing services) `charge_subscription` and `pull_payment`.
-
-```typescript
-const signer = client.offlineSigner();
-
-// Pre-build a subscription tick for batch submission or hardware-wallet signing.
-const tickPayload = await signer.buildSubscriptionTick({
-  operator: "G_OPERATOR...",
-  subscriptionId: "sub_123",
-  token: "C_USDC_TOKEN...",
-});
-
-// Pre-build a pre-authorized pull payment.
-const pullPayload = await signer.buildPullAuthorization({
-  merchant: "G_MERCHANT...",
-  customer: "G_CUSTOMER...",
-  amount: 5_000_000n,
-});
-
-// Each payload contains `unsignedXdr`, `hash`, `json`, and `requiredAuthSigners`.
-// Sign `unsignedXdr` offline, then restore + submit:
-const restored = signer.restore(tickPayload);
+```bash
+SKIP_SIMULATION=true npm test
 ```
 
-You can also use the standalone builder functions directly: `buildSubscriptionTickPayload`, `buildPullAuthorizationPayload`, `buildCreatePaymentPayload`, `buildVerifyPaymentPayload`, `buildCreateRefundPayload`.
+When simulation runs, the gas estimate is logged at debug level.
+
+## Error Handling
+
+Simulation failures are parsed into `FluxaPayError` instances. Each error
+exposes a `code` and a human-readable `message` describing the contract
+failure.
 
 ## License
 
 MIT
-
-## Publishing
-
-Releases are published to npm when a version tag is pushed:
-
-```bash
-git tag sdk/v0.1.0
-git push origin sdk/v0.1.0
-```
-
-The [SDK Release](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/sdk-release.yml) workflow builds, tests, and publishes `@fluxapay/sdk`. Requires `NPM_TOKEN` in GitHub repository secrets (npm automation token with publish access to the `@fluxapay` scope).

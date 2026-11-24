@@ -5,6 +5,12 @@ FluxaPay takes the security of our Soroban smart contracts and user funds (USDC)
 > [!IMPORTANT]
 > This project is in **active development** and has not yet completed an external security audit. Do not deploy to mainnet until the external audit is complete. See [Audit Status](#-audit-status) below.
 
+## Threat Model
+
+See the [FluxaPay threat model](docs/threat-model.md) for assets at risk, attack
+surfaces, implemented mitigations, and residual risks. This document is not an
+independent audit and should be reviewed alongside the current contract source.
+
 ---
 
 ## 📬 Reporting a Vulnerability
@@ -114,6 +120,12 @@ The following Soroban contracts and shared modules are fully in scope for securi
 - Multi-sig proposal threshold bypass
 - KYC tier cap bypass enabling volume over-limit
 
+## Governance and Admin Controls
+
+FluxaPay includes an on-chain multisig governance flow to require multiple approvals before high-risk administrative actions are executed. The design and rationale are documented in [docs/ADR-0004-multisig-admin-governance.md](docs/ADR-0004-multisig-admin-governance.md).
+
+The policy is intentionally scoped to the `AdminAction` proposal set in the `AccessControl` module: fee-rate changes, treasury-related risk configuration, dispute bond and tier-cap adjustments, and protected role-management actions all require the configured signer threshold to be met before execution. The same document also explains the nonce-based replay protection and the 48-hour expiry window for unexecuted proposals.
+
 ---
 
 ## ❌ Out of Scope
@@ -140,13 +152,14 @@ Current audit status is tracked in machine-readable form at [`audits/external-au
 | Audit | Auditor | Scope | Status | Report |
 | ----- | ------- | ----- | ------ | ------ |
 | Internal (2026-03-27) | Internal team | All contracts | ✅ Completed | Internal only |
-| External | TBD | Mainnet release scope | 🔄 Pending engagement | [Placeholder] |
+| External | TBD | Mainnet release scope | 🔄 Pending engagement | [Findings register](audits/FINDINGS.md) — no report published yet |
 
 Key milestones for the external audit (full scope in [`audits/SCOPE.md`](audits/SCOPE.md)):
 
 | Milestone | Status |
 | --------- | ------ |
-| Audit scope document | ✅ Draft complete |
+| Audit scope document | ✅ Scoped (see `audits/SCOPE.md`) |
+| Findings register with severity/status | ✅ Ready (see `audits/FINDINGS.md`) — no findings yet, no audit performed |
 | Audit firm selection | 🔄 In progress (OtterSec, Trail of Bits, Halborn, CertiK under evaluation) |
 | Engagement letter signed | ⏳ Pending |
 | Audit execution | ⏳ Not started |

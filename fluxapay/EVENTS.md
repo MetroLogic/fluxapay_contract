@@ -132,6 +132,11 @@ Emitted when a merchant's profile or configuration is updated.
 - **Topics**: `(MERCHANT, UPDATED)`
 - **Data**: `merchant_id: Address`
 
+### KYC/TIER_UPGRADED
+Emitted when a merchant's KYC tier is automatically upgraded.
+- **Topics**: `(KYC, TIER_UPGRADED)`
+- **Data**: `(merchant_id: Address, old_tier: KycTier, new_tier: KycTier)`
+
 ---
 
 ## Payment Link Events
@@ -146,11 +151,23 @@ Emitted when a merchant creates a new payment link.
 ### LINK/USED
 Emitted when a payer uses a payment link to initiate a payment. When the link has a `fiat` config, the `amount` in the data payload is the resolved USDC equivalent computed via the FX oracle.
 - **Topics**: `(LINK, USED)`
-- **Data**: `(link_id: String, payer: Address, amount: i128, payment_id: String)`
+- **Data**: `(link_id: String, payer: Address, amount: i128, payment_id: String, metadata: Option<Map<String, String>>)`
 
 ### LINK/DEACTIVATED
 Emitted when a merchant deactivates a payment link.
 - **Topics**: `(LINK, DEACTIVATED)`
+- **Data**: `link_id: String`
+
+### LINK/EXPIRED
+Emitted when an expired payment link is automatically deactivated by `expire_link`.
+- **Topics**: `(LINK, EXPIRED)`
+- **Data**: `link_id: String`
+
+### LINK/VIEWED
+Emitted when a payment link is viewed via `record_link_view`. The viewer must
+authorize the call and pass the per-viewer rate limit before the event is
+emitted.
+- **Topics**: `(LINK, VIEWED)`
 - **Data**: `link_id: String`
 
 ---

@@ -134,7 +134,21 @@ The CD pipeline automatically:
      -- get_merchant --merchant_id <KNOWN_MERCHANT_ADDRESS>
    ```
 
-4. **Health Check**
+4. **Verify Trusted System Callers**
+    ```bash
+    # Confirm system callbacks are restricted to the deployed contracts
+    stellar contract invoke \
+       --id <MERCHANT_REGISTRY_ID> \
+       --network mainnet \
+       -- get_refund_manager_address
+    stellar contract invoke \
+       --id <MERCHANT_REGISTRY_ID> \
+       --network mainnet \
+       -- get_payment_processor_address
+    ```
+    Expected: Returns the deployed RefundManager and PaymentProcessor contract IDs.
+
+5. **Health Check**
    ```bash
    # Verify contract responds correctly
    stellar contract info interface \
@@ -142,7 +156,7 @@ The CD pipeline automatically:
      --network mainnet
    ```
 
-5. **Monitor Initial Transactions**
+6. **Monitor Initial Transactions**
    - Watch first few transactions on Stellar Expert explorer
    - Verify event logs are correct
    - Check for any error patterns
@@ -155,6 +169,11 @@ Roll back immediately if:
 - Security vulnerability discovered
 
 ## 🛠 Upgrade Process
+
+> **Step-by-step upgrade and admin-recovery commands** (propose → timelock →
+> execute, plus admin transfer and rollback considerations) now live in
+> [docs/operations-runbook.md](docs/operations-runbook.md) — the network
+> details below are referenced from there.
 
 ### Stellar Testnet
 
@@ -235,8 +254,8 @@ All five FluxaPay contracts implement a custom `upgrade` function that performs 
 
 | Contract | Upgrade Function | Auth Mechanism |
 |---|---|---|
-| `PaymentProcessor` | `upgrade_contract(admin, new_wasm_hash)` | AccessControl admin role |
-| `RefundManager` | `upgrade_contract(admin, new_wasm_hash)` | AccessControl admin role |
+| `PaymentProcessor` | `propose_upgrade` / `execute_upgrade` / `cancel_upgrade` (Issue #846); legacy `upgrade_contract` timelock queue | AccessControl admin role |
+| `RefundManager` | Same propose/execute/cancel path as PaymentProcessor | AccessControl admin role |
 | `FXOracle` | `upgrade(admin, new_wasm_hash)` | AccessControl admin role |
 | `MerchantRegistry` | `upgrade(admin, new_wasm_hash)` | `MerchantDataKey::Admin` check |
 | `PaymentLinkManager` | `upgrade(admin, new_wasm_hash)` | Internal admin via `initialize` |
@@ -251,14 +270,39 @@ stellar contract install --wasm target/wasm32-unknown-unknown/release/fluxapay.w
 
 Take note of the returned `Wasm Hash`.
 
-### Step 2: Invoke Upgrade
+### Step 2: Propose a time-locked upgrade (Issue #846)
+
+Preferred path for `PaymentProcessor` / `RefundManager`:
 
 ```bash
-# PaymentProcessor
-stellar contract invoke --id <PAYMENT_PROCESSOR_ID> --network testnet --source <ADMIN_SECRET> -- upgrade_contract --admin <ADMIN> --new_wasm_hash <WASM_HASH>
+# Propose — stores hash + earliest_execute = ledger + UPGRADE_TIMELOCK_LEDGERS
+stellar contract invoke --id <PAYMENT_PROCESSOR_ID> --network testnet --source <ADMIN_SECRET> \
+  -- propose_upgrade --admin <ADMIN> --new_wasm_hash <WASM_HASH>
 
-# RefundManager
-stellar contract invoke --id <REFUND_MANAGER_ID> --network testnet --source <ADMIN_SECRET> -- upgrade_contract --admin <ADMIN> --new_wasm_hash <WASM_HASH>
+# Optional: abort before the timelock elapses
+stellar contract invoke --id <PAYMENT_PROCESSOR_ID> --network testnet --source <ADMIN_SECRET> \
+  -- cancel_upgrade --admin <ADMIN>
+```
+
+`propose_upgrade` emits `UPGRADE/PROPOSED` with `(new_wasm_hash, earliest_execute)`.
+
+### Step 3: Execute after the timelock
+
+`execute_upgrade` reverts with `TimelockNotExpired` if called before
+`earliest_execute`. On success it applies the **stored** WASM hash (hash
+verification), clears the proposal, bumps the contract version, and emits
+`UPGRADE/EXECUTED`.
+
+```bash
+stellar contract invoke --id <PAYMENT_PROCESSOR_ID> --network testnet --source <ADMIN_SECRET> \
+  -- execute_upgrade --admin <ADMIN>
+```
+
+### Legacy / other contracts
+
+```bash
+# Legacy PaymentProcessor / RefundManager queue (Issue #624 timelock action)
+stellar contract invoke --id <PAYMENT_PROCESSOR_ID> --network testnet --source <ADMIN_SECRET> -- upgrade_contract --admin <ADMIN> --new_wasm_hash <WASM_HASH>
 
 # FXOracle
 stellar contract invoke --id <FX_ORACLE_ID> --network testnet --source <ADMIN_SECRET> -- upgrade --admin <ADMIN> --new_wasm_hash <WASM_HASH>
@@ -272,12 +316,17 @@ stellar contract invoke --id <PAYMENT_LINK_ID> --network testnet --source <ADMIN
 
 ### Notes
 - **PaymentLinkManager** must be initialized via `initialize(admin)` before the first `upgrade` call. Without initialization, the admin storage key does not exist and non-admin callers will be rejected.
-- All upgrade functions emit a `CONTRACT/UPGRADED` event with `(old_version, new_version)` for off-chain tracking.
+- Issue #846 upgrades emit `UPGRADE/PROPOSED` and `UPGRADE/EXECUTED`; legacy upgrade paths still emit `CONTRACT/UPGRADED` with `(old_version, new_version)`.
 - The contract version is auto-incremented from `1.0.0` using semver patch bumps internally.
+- Default `UPGRADE_TIMELOCK_LEDGERS` is 34_560 (~48 hours at ~5s/ledger).
 
 ## 🔑 Admin Key Rotation
 
 Administrative roles for `PaymentProcessor` and `RefundManager` are managed via the `AccessControl` module.
+
+> For the full propose → timelock → accept/cancel flow (including the
+> ledger-based timelock window and what to do, and not do, if the admin key
+> is lost), see [docs/operations-runbook.md](docs/operations-runbook.md).
 
 ### Rotating the Admin Role
 

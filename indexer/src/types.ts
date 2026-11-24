@@ -23,6 +23,28 @@ export interface PaymentEvent extends ContractEvent {
   };
 }
 
+/**
+ * Issue #1037: Emitted by both `create_payment` (when called with
+ * `retry_of_payment_id`) and `retry_payment` when a new payment is linked to
+ * an expired/failed original. Payload is a positional 2-tuple, not the usual
+ * named-field map, matching the on-chain `env.events().publish(topic, (a, b))` call.
+ */
+export interface PaymentRetryCreatedEvent extends ContractEvent {
+  topic: ["PAYMENT", "RETRY_CREATED"];
+  value: {
+    original_payment_id: string;
+    new_payment_id: string;
+  };
+}
+
+export interface PaymentFeeEvent extends ContractEvent {
+  topic: ["PAYMENT", "FEE_TOTAL"];
+  value: {
+    payment_id: string;
+    amount: string | number | bigint;
+  };
+}
+
 export interface RefundEvent extends ContractEvent {
   topic: ["REFUND", "CREATED" | "PROCESSED" | "REJECTED"];
   value: {
@@ -33,7 +55,7 @@ export interface RefundEvent extends ContractEvent {
 }
 
 export interface DisputeEvent extends ContractEvent {
-  topic: ["DISPUTE", "CREATED" | "RESOLVED" | "REJECTED" | "ESCALATED"];
+  topic: ["DISPUTE", "CREATED" | "RESOLVED" | "REJECTED" | "ESCALATED" | "ADJUSTMENT"];
   value: {
     dispute_id: string;
     payment_id: string;
@@ -64,21 +86,44 @@ export interface MerchantEvent extends ContractEvent {
 }
 
 export interface StreamEvent extends ContractEvent {
-  topic: ["STREAM", "CREATED" | "CLOSED" | "PAUSED" | "RESUMED"];
+  topic: ["STREAM", "CREATED" | "CLOSED" | "PAUSED" | "RESUMED" | "CANCELLED" | "WITHDRAWN"];
   value: {
     stream_id: string;
-    sender: string;
-    receiver: string;
-    amount: number;
+    sender?: string;
+    receiver?: string;
+    recipient?: string;
+    amount?: number;
+    remaining_deposit?: number;
+    memo?: string | null;
   };
 }
 
 export interface SubscriptionEvent extends ContractEvent {
-  topic: ["SUBSCRIPTION", "CREATED" | "ACTIVE" | "CANCELLED" | "PAUSED"];
+  topic: [
+    "SUBSCRIPTION",
+    | "PLAN_CREATED"
+    | "PLAN_DEACTIVATED"
+    | "CREATED"
+    | "ACTIVE"
+    | "CHARGED"
+    | "CHARGE_FAILED"
+    | "DUNNING_TRIGGERED"
+    | "CANCELLED"
+    | "EXPIRED"
+    | "COMPLETED"
+    | "PAUSED"
+    | "RESUMED"
+    | "TRIAL_STARTED"
+    | "TRIAL_ENDED"
+  ];
   value: {
-    subscription_id: string;
-    payer: string;
-    status: string;
+    subscription_id?: string;
+    payer?: string;
+    status?: string;
+    plan_id?: string;
+    merchant_id?: string;
+    amount?: number;
+    interval_secs?: number;
   };
 }
 
@@ -91,25 +136,89 @@ export interface InvoiceEvent extends ContractEvent {
   };
 }
 
-export interface FXOracleEvent extends ContractEvent {
-  topic: ["FX_ORACLE" | "ORACLE", "UPDATED" | "SET" | "REMOVED"];
+/**
+ * Emitted by `PaymentProcessor::settle_payment` when the settled merchant
+ * has an `AnchorConfig` on file (see `merchant_registry.rs`). Consumed by
+ * `SettlementService` (`settlement.ts`) to drive the SEP-6/SEP-24
+ * USDC-to-fiat offramp. Topics carry `merchant_id` and `anchor_domain` in
+ * addition to the type/action pair, so this event is decoded separately
+ * from the generic `scValToObject` path — see `tryParseAnchorWithdraw` in
+ * `index.ts`.
+ */
+export interface SettlementAnchorWithdrawEvent extends ContractEvent {
+  topic: ["PAYMENT", "ANCHOR_WITHDRAW"];
   value: {
-    asset: string;
-    rate: number;
+    payment_id: string;
+    amount: number;
+    currency: string;
+    payout_address: string;
+    sep6_endpoint: string;
+    sep24_endpoint: string;
+    supported_currencies: string[];
+    ledger_timestamp: number;
   };
 }
 
-export interface PaymentLinkEvent extends ContractEvent {
-  topic: ["PAYMENT_LINK" | "LINK", "CREATED" | "UPDATED" | "DEACTIVATED" | "PAID"];
+export interface FXOracleEvent extends ContractEvent {
+  topic: ["FX_ORACLE" | "ORACLE" | "FX_RATE", "UPDATED" | "SET" | "REMOVED"];
+  value: {
+    pair?: string;
+    asset?: string;
+    rate: string | number | bigint;
+    decimals?: number;
+  };
+}
+
+export interface LinkCreatedEvent extends ContractEvent {
+  topic: ["LINK", "CREATED"];
   value: {
     link_id: string;
     merchant_id: string;
-    amount: number;
   };
 }
 
+export interface LinkUsedEvent extends ContractEvent {
+  topic: ["LINK", "USED"];
+  value: {
+    link_id: string;
+    payer: string;
+    amount: bigint | number;
+    payment_id: string;
+    metadata?: Record<string, string>;
+  };
+}
+
+export interface LinkDeactivatedEvent extends ContractEvent {
+  topic: ["LINK", "DEACTIVATED"];
+  value: {
+    link_id: string;
+  };
+}
+
+export interface LinkExpiredEvent extends ContractEvent {
+  topic: ["LINK", "EXPIRED"];
+  value: {
+    link_id: string;
+  };
+}
+
+export interface LinkViewedEvent extends ContractEvent {
+  topic: ["LINK", "VIEWED"];
+  value: {
+    link_id: string;
+  };
+}
+
+export type PaymentLinkEvent =
+  | LinkCreatedEvent
+  | LinkUsedEvent
+  | LinkDeactivatedEvent
+  | LinkExpiredEvent
+  | LinkViewedEvent;
 export type AnyEvent =
   | PaymentEvent
+  | PaymentRetryCreatedEvent
+  | PaymentFeeEvent
   | RefundEvent
   | DisputeEvent
   | DisputeBondEvent
@@ -117,5 +226,6 @@ export type AnyEvent =
   | StreamEvent
   | SubscriptionEvent
   | InvoiceEvent
+  | SettlementAnchorWithdrawEvent;
   | FXOracleEvent
   | PaymentLinkEvent;

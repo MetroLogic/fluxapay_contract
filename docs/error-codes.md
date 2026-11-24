@@ -32,7 +32,7 @@ document on every CI run to catch drift between them.
 | 20 | `UnsupportedToken` | The token address is not an accepted asset. | Using a token not configured for this deployment. | Use one of the supported token addresses for this environment. |
 | 21 | `AmountBelowMin` | Amount is below the configured minimum. | Payment/stake amount too small. | Increase the amount to at least the configured minimum. |
 | 22 | `AmountAboveMax` | Amount exceeds the configured maximum. | Payment/stake amount too large. | Reduce the amount, or split into multiple payments. |
-| 23 | `InvalidExpiry` | `expires_at` is invalid (e.g. in the past, or before `start_time`). | Passing a stale or malformed timestamp. | Pass a future Unix timestamp greater than "now". |
+| 23 | `InvalidExpiry` | `expires_at` is not later than the current ledger time, or is outside the allowed payment duration. | Creating a payment with an expired/too-near/too-distant expiry. | Pass a future expiry within the configured payment duration limits. |
 | 24 | `InvalidSettlement` | Settlement parameters/signatures failed validation. | Malformed or mismatched collaborative-settlement data. | Re-derive settlement data per `docs/` settlement guide and retry. |
 | 25 | `DuplicateIdempotencyKey` | `client_token` was already used for a different payment. | Retrying a request with the same idempotency key but different params. | Reuse the key only for byte-identical retries, or mint a new key. |
 | 26 | `InvalidAddress` | An address argument failed validation. | Passing a malformed or zero address. | Pass a valid Stellar/Soroban `Address`. |
@@ -71,6 +71,7 @@ document on every CI run to catch drift between them.
 | 59 | `LinkMaxUsesReached` | Payment link has reached its configured `max_uses` limit. | Payment link was used too many times. | Create a new payment link with a higher `max_uses`. |
 | 60 | `DirectTransferNotDisputable` | Payment was created via a `direct_transfer` link and disputes are not allowed. | Attempting to dispute a direct-transfer payment. | Direct-transfer payments are non-disputable by design. |
 | 61 | `MaxRetriesExceeded` | Maximum retry chain depth (3) exceeded for payment retry. | Payment retry chain too deep. | Resolve the underlying payment failure before retrying. |
+| 347 | `RetryChainTooDeep` | A retry would create a chain deeper than three payments. | Retrying a payment that is already three links from its original payment. | Resolve the failure or start a new payment. |
 | 62 | `InvalidStatusTransition` | Invalid payment status transition attempted. | Attempting a disallowed state change (e.g. `Confirmed` → `Pending`). | Check the payment's current status and allowed transitions. |
 | 63 | `RefundNotApproved` | Customer called `claim_refund` before an operator approved it. | Claiming a refund that hasn't been operator-approved yet. | Wait for an operator to approve the refund first. |
 | 64 | `RouterNotAllowed` | DEX router is not in the allowed routers list. | Using a router not configured for this deployment. | Use an approved router, or have an admin update the allowed list. |
@@ -84,7 +85,15 @@ document on every CI run to catch drift between them.
 | 405 | `RefundNotFound` | No refund exists with the given `refund_id`. | Typo'd ID, or refund was never created. | Verify the ID via `get_refund` / `get_payment_refunds`. |
 | 406 | `InvalidAmount` | Amount is zero, negative, or otherwise invalid. | Passing a non-positive amount to a payment/refund call. | Pass a strictly positive `i128` amount. |
 
-> **Note:** Every `Error` variant has a unique discriminant — there are no code collisions in the current Rust source.
+> **Note on code collisions:** `Error` currently assigns discriminant `88` to
+> three variants (`OracleStale`, `SettlementIntervalNotElapsed`,
+> `InvalidRetryTarget`) and discriminant `89` to three variants
+> (`DepositAddressInUse`, `SettlementBelowMinimum`, `TipExceedsMax`). This
+> table reflects the enum as written in `fluxapay/src/lib.rs`; resolving the
+> collision would alter wire-level error codes for existing integrators and
+> should be its own tracked change (see `scripts/check-error-codes-doc-sync.js`,
+> which treats a repeated code as valid only when every name sharing it here
+> also shares it in the Rust source).
 
 ## `AccessControlError` (`fluxapay/src/access_control.rs`)
 
@@ -104,6 +113,7 @@ document on every CI run to catch drift between them.
 | 12 | `ProposalThresholdNotMet` | Not enough approvals to execute the proposal. | Executing a multi-sig admin action before quorum. | Collect additional approvals before executing. |
 | 13 | `PendingAdminTransfer` | An admin transfer is already pending. | Proposing a new transfer while one is in flight. | Wait for the pending transfer to complete or expire. |
 | 14 | `InvalidRecovery` | Recovery attempt failed validation. | Wrong recovery key or malformed recovery payload. | Retry with the correct registered recovery key. |
+| 15 | `UnknownRole` | Role symbol is not in the `KNOWN_ROLES` registry. | Granting/revoking a typo'd or invented role (e.g. `SETLMENT_OPERATOR`). | Use one of: `ADMIN`, `ORACLE`, `MERCHANT`, `SETTLEMENT_OPERATOR`, `ARBITRATOR`. |
 
 ## `StreamError` (`fluxapay/src/stream.rs`)
 
@@ -124,6 +134,7 @@ document on every CI run to catch drift between them.
 | 13 | `StreamNotPaused` | Stream is not paused. | Resuming a stream that was never paused. | Confirm stream status before calling resume. |
 | 14 | `InvalidReceiver` | Receiver address cannot equal the sender address. | Creating a stream that pays back to its own sender. | Use a different address for the receiver. |
 | 15 | `BatchTooLarge` | A bulk operation was passed more stream IDs than the per-call cap (50). | Calling `bulk_bump_stream_ttls` with more than 50 IDs. | Split the IDs into batches of ≤ 50. |
+| 16 | `CliffNotReached` | Stream accrual is locked until its cliff timestamp. | Attempting to withdraw from a vesting stream before its cliff. | Wait until the configured cliff timestamp. |
 
 ## `FXOracleError` (`fluxapay/src/fx_oracle.rs`)
 
@@ -132,7 +143,9 @@ document on every CI run to catch drift between them.
 | 1 | `RateNotFound` | No rate is recorded for the requested currency pair. | Querying a pair the oracle hasn't been given a rate for. | Have the oracle publish a rate for that pair first. |
 | 2 | `RateStale` | The recorded rate is older than the staleness threshold. | Oracle hasn't updated the rate recently enough. | Wait for (or trigger) a fresh oracle update. |
 | 3 | `Unauthorized` | Caller is not an authorized oracle/admin. | Calling an oracle-only update function without the role. | Grant the oracle role, or call from an authorized address. |
-| 4 | `BatchTooLarge` **/** `RateDeviationExceeded` ⚠️ | Batch rate update exceeds the max of 20 pairs, **or** rate deviation exceeds the configured limit — both variants share code 4 in the source. | Submitting > 20 pairs in one batch update, or a rate too far from the previous value. | Split batch updates to ≤ 20 pairs; check deviation limits separately. |
+| 4 | `BatchTooLarge` | Batch rate update exceeds the max of 20 pairs. | Submitting > 20 pairs in one batch update. | Split batch updates to ≤ 20 pairs. |
+| 5 | `RateDeviationExceeded` | Rate deviation exceeds the configured limit. | Publishing a rate too far from the previous value. | Check the feed or adjust the pair's deviation limit. |
+| 7 | `InvalidStalenessThreshold` | Staleness threshold is outside the allowed 60-second to 24-hour range. | Setting a threshold below 60 seconds or above 86,400 seconds. | Use a threshold between 60 and 86,400 seconds. |
 
 ## `MerchantError` (`fluxapay/src/merchant_registry.rs`)
 
@@ -146,6 +159,19 @@ document on every CI run to catch drift between them.
 | 6 | `PayoutAddressNotWhitelisted` | Payout address is not on the merchant's approved list. | Withdrawing to an address that wasn't whitelisted. | Whitelist the payout address before withdrawing to it. |
 | 7 | `WhitelistModeRequiresBusinessTier` | Only Business-tier merchants may enable whitelist mode. | Enabling customer whitelist mode below Business tier. | Upgrade the merchant to Business tier first. |
 | 8 | `PayerNotWhitelisted` | Payer is not in the merchant's customer whitelist. | Whitelist mode is on and the payer isn't listed. | Merchant must add the payer to the whitelist. |
+| 9 | `ProposalNotFound` | No suspension proposal exists with the given ID. | Voting, executing, or releasing stake for an unknown proposal. | Verify the proposal ID. |
+| 10 | `ProposalExpired` | The suspension proposal's voting window has closed. | Voting or executing after its expiry. | Create a new proposal. |
+| 11 | `DuplicateVote` | Voter has already voted on this suspension proposal. | Casting a second vote for the same proposal. | Each voter may vote once per proposal. |
+| 12 | `KycLimitExceeded` | Single payment or cumulative monthly volume exceeds merchant's KYC tier cap. | Merchant at tier 0 or tier 1 breached per-payment or monthly limit. | Upgrade merchant KYC tier. |
+| 13 | `PageSizeTooLarge` | Merchant query requested a page larger than the supported maximum. | Passing an excessive pagination limit. | Use a smaller page size. |
+| 14 | `ProposalAlreadyExecuted` | Suspension proposal has already been executed. | Re-executing a completed suspension. | No action is needed; the merchant is already suspended by this proposal. |
+| 15 | `ProposalThresholdNotMet` | Approval stake has not reached the proposal's configured quorum. | Executing before enough stake votes approve. | Wait for more eligible stake to vote in favour. |
+| 16 | `SuspensionStakeNotFound` | Voter has not locked stake for this proposal. | Voting without first locking governance tokens. | Lock the configured governance token before voting. |
+| 17 | `InvalidStakeAmount` | Stake is below the minimum or cannot be represented safely. | Locking less than the minimum stake. | Lock at least `MIN_ARBITRATOR_STAKE`. |
+| 18 | `InvalidSuspensionConfiguration` | Quorum or proposal lifetime is outside the allowed range. | Setting quorum outside 1–10,000 bps or a zero lifetime. | Use a quorum from 1–10,000 bps and a positive lifetime. |
+| 19 | `GovernanceTokenNotConfigured` | No governance token has been configured for suspension voting. | Creating a proposal before token setup. | Configure the governance token as admin before proposing. |
+| 20 | `SuspensionVotingStarted` | Stake registration is closed after the first vote. | Locking stake after voting began. | Lock eligible stake before the first vote. |
+| 21 | `ProposalNotFinalized` | Stake cannot be released while the proposal remains open. | Releasing stake before execution or expiry. | Execute the approved proposal or wait for expiry. |
 
 ## `MerchantAuthError` (`fluxapay/src/merchant_auth.rs`)
 
@@ -177,8 +203,69 @@ document on every CI run to catch drift between them.
 | 1 | `Unauthorized` | Caller is not authorized to use this session key. | Executing a payload with a session key you don't own. | Use a session key granted to your account. |
 | 2 | `SessionNotFound` | No session exists for the given (account, session_key) pair. | Typo'd session key, or session was never granted. | Grant a session key before attempting execution. |
 | 3 | `SessionExpired` | The session key has passed its expiry time. | Executing after the session's validity window closed. | Grant a new session key. |
-| 4 | `InvalidPayload` | The execution payload failed validation. | Malformed or empty payload/hash. | Pass a well-formed payload matching the expected schema. |
+| 4 | `InvalidPayload` | The execution payload failed validation. | Malformed or empty payload/hash, or a negative spend cap. | Pass a `SessionInvocation` XDR payload and non-negative policy caps. |
+| 5 | `SignerRevoked` | The session key was revoked before execution. | The account owner called `revoke_session_key` while a payload was in flight. | Register a new session key. |
+| 6 | `SpendLimitExceeded` | One call exceeds `max_amount_per_tx`. | The invocation amount is above the per-transaction cap. | Split the charge or raise the cap. |
+| 7 | `WindowBudgetExceeded` | The rolling window budget is exhausted. | Cumulative spend in the current window would pass `max_amount_per_window`. | Wait for the window to roll, or raise the budget. |
+| 8 | `ContractNotAllowed` | The target contract is not on the session allowlist. | Payload `target_contract` is outside `allowed_contracts`. | Call an allowlisted contract, or register a wider policy. |
+| 9 | `FunctionNotAllowed` | The function selector is not on the session allowlist. | Payload `function` is outside `allowed_functions`. | Call an allowlisted function, or register a wider policy. |
 
 ---
 
 *Generated for #458. Keep this table in sync with the `#[contracterror]` enums it documents — `scripts/check-error-map-sync.ts` checks `FLUXAPAY_CONTRACT_ERROR_MAP` (Core table) against `fluxapay/src/lib.rs` on every CI run.*
+
+## Tiered Refund Fee Reference (Issue #1016)
+
+`process_refund` (via `process_refund_internal`) and `refund_instantly`
+look up the merchant's KYC tier through `MerchantRegistry` and apply the
+matching fee rate below, instead of a single flat rate for every merchant.
+Both entry points emit the applied rate as the `fee_bps` field in the
+`REFUND/COMPLETED` event payload.
+
+| KYC Tier | Refund Fee (bps) | Refund Fee (%) | Constant |
+|---|---|---|---|
+| Unverified | 100 (falls back to `CurrentFee`, default `REFUND_FEE_BPS`) | 1.0% | `REFUND_FEE_BPS` |
+| Basic | 100 | 1.0% | `REFUND_FEE_BPS_BASIC` |
+| Full | 80 | 0.8% | `REFUND_FEE_BPS_FULL` |
+| Business | 50 | 0.5% | `REFUND_FEE_BPS_BUSINESS` |
+
+Notes:
+
+- Unverified merchants use whatever the admin has configured as the
+  contract-wide default fee (`DataKey::CurrentFee`, falling back to the
+  `REFUND_FEE_BPS` constant of 100 bps) rather than a tier-specific
+  constant, since "Unverified" has no dedicated constant of its own.
+- `refund_instantly` only accepts callers whose tier is already `Full` or
+  `Business` (see the `is_high_trust` check in `fluxapay/src/lib.rs`), so
+  in practice it only ever applies `REFUND_FEE_BPS_FULL` or
+  `REFUND_FEE_BPS_BUSINESS`; the `Basic`/`Unverified` match arms exist for
+  defensive completeness and future tier expansion.
+- A merchant's tier is read at the moment the refund is processed, not at
+  the moment the original payment or refund request was created. A tier
+  upgrade (see #1015) that lands between refund creation and processing is
+  reflected in the fee actually charged.
+- `RefundManager` needs its own `MerchantRegistry` address configured via
+  `set_merchant_registry_address` (admin-only) — it is a separate contract
+  from `PaymentProcessor` and does not share that configuration
+  automatically. If no registry address is set, every tier falls back to
+  the flat default fee.
+
+## Error Enum (`fluxapay::Error`)
+
+This is the same enum documented by the **Core** table at the top of this
+document — see that table for the full `code -> name` mapping. Keeping a
+single table (rather than this list duplicating it with independently
+hand-maintained numbering) is intentional: the previous copy here had
+drifted out of sync with `fluxapay/src/lib.rs::Error` and is why issue
+#1193 added `scripts/check-error-codes-doc-sync.js` to catch this class of
+drift going forward.
+
+## Refund-Specific Errors Most Relevant to Tiered Fees
+
+| Error | When it's returned |
+|---|---|
+| `PaymentNotFound` | `process_refund_internal` cannot find the `Payment` record for the refund's `payment_id` (needed to resolve the merchant for the tier lookup). |
+| `RefundAlreadyProcessed` | The refund is not `Pending` (already completed, rejected, or cancelled). |
+| `RefundExpired` | Called after the refund's `expiry_at` has passed. |
+| `Unauthorized` | `refund_instantly` rejects merchants whose KYC tier is not `Full` or `Business`, or whose `require_auth()`/blacklist checks fail. |
+| `Reentrancy` | Reentrant or concurrent `process_refund` calls for the same `refund_id`, guarded by `DataKey::ReentrancyLock` / `DataKey::RefundLock`. |

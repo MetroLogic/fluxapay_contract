@@ -16,6 +16,7 @@ export const FX_ORACLE_ERROR_MAP: Record<number, string> = {
   4: "BatchTooLarge",
   5: "RateDeviationExceeded",
   6: "PairNotFound",
+  7: "InvalidStalenessThreshold",
 };
 
 export class FxOracleError extends Error {
@@ -255,6 +256,13 @@ export class FxOracleClient {
         admin,
         threshold,
       }),
+    );
+  }
+
+  /** Update the maximum accepted rate age, bounded to 60 seconds through 24 hours. */
+  async setMaxStaleness(admin: string, threshold: bigint) {
+    return withFxOracleContractError(() =>
+      (this.getContract() as any).set_max_staleness({ admin, threshold }),
     );
   }
 

@@ -1,7 +1,8 @@
 use crate::access_control::{role_admin, role_arbitrator, AccessControl};
+use crate::constants::{MIN_ARBITRATOR_STAKE, VOTE_WEIGHT_UNIT};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, map, vec, Address, BytesN, Env, Map,
-    String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, map, token, vec, Address, BytesN, Env,
+    Map, String, Symbol, Vec,
 };
 
 #[contract]
@@ -129,6 +130,49 @@ impl From<Option<AnchorConfig>> for MaybeAnchorConfig {
     }
 }
 
+/// Tier-based rolling reserve policy for a KYC tier.
+///
+/// A percentage of each settled payment (`reserve_bps`, in basis points) is
+/// held in a rolling reserve for `holding_period_secs` before becoming
+/// available for withdrawal. Higher-risk tiers (Unverified, Basic) hold a
+/// larger share for longer; trusted tiers (Full, Business) may hold nothing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReservePolicy {
+    /// Percentage of each settlement held back, in basis points (100 bps = 1%).
+    pub reserve_bps: u32,
+    /// Holding period in seconds before a reserve bucket matures.
+    pub holding_period_secs: u64,
+}
+
+/// A single rolling reserve deposit that unlocks at `unlock_at`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReserveBucket {
+    /// Monotonic bucket id, unique per merchant.
+    pub bucket_id: u64,
+    /// Amount locked in this bucket (smallest currency unit).
+    pub amount: i128,
+    /// Ledger timestamp at which this bucket becomes releasable.
+    pub unlock_at: u64,
+    /// Ledger timestamp at which the bucket was created.
+    pub created_at: u64,
+}
+
+/// Aggregate reserve view returned by `get_merchant_reserve_balance`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveBalance {
+    /// Total locked reserve (matured + unmatured).
+    pub total_locked: i128,
+    /// Portion of `total_locked` whose holding period has elapsed.
+    pub matured: i128,
+    /// Portion of `total_locked` still within its holding period.
+    pub upcoming: i128,
+    /// All buckets currently held for the merchant, oldest first.
+    pub buckets: Vec<RollingReserveBucket>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Merchant {
@@ -179,6 +223,11 @@ pub struct Merchant {
     /// Global payment tolerance in basis points for this merchant.
     pub resolved_against_count: u32,
     pub payment_tolerance: Option<i128>,
+    /// Issue #1017: Rolling reserve policy. When set, `settle_payment`
+    /// withholds `reserve_bps` of each settlement for `holding_period_secs`
+    /// before it is available to sweep via `trigger_settlement`. `None`
+    /// means no reserve is withheld (the default).
+    pub reserve_policy: Option<RollingReservePolicy>,
 }
 
 #[contracttype]
@@ -215,11 +264,24 @@ pub enum MerchantDataKey {
     GlobalPaymentTolerance,
     SuspensionProposal(u64),
     SuspensionVote(u64, Address),
+    SuspensionStake(u64, Address),
     SuspensionProposalCounter,
-    SuspensionThreshold,
+    SuspensionQuorumBps,
+    SuspensionProposalTtl,
+    SuspensionGovernanceToken,
     /// Issue #667: Arbitrary on-chain contract metadata (description, deployment
     /// notes, audit commit hash, etc.), keyed by an admin-chosen Symbol.
     ContractMetadata(Symbol),
+    /// Issue #777: Monthly processing volume per merchant, keyed by (merchant_address, month_code)
+    MerchantMonthlyVolume(Address, u32),
+    /// Stored semantic contract version. Appended to preserve existing key discriminants.
+    ContractVersion,
+    /// Issue #1017: FIFO queue of rolling-reserve buckets currently held for a merchant.
+    MerchantReserveBuckets(Address),
+    /// Issue #1017: Running total of reserve currently locked (unreleased) for a merchant.
+    MerchantReserveLocked(Address),
+    /// Issue #1017: Monotonic reserve bucket id counter, unique per merchant.
+    MerchantReserveBucketCounter(Address),
 }
 
 /// ~3 years at 5s/ledger — mirrors `LONG_LIVE_TTL` in lib.rs (issue #667).
@@ -236,8 +298,8 @@ pub struct PlatformFeeConfig {
     pub fee_recipient: Address,
 }
 
-pub const DEFAULT_SUSPENSION_THRESHOLD: u32 = 3;
-pub const SUSPENSION_PROPOSAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+pub const DEFAULT_SUSPENSION_QUORUM_BPS: u32 = 5_100;
+pub const DEFAULT_SUSPENSION_PROPOSAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -248,9 +310,28 @@ pub struct SuspensionProposal {
     pub reason: String,
     pub created_at: u64,
     pub expires_at: u64,
-    pub approve_votes: u32,
-    pub reject_votes: u32,
+    pub governance_token: Address,
+    pub quorum_bps: u32,
+    pub total_registered_weight: i128,
+    pub approve_weight: i128,
+    pub reject_weight: i128,
+    pub voting_started: bool,
     pub executed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuspensionStake {
+    pub token: Address,
+    pub amount: i128,
+    pub weight: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantPage {
+    pub merchants: Vec<Merchant>,
+    pub next_cursor: Option<String>,
 }
 
 #[contracterror]
@@ -270,6 +351,17 @@ pub enum MerchantError {
     ProposalNotFound = 9,
     ProposalExpired = 10,
     DuplicateVote = 11,
+    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
+    KycLimitExceeded = 12,
+    PageSizeTooLarge = 13,
+    ProposalAlreadyExecuted = 14,
+    ProposalThresholdNotMet = 15,
+    SuspensionStakeNotFound = 16,
+    InvalidStakeAmount = 17,
+    InvalidSuspensionConfiguration = 18,
+    GovernanceTokenNotConfigured = 19,
+    SuspensionVotingStarted = 20,
+    ProposalNotFinalized = 21,
 }
 
 #[cfg_attr(
@@ -278,8 +370,49 @@ pub enum MerchantError {
 )]
 #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl MerchantRegistry {
-    pub fn version() -> u32 {
-        1
+    /// Returns the current contract version string from persistent storage.
+    pub fn version(env: Env) -> String {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::ContractVersion)
+            .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION))
+    }
+
+    /// Admin-only: update the stored contract version after a WASM upgrade.
+    pub fn set_version(env: Env, admin: Address, version: String) -> Result<(), MerchantError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(MerchantError::Unauthorized);
+        }
+        if !crate::utils::is_valid_contract_version(&version) {
+            return Err(MerchantError::InvalidVersion);
+        }
+
+        let old_version = Self::version(env.clone());
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::ContractVersion, &version);
+        env.storage().instance().set(
+            &MerchantDataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &version,
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().persistent().extend_ttl(
+            &MerchantDataKey::ContractVersion,
+            threshold,
+            LONG_LIVE_TTL,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(threshold, LONG_LIVE_TTL);
+        env.events().publish(
+            (
+                Symbol::new(&env, "CONTRACT"),
+                Symbol::new(&env, "VERSION_UPDATED"),
+            ),
+            (old_version, version),
+        );
+        Ok(())
     }
 
     /// Initialize the contract with an admin address
@@ -290,6 +423,10 @@ impl MerchantRegistry {
         env.storage()
             .persistent()
             .set(&MerchantDataKey::Admin, &admin);
+        let initial_version = String::from_str(&env, INITIAL_CONTRACT_VERSION);
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::ContractVersion, &initial_version);
         AccessControl::initialize(&env, admin.clone());
 
         // Default limits for Unverified tier (max 100 USDC in stroops, assuming 7 decimals: 100 * 10^7)
@@ -309,7 +446,7 @@ impl MerchantRegistry {
         );
         env.storage().instance().set(
             &MerchantDataKey::ContractMetadata(Symbol::new(&env, "version")),
-            &String::from_str(&env, "1"),
+            &initial_version,
         );
         env.storage().instance().set(
             &MerchantDataKey::ContractMetadata(Symbol::new(&env, "deployed_at")),
@@ -387,10 +524,60 @@ impl MerchantRegistry {
             .map_err(|_| MerchantError::Unauthorized)
     }
 
-    pub fn set_suspension_threshold(
+    pub fn set_suspension_quorum_bps(
         env: Env,
         admin: Address,
-        threshold: u32,
+        quorum_bps: u32,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(MerchantError::Unauthorized);
+        }
+        if quorum_bps == 0 || quorum_bps > 10_000 {
+            return Err(MerchantError::InvalidSuspensionConfiguration);
+        }
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::SuspensionQuorumBps, &quorum_bps);
+        Ok(())
+    }
+
+    pub fn get_suspension_quorum_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionQuorumBps)
+            .unwrap_or(DEFAULT_SUSPENSION_QUORUM_BPS)
+    }
+
+    pub fn set_suspension_proposal_ttl(
+        env: Env,
+        admin: Address,
+        ttl_secs: u64,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(MerchantError::Unauthorized);
+        }
+        if ttl_secs == 0 {
+            return Err(MerchantError::InvalidSuspensionConfiguration);
+        }
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::SuspensionProposalTtl, &ttl_secs);
+        Ok(())
+    }
+
+    pub fn get_suspension_proposal_ttl(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionProposalTtl)
+            .unwrap_or(DEFAULT_SUSPENSION_PROPOSAL_TTL_SECS)
+    }
+
+    pub fn set_suspension_governance_token(
+        env: Env,
+        admin: Address,
+        token_address: Address,
     ) -> Result<(), MerchantError> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -398,7 +585,7 @@ impl MerchantRegistry {
         }
         env.storage()
             .persistent()
-            .set(&MerchantDataKey::SuspensionThreshold, &threshold);
+            .set(&MerchantDataKey::SuspensionGovernanceToken, &token_address);
         Ok(())
     }
 
@@ -483,6 +670,7 @@ impl MerchantRegistry {
             lost_disputes_count: 0,
             resolved_against_count: 0,
             payment_tolerance: None,
+            reserve_policy: None,
         };
 
         env.storage()
@@ -949,9 +1137,10 @@ impl MerchantRegistry {
         }
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        let old_tier = merchant.kyc_tier.clone();
 
         let is_promotion = matches!(
-            (&merchant.kyc_tier, &new_tier),
+            (&old_tier, &new_tier),
             (KycTier::Unverified, KycTier::Basic)
                 | (KycTier::Basic, KycTier::Full)
                 | (KycTier::Full, KycTier::Business)
@@ -961,19 +1150,17 @@ impl MerchantRegistry {
             return Err(MerchantError::Unauthorized);
         }
 
-        merchant.kyc_tier = new_tier;
+        merchant.kyc_tier = new_tier.clone();
 
         env.storage()
             .persistent()
             .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
 
-        env.events().publish(
-            (
-                Symbol::new(&env, "MERCHANT"),
-                Symbol::new(&env, "KYC_UPGRADED"),
-            ),
-            merchant_id,
-        );
+        // `emit_kyc_tier_upgraded` below already publishes MERCHANT/KYC_TIER_UPGRADED
+        // with (merchant_id, old_tier, new_tier) — issue #1015's requirement — so no
+        // separate inline publish is needed here (both prior attempts at one were
+        // redundant with it).
+        crate::events::emit_kyc_tier_upgraded(&env, &merchant_id, &old_tier, &new_tier);
 
         Ok(())
     }
@@ -1007,7 +1194,7 @@ impl MerchantRegistry {
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.active = false;
-        merchant.suspension_reason = Some(reason);
+        merchant.suspension_reason = Some(reason.clone());
         merchant.suspended_at = Some(env.ledger().timestamp());
         merchant.suspension_expires_at = Some(env.ledger().timestamp() + expiration_duration);
 
@@ -1018,13 +1205,6 @@ impl MerchantRegistry {
         crate::events::emit_merchant_suspended(&env, &merchant_id, &reason);
 
         Ok(())
-    }
-
-    fn get_suspension_threshold(env: &Env) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&MerchantDataKey::SuspensionThreshold)
-            .unwrap_or(DEFAULT_SUSPENSION_THRESHOLD)
     }
 
     fn next_suspension_proposal_id(env: &Env) -> u64 {
@@ -1047,21 +1227,34 @@ impl MerchantRegistry {
         reason: String,
     ) -> Result<u64, MerchantError> {
         proposer.require_auth();
-        if !AccessControl::has_role(&env, &role_arbitrator(&env), &proposer) {
+        let governance_token: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionGovernanceToken)
+            .ok_or(MerchantError::GovernanceTokenNotConfigured)?;
+        let is_arbitrator = AccessControl::has_role(&env, &role_arbitrator(&env), &proposer);
+        let has_minimum_stake =
+            token::Client::new(&env, &governance_token).balance(&proposer) >= MIN_ARBITRATOR_STAKE;
+        if !is_arbitrator && !has_minimum_stake {
             return Err(MerchantError::Unauthorized);
         }
         let _merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         let proposal_id = Self::next_suspension_proposal_id(&env);
         let now = env.ledger().timestamp();
+        let ttl = Self::get_suspension_proposal_ttl(env.clone());
         let proposal = SuspensionProposal {
             proposal_id,
             proposer: proposer.clone(),
             merchant_id: merchant_id.clone(),
-            reason,
+            reason: reason.clone(),
             created_at: now,
-            expires_at: now.saturating_add(SUSPENSION_PROPOSAL_TTL_SECS),
-            approve_votes: 0,
-            reject_votes: 0,
+            expires_at: now.saturating_add(ttl),
+            governance_token,
+            quorum_bps: Self::get_suspension_quorum_bps(env.clone()),
+            total_registered_weight: 0,
+            approve_weight: 0,
+            reject_weight: 0,
+            voting_started: false,
             executed: false,
         };
         env.storage()
@@ -1072,21 +1265,90 @@ impl MerchantRegistry {
                 Symbol::new(&env, "MERCHANT"),
                 Symbol::new(&env, "SUSPENSION_PROPOSED"),
             ),
-            (proposal_id, proposer, merchant_id),
+            (proposal_id, proposer, merchant_id, reason),
         );
         Ok(proposal_id)
     }
 
-    pub fn vote_suspension(
+    pub fn get_suspension_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<SuspensionProposal, MerchantError> {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionProposal(proposal_id))
+            .ok_or(MerchantError::ProposalNotFound)
+    }
+
+    pub fn lock_suspension_stake(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        token_address: Address,
+        amount: i128,
+    ) -> Result<(), MerchantError> {
+        voter.require_auth();
+        if amount < MIN_ARBITRATOR_STAKE {
+            return Err(MerchantError::InvalidStakeAmount);
+        }
+
+        let mut proposal: SuspensionProposal = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionProposal(proposal_id))
+            .ok_or(MerchantError::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(MerchantError::ProposalAlreadyExecuted);
+        }
+        if env.ledger().timestamp() >= proposal.expires_at {
+            return Err(MerchantError::ProposalExpired);
+        }
+        if proposal.voting_started {
+            return Err(MerchantError::SuspensionVotingStarted);
+        }
+        if token_address != proposal.governance_token {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        let stake_key = MerchantDataKey::SuspensionStake(proposal_id, voter.clone());
+        let vote_key = MerchantDataKey::SuspensionVote(proposal_id, voter.clone());
+        if env.storage().persistent().has(&stake_key) || env.storage().persistent().has(&vote_key) {
+            return Err(MerchantError::DuplicateVote);
+        }
+
+        let weight = amount / VOTE_WEIGHT_UNIT;
+        if weight <= 0 {
+            return Err(MerchantError::InvalidStakeAmount);
+        }
+        let stake = SuspensionStake {
+            token: token_address.clone(),
+            amount,
+            weight,
+        };
+        env.storage().persistent().set(&stake_key, &stake);
+        proposal.total_registered_weight = proposal
+            .total_registered_weight
+            .checked_add(weight)
+            .ok_or(MerchantError::InvalidStakeAmount)?;
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::SuspensionProposal(proposal_id), &proposal);
+
+        token::Client::new(&env, &token_address).transfer(
+            &voter,
+            &env.current_contract_address(),
+            &amount,
+        );
+        Ok(())
+    }
+
+    pub fn vote_merchant_suspension(
         env: Env,
         voter: Address,
         proposal_id: u64,
         approve: bool,
     ) -> Result<(), MerchantError> {
         voter.require_auth();
-        if !AccessControl::has_role(&env, &role_arbitrator(&env), &voter) {
-            return Err(MerchantError::Unauthorized);
-        }
         let vote_key = MerchantDataKey::SuspensionVote(proposal_id, voter.clone());
         if env.storage().persistent().has(&vote_key) {
             return Err(MerchantError::DuplicateVote);
@@ -1096,34 +1358,32 @@ impl MerchantRegistry {
             .persistent()
             .get(&MerchantDataKey::SuspensionProposal(proposal_id))
             .ok_or(MerchantError::ProposalNotFound)?;
-        if env.ledger().timestamp() > proposal.expires_at {
+        if proposal.executed {
+            return Err(MerchantError::ProposalAlreadyExecuted);
+        }
+        if env.ledger().timestamp() >= proposal.expires_at {
             return Err(MerchantError::ProposalExpired);
         }
+        let stake: SuspensionStake = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionStake(
+                proposal_id,
+                voter.clone(),
+            ))
+            .ok_or(MerchantError::SuspensionStakeNotFound)?;
+        proposal.voting_started = true;
         env.storage().persistent().set(&vote_key, &approve);
         if approve {
-            proposal.approve_votes = proposal.approve_votes.saturating_add(1);
+            proposal.approve_weight = proposal
+                .approve_weight
+                .checked_add(stake.weight)
+                .ok_or(MerchantError::InvalidStakeAmount)?;
         } else {
-            proposal.reject_votes = proposal.reject_votes.saturating_add(1);
-        }
-        let threshold = Self::get_suspension_threshold(&env);
-        if !proposal.executed && proposal.approve_votes >= threshold {
-            let mut merchant = Self::get_merchant_internal(&env, &proposal.merchant_id)?;
-            merchant.active = false;
-            merchant.suspension_reason = Some(proposal.reason.clone());
-            merchant.suspended_at = Some(env.ledger().timestamp());
-            merchant.suspension_expires_at = None;
-            proposal.executed = true;
-            env.storage().persistent().set(
-                &MerchantDataKey::Merchant(proposal.merchant_id.clone()),
-                &merchant,
-            );
-            env.events().publish(
-                (
-                    Symbol::new(&env, "MERCHANT"),
-                    Symbol::new(&env, "SUSPENDED"),
-                ),
-                proposal.merchant_id.clone(),
-            );
+            proposal.reject_weight = proposal
+                .reject_weight
+                .checked_add(stake.weight)
+                .ok_or(MerchantError::InvalidStakeAmount)?;
         }
         env.storage()
             .persistent()
@@ -1137,11 +1397,111 @@ impl MerchantRegistry {
                 proposal_id,
                 voter,
                 approve,
-                proposal.approve_votes,
-                proposal.reject_votes,
+                stake.weight,
+                proposal.approve_weight,
+                proposal.reject_weight,
             ),
         );
         Ok(())
+    }
+
+    fn suspension_quorum_reached(proposal: &SuspensionProposal) -> bool {
+        if proposal.total_registered_weight <= 0 {
+            return false;
+        }
+
+        let denominator = 10_000i128;
+        let quorum_bps = proposal.quorum_bps as i128;
+        let remainder_product = (proposal.total_registered_weight % denominator) * quorum_bps;
+        let required_weight = (proposal.total_registered_weight / denominator) * quorum_bps
+            + remainder_product / denominator
+            + if remainder_product % denominator == 0 {
+                0
+            } else {
+                1
+            };
+        proposal.approve_weight >= required_weight
+    }
+
+    pub fn execute_merchant_suspension(env: Env, proposal_id: u64) -> Result<(), MerchantError> {
+        let mut proposal: SuspensionProposal = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionProposal(proposal_id))
+            .ok_or(MerchantError::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(MerchantError::ProposalAlreadyExecuted);
+        }
+        if env.ledger().timestamp() >= proposal.expires_at {
+            return Err(MerchantError::ProposalExpired);
+        }
+        if !Self::suspension_quorum_reached(&proposal) {
+            return Err(MerchantError::ProposalThresholdNotMet);
+        }
+
+        let mut merchant = Self::get_merchant_internal(&env, &proposal.merchant_id)?;
+        merchant.active = false;
+        merchant.suspension_reason = Some(proposal.reason.clone());
+        merchant.suspended_at = Some(env.ledger().timestamp());
+        merchant.suspension_expires_at = None;
+        proposal.executed = true;
+
+        env.storage().persistent().set(
+            &MerchantDataKey::Merchant(proposal.merchant_id.clone()),
+            &merchant,
+        );
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::SuspensionProposal(proposal_id), &proposal);
+        crate::events::emit_merchant_suspended(&env, &proposal.merchant_id, &proposal.reason);
+        env.events().publish(
+            (
+                Symbol::new(&env, "MERCHANT"),
+                Symbol::new(&env, "SUSPENDED_BY_VOTE"),
+            ),
+            (proposal_id, proposal.merchant_id, proposal.reason),
+        );
+        Ok(())
+    }
+
+    pub fn release_suspension_stake(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+    ) -> Result<(), MerchantError> {
+        voter.require_auth();
+        let proposal: SuspensionProposal = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::SuspensionProposal(proposal_id))
+            .ok_or(MerchantError::ProposalNotFound)?;
+        if !proposal.executed && env.ledger().timestamp() < proposal.expires_at {
+            return Err(MerchantError::ProposalNotFinalized);
+        }
+
+        let stake_key = MerchantDataKey::SuspensionStake(proposal_id, voter.clone());
+        let stake: SuspensionStake = env
+            .storage()
+            .persistent()
+            .get(&stake_key)
+            .ok_or(MerchantError::SuspensionStakeNotFound)?;
+        env.storage().persistent().remove(&stake_key);
+        token::Client::new(&env, &stake.token).transfer(
+            &env.current_contract_address(),
+            &voter,
+            &stake.amount,
+        );
+        Ok(())
+    }
+
+    /// Compatibility alias for callers of the earlier role-count voting draft.
+    pub fn vote_suspension(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        approve: bool,
+    ) -> Result<(), MerchantError> {
+        Self::vote_merchant_suspension(env, voter, proposal_id, approve)
     }
 
     /// Reinstate a suspended merchant (admin only)
@@ -1172,6 +1532,11 @@ impl MerchantRegistry {
         merchant.suspension_reason = None;
         merchant.suspended_at = None;
         merchant.suspension_expires_at = None;
+        // Reset dispute-related counters on reinstatement so prior lost disputes
+        // do not immediately re-trigger auto-suspension.
+        merchant.dispute_count = 0;
+        merchant.lost_disputes_count = 0;
+        merchant.resolved_against_count = 0;
 
         env.storage()
             .persistent()
@@ -1209,6 +1574,92 @@ impl MerchantRegistry {
         }
 
         result
+    }
+
+    /// List registered merchants using cursor-based pagination (Issue #774).
+    ///
+    /// Limits page size to max 50 and returns next_cursor for seamless iteration
+    /// across pages without duplicate or missed merchants.
+    pub fn list_merchants(
+        env: Env,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<MerchantPage, MerchantError> {
+        if limit > 50 {
+            return Err(MerchantError::PageSizeTooLarge);
+        }
+
+        let merchant_ids: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::MerchantList)
+            .unwrap_or_else(|| vec![&env]);
+
+        if limit == 0 || merchant_ids.is_empty() {
+            return Ok(MerchantPage {
+                merchants: vec![&env],
+                next_cursor: None,
+            });
+        }
+
+        let total = merchant_ids.len();
+        let mut start_idx = 0u32;
+
+        if let Some(cursor_str) = cursor {
+            let len = cursor_str.len();
+            let mut num: u32 = 0;
+            let mut is_num = len > 0;
+            let mut slice = [0u8; 16];
+            if len <= 10 {
+                cursor_str.copy_into_slice(&mut slice[..len as usize]);
+                for b in &slice[..len as usize] {
+                    if *b >= b'0' && *b <= b'9' {
+                        num = num.saturating_mul(10).saturating_add((*b - b'0') as u32);
+                    } else {
+                        is_num = false;
+                        break;
+                    }
+                }
+                if is_num {
+                    start_idx = num;
+                }
+            }
+
+            if !is_num {
+                for (idx, m) in merchant_ids.iter().enumerate() {
+                    let m_str = m.to_string();
+                    if m_str == cursor_str {
+                        start_idx = (idx as u32).saturating_add(1);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut merchants = vec![&env];
+        let end_idx = core::cmp::min(total, start_idx.saturating_add(limit));
+
+        let mut i = start_idx;
+        while i < end_idx {
+            if let Some(merchant_id) = merchant_ids.get(i) {
+                if let Ok(mut merchant) = Self::get_merchant_internal(&env, &merchant_id) {
+                    merchant.bank_account = None;
+                    merchants.push_back(merchant);
+                }
+            }
+            i += 1;
+        }
+
+        let next_cursor = if end_idx < total {
+            Some(Self::u64_to_string(&env, end_idx as u64))
+        } else {
+            None
+        };
+
+        Ok(MerchantPage {
+            merchants,
+            next_cursor,
+        })
     }
 
     /// Get all verified merchants (kyc_tier != Unverified)
@@ -1584,10 +2035,8 @@ impl MerchantRegistry {
     /// Issue #184: System-initiated suspension triggered by the RefundManager contract
     /// when a merchant's dispute rate exceeds the auto-suspend threshold.
     ///
-    /// Unlike `suspend_merchant`, this function does **not** require admin auth —
-    /// it is intended to be called cross-contract by the RefundManager. The caller
-    /// is the RefundManager contract address itself, which is trusted implicitly
-    /// because it is a deployed contract (not an externally-owned account).
+    /// Unlike `suspend_merchant`, this function does not require admin auth. It
+    /// accepts calls only from the configured RefundManager or PaymentProcessor.
     ///
     /// # Arguments
     /// * `merchant_id`          – The merchant to suspend.
@@ -1595,10 +2044,24 @@ impl MerchantRegistry {
     /// * `expiration_duration`  – Duration in seconds after which the suspension auto-lifts.
     pub fn suspend_merchant_by_system(
         env: Env,
+        caller: Address,
         merchant_id: Address,
         reason: String,
         expiration_duration: u64,
     ) -> Result<(), MerchantError> {
+        caller.require_auth();
+        let refund_manager: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::RefundManagerAddress);
+        let payment_processor: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress);
+        if refund_manager.as_ref() != Some(&caller) && payment_processor.as_ref() != Some(&caller) {
+            return Err(MerchantError::Unauthorized);
+        }
+
         // Only suspend if the merchant exists and is currently active
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
 
@@ -1628,13 +2091,29 @@ impl MerchantRegistry {
         Ok(())
     }
 
-    /// Issue #184: Get the current dispute count for a merchant.
-    /// Returns 0 if no disputes have been filed against this merchant.
+    /// Issue #184 / #753: Get the current dispute count for a merchant.
+    ///
+    /// The authoritative counter is owned by the `RefundManager`, since it is the
+    /// contract that opens disputes. When a `RefundManager` address is configured
+    /// we forward to it; otherwise (e.g. before wiring, or if the cross-contract
+    /// call fails) we fall back to the registry-local `Merchant.dispute_count`,
+    /// which is incremented via [`Self::increment_merchant_dispute_count`].
     pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
-        // This is stored in the RefundManager, not here — expose a no-op placeholder
-        // so the SDK surface is consistent. Actual counts live in DataKey::MerchantDisputeCount.
-        let _ = (env, merchant_id);
-        0
+        if let Some(refund_manager) = env
+            .storage()
+            .persistent()
+            .get::<MerchantDataKey, Address>(&MerchantDataKey::RefundManagerAddress)
+        {
+            let refund_client = crate::RefundManagerClient::new(&env, &refund_manager);
+            if let Ok(Ok(count)) = refund_client.try_get_merchant_dispute_count(&merchant_id) {
+                return count;
+            }
+        }
+
+        match Self::get_merchant_internal(&env, &merchant_id) {
+            Ok(merchant) => merchant.dispute_count as u64,
+            Err(_) => 0,
+        }
     }
 
     /// Upgrade the contract WASM.
@@ -2051,9 +2530,20 @@ impl MerchantRegistry {
     /// Set the last settlement timestamp for a merchant.
     pub fn set_last_settlement_at(
         env: Env,
+        caller: Address,
         merchant_id: Address,
         timestamp: u64,
     ) -> Result<(), MerchantError> {
+        caller.require_auth();
+        let payment_processor: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+        if caller != payment_processor {
+            return Err(MerchantError::Unauthorized);
+        }
+
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.last_settlement_at = Some(timestamp);
         env.storage()
@@ -2073,8 +2563,22 @@ impl MerchantRegistry {
     /// Returns the new dispute count.
     pub fn increment_merchant_dispute_count(
         env: Env,
+        caller: Address,
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
+        caller.require_auth();
+        let refund_manager: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::RefundManagerAddress);
+        let payment_processor: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress);
+        if refund_manager.as_ref() != Some(&caller) && payment_processor.as_ref() != Some(&caller) {
+            return Err(MerchantError::Unauthorized);
+        }
+
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.dispute_count = merchant.dispute_count.saturating_add(1);
 
@@ -2089,8 +2593,19 @@ impl MerchantRegistry {
     /// Returns the new resolved_against_merchant_count.
     pub fn increment_resolved_against_count(
         env: Env,
+        caller: Address,
         merchant_id: Address,
     ) -> Result<u32, MerchantError> {
+        caller.require_auth();
+        let refund_manager: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::RefundManagerAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+        if caller != refund_manager {
+            return Err(MerchantError::Unauthorized);
+        }
+
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.lost_disputes_count = merchant.lost_disputes_count.saturating_add(1);
         merchant.resolved_against_count = merchant.resolved_against_count.saturating_add(1);
@@ -2196,5 +2711,318 @@ impl MerchantRegistry {
         );
 
         Ok(())
+    }
+
+    /// Issue #777: Cross-contract function to enforce KYC tier limits during payment creation.
+    /// Checks single-payment limit and calendar monthly volume cap.
+    /// Resets monthly volume on the 1st of each month (UTC).
+    /// Returns `KycLimitExceeded` if payment exceeds either limit.
+    pub fn check_kyc_limit(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<(), MerchantError> {
+        let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+
+        if !merchant.active || merchant.suspension_reason.is_some() {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        let (max_single, max_monthly) = match merchant.kyc_tier {
+            KycTier::Unverified => (crate::TIER_0_MAX_SINGLE, crate::TIER_0_MAX_MONTHLY),
+            KycTier::Basic => (crate::TIER_1_MAX_SINGLE, crate::TIER_1_MAX_MONTHLY),
+            KycTier::Full | KycTier::Business => {
+                (crate::TIER_2_MAX_SINGLE, crate::TIER_2_MAX_MONTHLY)
+            }
+        };
+
+        if amount > max_single {
+            return Err(MerchantError::TierSingleLimitExceeded);
+        }
+
+        if max_monthly != i128::MAX {
+            let (year, month) = Self::get_year_month(env.ledger().timestamp());
+            let month_code = year * 100 + month;
+            let key = MerchantDataKey::MerchantMonthlyVolume(merchant_id.clone(), month_code);
+            let current_vol: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+            let new_vol = current_vol.saturating_add(amount);
+            if new_vol > max_monthly {
+                return Err(MerchantError::TierMonthlyLimitExceeded);
+            }
+            env.storage().persistent().set(&key, &new_vol);
+            Self::bump_persistent_ttl(&env, &key, LONG_LIVE_TTL);
+        }
+
+        Ok(())
+    }
+
+    /// Issue #1014: Cross-contract function for `verify_payment` to re-check the
+    /// KYC tier monthly volume cap against an *additional* amount (e.g. the
+    /// overpaid portion received on top of the originally invoiced amount,
+    /// which `create_payment`'s call to `check_kyc_limit` never accounted
+    /// for). On success, records `extra_amount` against the merchant's
+    /// current calendar month volume.
+    ///
+    /// Unlike `check_kyc_limit`, this does not re-check the per-payment
+    /// single-transaction limit — that was already enforced on the original
+    /// invoiced amount at `create_payment` time.
+    pub fn check_monthly_limit_only(
+        env: Env,
+        merchant_id: Address,
+        extra_amount: i128,
+    ) -> Result<(), MerchantError> {
+        if extra_amount <= 0 {
+            return Ok(());
+        }
+        let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+
+        let max_monthly = match merchant.kyc_tier {
+            KycTier::Unverified => crate::TIER_0_MAX_MONTHLY,
+            KycTier::Basic => crate::TIER_1_MAX_MONTHLY,
+            KycTier::Full | KycTier::Business => crate::TIER_2_MAX_MONTHLY,
+        };
+
+        if max_monthly == i128::MAX {
+            return Ok(());
+        }
+
+        let (year, month) = Self::get_year_month(env.ledger().timestamp());
+        let month_code = year * 100 + month;
+        let key = MerchantDataKey::MerchantMonthlyVolume(merchant_id, month_code);
+        let current_vol: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_vol = current_vol.saturating_add(extra_amount);
+        if new_vol > max_monthly {
+            return Err(MerchantError::TierMonthlyLimitExceeded);
+        }
+        env.storage().persistent().set(&key, &new_vol);
+        Self::bump_persistent_ttl(&env, &key, LONG_LIVE_TTL);
+
+        Ok(())
+    }
+
+    /// Issue #777: Query current monthly volume for a merchant in the current UTC month.
+    pub fn get_monthly_volume(env: Env, merchant_id: Address) -> i128 {
+        let (year, month) = Self::get_year_month(env.ledger().timestamp());
+        let month_code = year * 100 + month;
+        let key = MerchantDataKey::MerchantMonthlyVolume(merchant_id, month_code);
+        env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    /// Issue #777: Query KYC tier as numeric level (0 = Unverified, 1 = Basic, 2 = Full/Business).
+    pub fn get_kyc_tier_level(env: Env, merchant_id: Address) -> Result<u32, MerchantError> {
+        let merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        Ok(match merchant.kyc_tier {
+            KycTier::Unverified => 0u32,
+            KycTier::Basic => 1u32,
+            KycTier::Full | KycTier::Business => 2u32,
+        })
+    }
+
+    /// Helper to bump persistent storage TTL.
+    fn bump_persistent_ttl(env: &Env, key: &MerchantDataKey, ttl: u32) {
+        let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().persistent().extend_ttl(key, threshold, ttl);
+    }
+
+    /// Compute (year, month) in UTC from Unix epoch timestamp using Euclidean affine transform.
+    pub fn get_year_month(timestamp: u64) -> (u32, u32) {
+        let days = (timestamp / 86400) as i64;
+        let z = days + 719468;
+        let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+        let doe = (z - era * 146097) as u32;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = (yoe as i64) + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        (y as u32, m)
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Issue #1017: Merchant rolling reserve                              */
+    /* ------------------------------------------------------------------ */
+
+    /// Admin-only: set, update, or clear (pass `None`) a merchant's rolling
+    /// reserve policy. When set, `PaymentProcessor::settle_payment` withholds
+    /// `policy.reserve_bps` of each settlement for `policy.holding_period_secs`
+    /// before it becomes available to sweep.
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+    pub fn set_reserve_policy(
+        env: Env,
+        admin: Address,
+        merchant_id: Address,
+        policy: Option<RollingReservePolicy>,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        if let Some(ref p) = policy {
+            if p.reserve_bps > 10_000 {
+                return Err(MerchantError::InvalidReservePolicy);
+            }
+        }
+
+        let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        merchant.reserve_policy = policy.clone();
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "MERCHANT"),
+                Symbol::new(&env, "RESERVE_POLICY_UPDATED"),
+            ),
+            (merchant_id, policy),
+        );
+
+        Ok(())
+    }
+
+    /// Read a merchant's configured rolling reserve policy, if any.
+    pub fn get_reserve_policy(
+        env: Env,
+        merchant_id: Address,
+    ) -> Option<RollingReservePolicy> {
+        Self::get_merchant_internal(&env, &merchant_id)
+            .ok()
+            .and_then(|m| m.reserve_policy)
+    }
+
+    /// Called by `PaymentProcessor::settle_payment` to lock `amount` of a
+    /// merchant's settlement proceeds in a new reserve bucket maturing at
+    /// `unlock_at`. Only the registered PaymentProcessor contract may call this.
+    pub fn lock_reserve(
+        env: Env,
+        caller: Address,
+        merchant_id: Address,
+        amount: i128,
+        unlock_at: u64,
+    ) -> Result<u64, MerchantError> {
+        caller.require_auth();
+        let payment_processor: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+        if caller != payment_processor {
+            return Err(MerchantError::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        let counter_key = MerchantDataKey::MerchantReserveBucketCounter(merchant_id.clone());
+        let bucket_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key)
+            .unwrap_or(0u64)
+            .saturating_add(1);
+        env.storage().persistent().set(&counter_key, &bucket_id);
+
+        let bucket = RollingReserveBucket {
+            bucket_id,
+            amount,
+            unlock_at,
+            created_at: env.ledger().timestamp(),
+        };
+
+        let buckets_key = MerchantDataKey::MerchantReserveBuckets(merchant_id.clone());
+        let mut buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&buckets_key)
+            .unwrap_or_else(|| vec![&env]);
+        buckets.push_back(bucket);
+        env.storage().persistent().set(&buckets_key, &buckets);
+
+        let locked_key = MerchantDataKey::MerchantReserveLocked(merchant_id);
+        let locked: i128 = env.storage().persistent().get(&locked_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&locked_key, &locked.saturating_add(amount));
+
+        Ok(bucket_id)
+    }
+
+    /// Release every matured (`unlock_at <= now`) reserve bucket for a
+    /// merchant, moving their total into the merchant's pending settlement
+    /// balance so the next `trigger_settlement` sweep pays it out. Intended
+    /// to be invoked (directly or via `PaymentProcessor::release_merchant_reserve`)
+    /// on a schedule by an off-chain release daemon. Only the registered
+    /// PaymentProcessor contract may call this, matching `lock_reserve`.
+    #[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
+    pub fn release_reserve(
+        env: Env,
+        caller: Address,
+        merchant_id: Address,
+    ) -> Result<i128, MerchantError> {
+        caller.require_auth();
+        let payment_processor: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+        if caller != payment_processor {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        let buckets_key = MerchantDataKey::MerchantReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&buckets_key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut remaining: Vec<RollingReserveBucket> = vec![&env];
+        let mut released: i128 = 0;
+        for bucket in buckets.iter() {
+            if bucket.unlock_at <= now {
+                released = released.saturating_add(bucket.amount);
+            } else {
+                remaining.push_back(bucket.clone());
+            }
+        }
+
+        if released > 0 {
+            env.storage().persistent().set(&buckets_key, &remaining);
+
+            let locked_key = MerchantDataKey::MerchantReserveLocked(merchant_id.clone());
+            let locked: i128 = env.storage().persistent().get(&locked_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&locked_key, &locked.saturating_sub(released));
+
+            Self::add_pending_settlement(&env, &merchant_id, released);
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "MERCHANT"),
+                    Symbol::new(&env, "RESERVE_RELEASED"),
+                ),
+                (merchant_id, released),
+            );
+        }
+
+        Ok(released)
+    }
+
+    /// Total reserve currently locked (unreleased) for a merchant.
+    pub fn get_locked_reserve(env: Env, merchant_id: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::MerchantReserveLocked(merchant_id))
+            .unwrap_or(0)
     }
 }

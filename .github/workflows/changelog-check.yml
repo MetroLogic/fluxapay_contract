@@ -18,39 +18,66 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check if CHANGELOG.md was modified
-        id: changelog_check
-        run: |
-          # Check if CHANGELOG.md was modified in this PR
-          git fetch origin ${{ github.base_ref }}
-          MODIFIED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -c "^CHANGELOG.md$" || true)
-          echo "changelog_modified=$MODIFIED" >> $GITHUB_OUTPUT
-
       - name: Check for skip-changelog label
         id: label_check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if PR has skip-changelog label
           SKIP_LABEL=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name' | grep -c "skip-changelog" || true)
-          echo "has_skip_label=$SKIP_LABEL" >> $GITHUB_OUTPUT
-
-      - name: Fail if CHANGELOG not updated and no skip label
-        if: steps.changelog_check.outputs.changelog_modified == '0' && steps.label_check.outputs.has_skip_label == '0'
-        run: |
-          echo "❌ CHANGELOG.md was not modified in this PR."
-          echo ""
-          echo "Please update CHANGELOG.md with your changes under the 'Unreleased' section."
-          echo "Follow the Keep a Changelog format: Added/Changed/Fixed/Removed."
-          echo ""
-          echo "If this PR does not require a changelog entry, add the 'skip-changelog' label."
-          exit 1
-
-      - name: Success message
-        if: steps.changelog_check.outputs.changelog_modified != '0' || steps.label_check.outputs.has_skip_label != '0'
-        run: |
-          if [ "${{ steps.changelog_check.outputs.changelog_modified }}" != "0" ]; then
-            echo "✅ CHANGELOG.md was updated."
-          else
-            echo "✅ PR is marked with 'skip-changelog' label."
+          echo "has_skip_label=$SKIP_LABEL" >> "$GITHUB_OUTPUT"
+          if [ "$SKIP_LABEL" != "0" ]; then
+            echo "✅ PR is marked with 'skip-changelog' label — bypassing changelog checks."
           fi
+
+      - name: Check if CHANGELOG.md was modified
+        id: changelog_check
+        if: steps.label_check.outputs.has_skip_label == '0'
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          MODIFIED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -c "^CHANGELOG.md$" || true)
+          echo "changelog_modified=$MODIFIED" >> "$GITHUB_OUTPUT"
+          if [ "$MODIFIED" = "0" ]; then
+            echo "❌ CHANGELOG.md was not modified in this PR."
+            echo ""
+            echo "Please update CHANGELOG.md with your changes under the 'Unreleased' section."
+            echo "Follow the Keep a Changelog format: Added/Changed/Fixed/Removed."
+            echo ""
+            echo "If this PR does not require a changelog entry, add the 'skip-changelog' label."
+            exit 1
+          fi
+          echo "✅ CHANGELOG.md was updated."
+
+      - name: Validate Unreleased section references this PR
+        if: steps.label_check.outputs.has_skip_label == '0'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Extract the Unreleased section (until the next ## heading).
+          UNRELEASED=$(awk '
+            BEGIN { keep=0 }
+            /^## [[:space:]]*\*\[S[space:]]*[kK]nreleased\]?/ { keep=1; next }
+            /^## / { if (keep) exit }
+            { if (keep) print }
+          ' CHANGELOG.md)
+
+          if [ -z "$UNRELEASED" ]; then
+            echo "✌ CHANGELOG.md has no Unreleased section."
+            exit 1
+          fi
+
+          # Require at least one bullet entry under Unreleased.
+          if ! echo "$UNRELEASED" | grep -qE '^[[:space:]]*-[[:space:]]'; then
+            echo "✌ Unreleased section has no changelog entries (expected at least one '- ' bullet)."
+            exit 1
+          fi
+
+          # Require the Unreleased section to reference this PR number (#N or PR N).
+          if ! echo "$UNRELEASED" | grep -qE "(#${PR_NUMBER}|PR[[:space:]]*#?${PR_NUMBER}|pull request[[:space:]]*#?${PR_NUMBER})"; then
+            echo "✌ Nreleased section must reference this PR number (#${PR_NUMBER})."
+            echo ""
+            echo "Example entry:"
+            echo "  - **Issue #123 / PR #${PR_NUMBER}**: Short description of the change."
+            exit 1
+          fi
+
+          echo "✅ Unreleased section has entries and references PR #${PR_NUMBER}."

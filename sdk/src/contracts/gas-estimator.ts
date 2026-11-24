@@ -35,6 +35,66 @@ export interface GasEstimate {
   resourceFeeStroops: bigint;
 }
 
+/**
+ * Friendly, snake_case operation identifiers accepted by the SDK's
+ * `estimateFee` helper. These map onto the on-chain `GasOperation` enum.
+ */
+export type FeeOperation =
+  | "create_payment"
+  | "verify_payment"
+  | "cancel_payment"
+  | "expire_payment"
+  | "settle_payment"
+  | "create_refund"
+  | "process_refund"
+  | "reject_refund"
+  | "cancel_refund"
+  | "create_dispute"
+  | "resolve_dispute"
+  | "reject_dispute"
+  | "swap_and_pay"
+  | "create_stream"
+  | "withdraw_stream"
+  | "cancel_stream";
+
+/** Parameters accepted by `GasEstimatorClient.estimateFee`. */
+export interface FeeEstimateParams {
+  operation: FeeOperation;
+  /** Amount in stroops. */
+  amount: bigint;
+  merchantId: string;
+}
+
+/** Strongly-typed fee preview returned by `estimateFee`. */
+export interface FeeEstimate {
+  baseFee: bigint;
+  platformFee: bigint;
+  totalFee: bigint;
+  currency: "USDC";
+}
+
+const FEE_OPERATION_MAP: Record<FeeOperation, GasOperation> = {
+  create_payment: "CreatePayment",
+  verify_payment: "VerifyPayment",
+  cancel_payment: "CancelPayment",
+  expire_payment: "ExpirePayment",
+  settle_payment: "SettlePayment",
+  create_refund: "CreateRefund",
+  process_refund: "ProcessRefund",
+  reject_refund: "RejectRefund",
+  cancel_refund: "CancelRefund",
+  create_dispute: "CreateDispute",
+  resolve_dispute: "ResolveDispute",
+  reject_dispute: "RejectDispute",
+  swap_and_pay: "SwapAndPay",
+  create_stream: "CreateStream",
+  withdraw_stream: "WithdrawStream",
+  cancel_stream: "CancelStream",
+};
+
+/** Basis-point denominator used for platform fee math. */
+const BPS_DENOMINATOR = 10_000n;
+
 function fromContractEstimate(raw: {
   operation: GasOperation;
   instructions: bigint;
@@ -117,5 +177,38 @@ export class GasEstimatorClient {
   /** Fetch the on-chain Symbol name for an operation (useful for display). */
   async operationName(operation: GasOperation): Promise<string> {
     return this.getContract().operation_name({ op: operation });
+  }
+
+  /**
+   * Produce a friendly fee preview for a checkout UI before submission.
+   *
+   * Resolves the on-chain resource fee for the given operation and combines
+   * it with the platform fee (in basis points) to yield a total fee in USDC.
+   */
+  async estimateFee(params: FeeEstimateParams): Promise<FeeEstimate> {
+    const operation = FEE_OPERATION_MAP[params.operation];
+    if (!operation) {
+      throw new Error(`Unsupported fee operation: ${params.operation}`);
+    }
+
+    const raw = await this.getContract().estimate_fee({
+      op: operation,
+      amount: params.amount,
+      merchant_id: params.merchantId,
+    });
+
+    const baseFee = BigInt(raw.base_fee_stroops ?? raw.baseFee ?? 0n);
+    const platformFee = BigInt(
+      raw.platform_fee_stroops ??
+        raw.platformFee ??
+        (params.amount * BigInt(raw.platform_fee_bps ?? 0)) / BPS_DENOMINATOR,
+    );
+
+    return {
+      baseFee,
+      platformFee,
+      totalFee: baseFee + platformFee,
+      currency: "USDC",
+    };
   }
 }

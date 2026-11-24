@@ -1,7 +1,40 @@
 # FluxaPay On-Chain Event Catalog
 
-All events use a **2-tuple topic** `(namespace: Symbol, action: Symbol)` and are emitted via
-`env.events().publish((namespace, action), payload)`.
+## Naming Convention (Issue #1224)
+
+FluxaPay emits exactly one canonical topic shape per event: a **2-tuple topic
+`(NAMESPACE: Symbol, ACTION: Symbol)`** followed by a data payload. `NAMESPACE` and `ACTION`
+are uppercase `Symbol`s with no slashes (e.g. `PAYMENT`, `CREATED`). The entity ID and all other
+fields live in the data payload, never in the topic.
+
+Two implementation patterns exist in the code today and both MUST produce this same on-wire
+2-tuple topic:
+
+1. **Preferred — `#[contractevent]` struct** (in `fluxapay/src/events.rs`). A struct that replaces
+   a legacy tuple event MUST carry two `#[contractevent(topic)] Symbol` fields
+   (`topic_namespace`, `topic_action`) so the published topic tuple is byte-identical to the
+   legacy form, preserving indexer `?topic[]` filters. Example:
+
+   ```rust
+   #[contractevent]
+   #[derive(Clone, Debug)]
+   pub struct PaymentCancelled {
+       #[contractevent(topic)]
+       pub topic_namespace: Symbol, // PAYMENT
+       #[contractevent(topic)]
+       pub topic_action: Symbol,    // CANCELLED
+       pub payment_id: String,
+       pub merchant_id: Address,
+   }
+   ```
+
+2. **Compatibility — `env.events().publish((NAMESPACE, ACTION), payload)`** via the `emit_*`
+   helpers in `events.rs`. These are the legacy form and remain valid; new events should use the
+   struct form above.
+
+The 3-tuple form `(NAMESPACE, ACTION, entity_id)` documented in `fluxapay/EVENTS.md` is
+**deprecated** — `entity_id` moves into the payload. The contract code and this catalog use the
+2-tuple form as the single source of truth.
 
 ---
 
@@ -243,22 +276,48 @@ Emitted by `create_link`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `link_id` | `String` | Link identifier |
-| `merchant_id` | `Address` | Owner |
+| `merchant_id` | `Address` | Merchant that owns the link |
 
 ---
 
 ### LINK / USED
 
+Emitted by `use_link` when a payer completes a payment from a link.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `link_id` | `String` | Link identifier |
 | `payer` | `Address` | Who used the link |
-| `amount` | `i128` | Amount paid |
+| `amount` | `i128` | Resolved USDC amount paid |
 | `payment_id` | `String` | Generated payment ID |
+| `metadata` | `Option<Map<String, String>>` | Optional link metadata copied to the payment |
 
 ---
 
 ### LINK / DEACTIVATED
+
+Emitted by `deactivate_link`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `link_id` | `String` | Link identifier |
+
+---
+
+### LINK / EXPIRED
+
+Emitted by `expire_link` when an expired, still-active link is auto-deactivated.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `link_id` | `String` | Link identifier |
+
+---
+
+### LINK / VIEWED
+
+Emitted by `record_link_view`. The viewer must authorize the call and pass the
+per-viewer rate limit before the event is emitted.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -520,6 +579,96 @@ Emitted when an invoice is marked overdue.
 
 ---
 
+## SESSION
+
+Session-key events use a 3-tuple topic `(SESSION, ACTION, account)`, matching `register_session_key` and `revoke_session_key`. `account` is the parent account that delegated the key.
+
+### SESSION / POLICY_REGISTERED
+
+Emitted by `register_session_key_with_policy` after the key is stored.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_key` | `Address` | Delegated signer |
+| `policy` | `SessionPolicy` | Spend caps and contract/function allowlists |
+
+### SESSION / POLICY_VIOLATION
+
+Emitted by `execute_with_session` when a configured policy rejects the call. The storage write for that call is not applied.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_key` | `Address` | Delegated signer |
+| `reason` | `Symbol` | `max_per_tx`, `window_budget`, `contract`, or `function` |
+
+### SESSION / WINDOW_ROLLOVER
+
+Emitted by `execute_with_session` when an expired spend window is reset on an accepted call.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_key` | `Address` | Delegated signer |
+| `previous_start` | `u64` | Timestamp when the expired window opened |
+| `window_start` | `u64` | Timestamp when the new window opened |
+
+---
+
+## META_TX
+
+Sponsored meta-transactions. Emitted by `execute_meta_transaction`.
+
+### META_TX / EXECUTED
+
+The relayer submitted a valid merchant signature and the inner action succeeded.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `relayer` | `Address` | Account that submitted the transaction and paid the fee |
+| `merchant_id` | `Address` | Merchant the signature authorized |
+| `target_function` | `Symbol` | `create_charge`, `authorize_refund`, `rotate_webhook_key`, or `set_fee_recipient` |
+| `nonce` | `u64` | Sequence number consumed by this payload |
+| `gas` | `MetaTxGas` | Estimated instructions, ledger reads/writes, events, and resource fee |
+
+### META_TX / FAILED
+
+The signature was valid and the nonce was consumed, but the inner action failed.
+Validation failures (deadline, domain, nonce, signature) do not emit this event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `relayer` | `Address` | Relayer that submitted the payload |
+| `merchant_id` | `Address` | Merchant the signature authorized |
+| `target_function` | `Symbol` | Requested action |
+| `nonce` | `u64` | Sequence number consumed |
+| `gas` | `MetaTxGas` | Estimated resource use |
+
+---
+
+## Migration Plan — Preserving Indexer Topic Filters (Issue #1224)
+
+The catalog below documents events as 2-tuple topics. Some code paths still emit the deprecated
+3-tuple form or use `env.events().publish` directly. Migrate them without breaking indexer
+filters:
+
+1. **Freeze the published topics.** The `(NAMESPACE, ACTION)` 2-tuple is the indexer contract.
+   No migration step may change an existing event's topic symbols.
+2. **Add the struct alongside the helper.** For each `emit_*` helper, add a matching
+   `#[contractevent]` struct whose `topic_namespace`/`topic_action` reproduce the helper's
+   `(NAMESPACE, ACTION)` tuple exactly. Emit both during the deprecation window.
+3. **Drop the 3-tuple form.** Events that currently publish `(NAMESPACE, ACTION, entity_id)`
+   must move `entity_id` into the payload and publish `(NAMESPACE, ACTION)`. Add a parallel
+   2-tuple emission first; once indexers confirm the 2-tuple stream, remove the 3-tuple call.
+4. **Retire the helper.** Once the struct emission is the only producer, remove the
+   `#[allow(deprecated)] emit_*` helper and its `env.events().publish` call.
+5. **Verify topic shape.** Each migrated event's topic tuple MUST equal `(NAMESPACE, ACTION)` and
+   nothing else, so existing `?topic[]=NAMESPACE&topic[]=ACTION` Horizon filters keep working with
+   no indexer change.
+
+Indexers filter on `(NAMESPACE, ACTION)` only; payload field reordering is safe as long as the
+documented field names in this catalog are preserved.
+
+---
+
 ## Topic Format Reference
 
 Every event uses a **2-tuple** topic:
@@ -532,3 +681,4 @@ env.events().publish(
 ```
 
 This ensures consistent indexing and filtering by off-chain listeners via the Stellar Horizon API `?topic[]=...` filter parameter.
+

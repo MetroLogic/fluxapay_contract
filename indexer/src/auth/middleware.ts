@@ -25,10 +25,14 @@ declare global {
 
 function extractBearerToken(req: Request): string | null {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
-    return null;
+  if (header && header.startsWith("Bearer ")) {
+    return header.slice("Bearer ".length).trim() || null;
   }
-  return header.slice("Bearer ".length).trim() || null;
+  const queryToken = req.query.token;
+  if (typeof queryToken === "string" && queryToken.trim()) {
+    return queryToken.trim();
+  }
+  return null;
 }
 
 /**
@@ -43,13 +47,13 @@ export function requireSEP10Auth(config: SEP10AuthConfig) {
       return;
     }
 
-    if (!config.serverPublicKey) {
-      res.status(500).json({ error: "SEP-10 auth not configured (STELLAR_SERVER_PUBLIC_KEY unset)" });
+    if (!config.jwtSecret) {
+      res.status(500).json({ error: "SEP-10 auth not configured (SEP10_JWT_SECRET unset)" });
       return;
     }
 
     try {
-      req.auth = verifySEP10JWT(token, config.serverPublicKey);
+      req.auth = verifySEP10JWT(token, config.jwtSecret, config.homeDomain);
       next();
     } catch (error) {
       const message = error instanceof SEP10JWTError ? error.message : "Invalid token";

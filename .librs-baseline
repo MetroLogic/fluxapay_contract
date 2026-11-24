@@ -1,0 +1,5 @@
+# ADR-0006 / Issue #1222: frozen baseline for fluxapay/src/lib.rs.
+# scripts/check_librs_boundaries.sh fails CI if lib.rs grows past these.
+# Lower these numbers (never raise) as logic is moved into submodules.
+BASE_LINES=14261
+BASE_PUB_FNS=292

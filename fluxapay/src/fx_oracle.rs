@@ -7,6 +7,16 @@ use crate::access_control::{role_admin, role_oracle, AccessControl};
 
 /// Maximum allowed age of a rate in seconds, regardless of admin-configured threshold.
 const MAX_RATE_AGE_SECS: u64 = 86_400; // 24 hours
+/// Pre-existing/unrelated fix (found while writing FX conversion property
+/// tests for issue #1186): this constant was referenced by
+/// `oracle_initialize_with_tokens` and `set_max_staleness` but never
+/// defined anywhere in the crate, so the crate failed to compile at all
+/// (this module has no feature gate on its free functions, only on the
+/// `#[contractimpl]` block, so it is always built). `60` matches the floor
+/// already asserted by `fx_oracle_test::test_staleness_threshold_bounds_are_enforced`
+/// (59 rejected, 60 accepted).
+const MIN_RATE_AGE_SECS: u64 = 60;
+const MAX_RATE_DECIMALS: u32 = 38;
 
 /// Maximum ledger sequence gap since last rate update (~24 h at ~5 s/ledger).
 const MAX_LEDGER_GAP: u32 = 17_280;
@@ -23,6 +33,13 @@ const INVERSE_RATE_DECIMALS: u32 = 14;
 /// Issue #636: Maximum length of a `BASE_QUOTE` pair symbol (matches the
 /// Soroban `Symbol` limit of 32 characters).
 const MAX_PAIR_SYMBOL_LEN: usize = 32;
+
+/// Issue #811: Hard cap on the token allowlist.
+///
+/// Bounds the linear scan every `set_rate` performs. Without a cap, an admin
+/// could grow the list until the scan alone exhausted the instruction budget —
+/// which would brick rate publishing rather than merely slow it.
+const MAX_ALLOWED_TOKENS: u32 = 50;
 
 #[contract]
 pub struct FXOracle;
@@ -58,6 +75,23 @@ pub enum FXOracleError {
     /// Issue #636: Neither the requested `BASE_QUOTE` pair nor its inverse
     /// `QUOTE_BASE` has a stored rate (or the pair symbol is malformed).
     PairNotFound = 6,
+    /// Rate must be positive and use at most 38 fixed-point decimals.
+    InvalidRate = 7,
+    /// Pre-existing/unrelated fix (found alongside `MIN_RATE_AGE_SECS` while
+    /// writing FX conversion property tests for issue #1186): `set_max_staleness`
+    /// already returned this variant, but it was never added to the enum, which
+    /// is a second reason the crate failed to compile. `threshold` passed to
+    /// `set_staleness_threshold`/`set_max_staleness` is outside
+    /// `[MIN_RATE_AGE_SECS, MAX_RATE_AGE_SECS]`.
+    InvalidStalenessThreshold = 8,
+    /// Pre-existing/unrelated fix (found alongside the other missing
+    /// variants above while writing FX conversion property tests for issue
+    /// #1186): `set_rates_batch` already returned this for an empty batch,
+    /// but it was never added to the enum.
+    EmptyBatch = 9,
+    /// Pre-existing/unrelated fix, same as above: returned when a pair's
+    /// base/quote token is not on the allowlist, but never added to the enum.
+    TokenNotAllowed = 10,
 }
 
 #[contracttype]
@@ -68,6 +102,8 @@ pub enum OracleDataKey {
     MaxDeviation(Symbol),
     Quorum,
     Submissions(Symbol),
+    /// Issue #811: `Vec<Symbol>` of tokens a rate may be published against.
+    AllowedTokens,
 }
 
 #[cfg_attr(
@@ -81,10 +117,35 @@ impl FXOracle {
     }
 
     pub fn oracle_initialize(env: Env, admin: Address, staleness_threshold: u64) {
+        let empty = Vec::new(&env);
+        Self::oracle_initialize_with_tokens(env, admin, staleness_threshold, empty);
+    }
+
+    /// Issue #811: Initialise with a populated token allowlist.
+    ///
+    /// Separate entry point rather than a changed signature on
+    /// `oracle_initialize`, which is called from deployment scripts, tests and
+    /// the SDK. Breaking all of them to add an argument most callers can supply
+    /// afterwards via `add_allowed_token` would be a poor trade.
+    ///
+    /// An **empty** allowlist means "not yet configured", and rate publishing is
+    /// allowed through — see `require_pair_allowed` for why that default is the
+    /// safe one here rather than the reverse.
+    pub fn oracle_initialize_with_tokens(
+        env: Env,
+        admin: Address,
+        staleness_threshold: u64,
+        allowed_tokens: Vec<Symbol>,
+    ) {
         AccessControl::initialize(&env, admin);
+        let threshold = staleness_threshold.clamp(MIN_RATE_AGE_SECS, MAX_RATE_AGE_SECS);
         env.storage()
             .instance()
-            .set(&OracleDataKey::StalenessThreshold, &staleness_threshold);
+            .set(&OracleDataKey::StalenessThreshold, &threshold);
+        // An empty list stays "not configured" and permits every pair.
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::AllowedTokens, &allowed_tokens);
     }
 
     pub fn oracle_grant_role(
@@ -117,6 +178,11 @@ impl FXOracle {
         if !AccessControl::has_role(&env, &role_oracle(&env), &operator) {
             return Err(FXOracleError::Unauthorized);
         }
+
+        // Issue #811: checked before the quorum bookkeeping, so a disallowed
+        // pair cannot accumulate submissions and then be rejected only once
+        // quorum is reached.
+        Self::require_pair_allowed(&env, &pair)?;
 
         let quorum = env
             .storage()
@@ -159,7 +225,11 @@ impl FXOracle {
         // Emit event: (RATE, UPDATED), pair
         env.events().publish(
             (Symbol::new(&env, "RATE"), Symbol::new(&env, "UPDATED")),
-            pair,
+            pair.clone(),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "FX_RATE"), Symbol::new(&env, "UPDATED")),
+            (pair, rate, decimals),
         );
 
         Ok(())
@@ -197,13 +267,32 @@ impl FXOracle {
             return Err(FXOracleError::Unauthorized);
         }
 
+        // Issue #851: Reject empty batches immediately. Submitting an empty batch
+        // wastes transaction fees and ledger bandwidth while performing no useful state
+        // mutations. Enforcing this prevents silent no-ops when an operator submits zero rates.
+        if rates.is_empty() {
+            return Err(FXOracleError::EmptyBatch);
+        }
+
         if rates.len() > MAX_BATCH_RATES {
             return Err(FXOracleError::BatchTooLarge);
+        }
+
+        // Issue #811: every pair is validated before any is written, so a batch
+        // containing one disallowed pair does not half-apply. `store_rate` has
+        // already mutated state by the time a later entry fails, and Soroban
+        // gives us no partial rollback inside a call.
+        for (pair, _, _) in rates.iter() {
+            Self::require_pair_allowed(&env, &pair)?;
         }
 
         let count = rates.len();
         for (pair, rate, decimals) in rates.iter() {
             Self::store_rate(&env, pair, rate, decimals)?;
+            env.events().publish(
+                (Symbol::new(&env, "FX_RATE"), Symbol::new(&env, "UPDATED")),
+                (pair, rate, decimals),
+            );
         }
 
         env.events().publish(
@@ -217,7 +306,135 @@ impl FXOracle {
         Ok(count)
     }
 
+    /// Issue #811: Admin adds a token to the publish allowlist.
+    ///
+    /// Idempotent. An empty allowlist means enforcement is off; the first
+    /// successful add turns it on.
+    pub fn add_allowed_token(env: Env, admin: Address, token: Symbol) -> Result<(), FXOracleError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(FXOracleError::Unauthorized);
+        }
+        let mut allowed = Self::allowed_tokens(&env);
+        if Self::token_in_list(&allowed, &token) {
+            return Ok(());
+        }
+        if allowed.len() >= MAX_ALLOWED_TOKENS {
+            return Err(FXOracleError::Unauthorized);
+        }
+        allowed.push_back(token);
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::AllowedTokens, &allowed);
+        Ok(())
+    }
+
+    /// Issue #811: Admin removes a token from the publish allowlist.
+    ///
+    /// Idempotent. Existing stored rates are left in place and age out through
+    /// the normal staleness path.
+    pub fn remove_allowed_token(
+        env: Env,
+        admin: Address,
+        token: Symbol,
+    ) -> Result<(), FXOracleError> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(FXOracleError::Unauthorized);
+        }
+        let current = Self::allowed_tokens(&env);
+        let mut next = Vec::new(&env);
+        for item in current.iter() {
+            if item != token {
+                next.push_back(item);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&OracleDataKey::AllowedTokens, &next);
+        Ok(())
+    }
+
+    /// Tokens a rate may be published against. Empty means enforcement is off.
+    pub fn get_allowed_tokens(env: Env) -> Vec<Symbol> {
+        Self::allowed_tokens(&env)
+    }
+
+    /// Whether `token` is on the allowlist. Returns false when the list is empty.
+    pub fn is_token_allowed(env: Env, token: Symbol) -> bool {
+        Self::token_in_list(&Self::allowed_tokens(&env), &token)
+    }
+
+    fn allowed_tokens(env: &Env) -> Vec<Symbol> {
+        env.storage()
+            .instance()
+            .get(&OracleDataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn token_in_list(allowed: &Vec<Symbol>, token: &Symbol) -> bool {
+        for item in allowed.iter() {
+            if item == *token {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Reject a pair unless the allowlist is unset/empty, or both `BASE` and
+    /// `QUOTE` of a single-underscore pair are on the list.
+    fn require_pair_allowed(env: &Env, pair: &Symbol) -> Result<(), FXOracleError> {
+        let allowed = Self::allowed_tokens(env);
+        if allowed.is_empty() {
+            return Ok(());
+        }
+        let (base, quote) = Self::split_pair(env, pair).ok_or(FXOracleError::TokenNotAllowed)?;
+        if Self::token_in_list(&allowed, &base) && Self::token_in_list(&allowed, &quote) {
+            Ok(())
+        } else {
+            Err(FXOracleError::TokenNotAllowed)
+        }
+    }
+
+    /// Split `BASE_QUOTE` into two symbols. `None` when the underscore is
+    /// missing, repeated, or either half is empty.
+    fn split_pair(env: &Env, pair: &Symbol) -> Option<(Symbol, Symbol)> {
+        let str_repr = SymbolStr::try_from_val(env, &pair.to_symbol_val()).ok()?;
+        let text: &str = str_repr.as_ref();
+        let bytes = text.as_bytes();
+
+        let mut separator: Option<usize> = None;
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'_' {
+                if separator.is_some() {
+                    return None;
+                }
+                separator = Some(i);
+            }
+        }
+        let separator = separator?;
+        let base = &bytes[..separator];
+        let quote = &bytes[separator + 1..];
+        if base.is_empty() || quote.is_empty() || base.len() > 32 || quote.len() > 32 {
+            return None;
+        }
+
+        let mut base_buf = [0u8; 32];
+        let mut quote_buf = [0u8; 32];
+        base_buf[..base.len()].copy_from_slice(base);
+        quote_buf[..quote.len()].copy_from_slice(quote);
+        let base_len = base.len();
+        let quote_len = quote.len();
+        let base_sym = Symbol::new(env, core::str::from_utf8(&base_buf[..base_len]).ok()?);
+        let quote_sym = Symbol::new(env, core::str::from_utf8(&quote_buf[..quote_len]).ok()?);
+        Some((base_sym, quote_sym))
+    }
+
     fn store_rate(env: &Env, pair: Symbol, rate: i128, decimals: u32) -> Result<(), FXOracleError> {
+        if rate <= 0 || decimals > MAX_RATE_DECIMALS {
+            return Err(FXOracleError::InvalidRate);
+        }
+
         // Issue #478: Check rate deviation against configured limit
         let max_deviation_bps = env
             .storage()
@@ -374,7 +591,11 @@ impl FXOracle {
             divisor *= 10;
         }
 
-        Ok((usdc_amount * rate_data.rate) / divisor)
+        Ok(usdc_amount
+            .checked_mul(rate_data.rate)
+            .ok_or(FXOracleError::PairNotFound)?
+            .checked_div(divisor)
+            .unwrap_or(0))
     }
 
     /// Issue #636: Return the rate for `pair`, transparently falling back to the
@@ -452,7 +673,7 @@ impl FXOracle {
         let scaled = amount
             .checked_mul(rate_data.rate)
             .ok_or(FXOracleError::PairNotFound)?;
-        Ok(scaled / divisor)
+        Ok(scaled.checked_div(divisor).unwrap_or(0))
     }
 
     /// Derive the inverse of a `BASE_QUOTE` pair symbol, e.g. `EUR_USD` ->
@@ -570,10 +791,23 @@ impl FXOracle {
         admin: Address,
         threshold: u64,
     ) -> Result<(), FXOracleError> {
+        Self::set_max_staleness(env, admin, threshold)
+    }
+
+    /// Set the maximum accepted age of a rate in seconds.
+    pub fn set_max_staleness(
+        env: Env,
+        admin: Address,
+        threshold: u64,
+    ) -> Result<(), FXOracleError> {
         admin.require_auth();
 
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
             return Err(FXOracleError::Unauthorized);
+        }
+
+        if !(MIN_RATE_AGE_SECS..=MAX_RATE_AGE_SECS).contains(&threshold) {
+            return Err(FXOracleError::InvalidStalenessThreshold);
         }
 
         env.storage()

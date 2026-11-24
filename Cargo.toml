@@ -5,7 +5,9 @@ members = [
 ]
 
 [workspace.dependencies]
-soroban-sdk = "26"
+# Issue #1036: bumped from "26" to the latest stable release (29.0.1 at time
+# of writing). See CHANGELOG.md for the breaking-change review.
+soroban-sdk = "29"
 
 [profile.release]
 opt-level = "z"

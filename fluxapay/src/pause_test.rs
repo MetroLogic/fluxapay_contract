@@ -37,6 +37,37 @@ fn test_pause_initial_state() {
 }
 
 #[test]
+fn test_operation_scope_pause_is_independent_and_queryable() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let processor_id = env.register(crate::PaymentProcessor, ());
+    let client = PaymentProcessorClient::new(&env, &processor_id);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize_payment_processor(&admin);
+
+    let reason = String::from_str(&env, "Oracle maintenance");
+    client.pause_scope(&admin, &crate::PauseScope::VerifyPayment, &reason);
+
+    let scopes = client.get_paused_scopes();
+    assert!(scopes.contains(crate::PauseScope::VerifyPayment));
+    assert!(!scopes.contains(crate::PauseScope::All));
+
+    let verify_result = client.try_verify_payment(
+        &oracle,
+        &String::from_str(&env, "missing"),
+        &soroban_sdk::BytesN::from_array(&env, &[0u8; 32]),
+        &Address::generate(&env),
+        &100,
+    );
+    assert!(matches!(verify_result, Err(Ok(crate::Error::ContractPaused))));
+
+    client.unpause_scope(&admin, &crate::PauseScope::VerifyPayment);
+    assert!(client.get_paused_scopes().is_empty());
+}
+
+#[test]
 fn test_global_pause_blocks_creation() {
     let env = Env::default();
     env.mock_all_auths();
@@ -75,9 +106,11 @@ fn test_global_pause_blocks_creation() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+            tip_enabled: false,
     });
 
     assert!(res.is_err());
@@ -123,9 +156,11 @@ fn test_creation_pause_blocks_only_creation() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+            tip_enabled: false,
     });
     assert!(res.is_err());
 
@@ -179,9 +214,11 @@ fn test_all_write_ops_blocked_when_paused() {
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
+            tip_enabled: false,
     });
 
     // Set global pause
@@ -289,4 +326,121 @@ fn test_pause_unpause_cycle_exposes_pause_state_fields() {
         unpause_ts,
     );
     assert_pause_state(&unpaused.creation, false, &empty, None, 0);
+}
+
+/// Issue #835: GasEstimator entry points must honour the global pause flag.
+#[test]
+fn test_gas_estimator_blocked_when_paused() {
+    use crate::{GasEstimator, GasEstimatorClient, GasEstimatorError, Operation};
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let processor_id = env.register(crate::PaymentProcessor, ());
+    let processor = PaymentProcessorClient::new(&env, &processor_id);
+    let admin = Address::generate(&env);
+    processor.initialize_payment_processor(&admin);
+
+    let gas_id = env.register(GasEstimator, ());
+    let gas = GasEstimatorClient::new(&env, &gas_id);
+    gas.initialize(&processor_id);
+
+    // Unpaused: estimate and estimate_payment_fee succeed.
+    let ok_estimate = gas.try_estimate(&Operation::CreatePayment);
+    assert!(ok_estimate.is_ok(), "estimate should succeed when unpaused");
+    let ok_fee = gas.try_estimate_payment_fee(&Operation::CreatePayment);
+    assert!(
+        ok_fee.is_ok(),
+        "estimate_payment_fee should succeed when unpaused"
+    );
+
+    // Set global pause on PaymentProcessor.
+    let reason = String::from_str(&env, "Emergency pause");
+    processor.set_global_pause(&admin, &true, &reason);
+
+    let paused_estimate = gas.try_estimate(&Operation::CreatePayment);
+    assert!(
+        matches!(paused_estimate, Err(Ok(GasEstimatorError::ContractPaused))),
+        "estimate must return ContractPaused when system is paused, got {:?}",
+        paused_estimate
+    );
+
+    let paused_fee = gas.try_estimate_payment_fee(&Operation::VerifyPayment);
+    assert!(
+        matches!(paused_fee, Err(Ok(GasEstimatorError::ContractPaused))),
+        "estimate_payment_fee must return ContractPaused when system is paused, got {:?}",
+        paused_fee
+    );
+
+    // Unpause restores access.
+    processor.set_global_pause(&admin, &false, &String::from_str(&env, "Recovered"));
+    assert!(gas.try_estimate(&Operation::SettlePayment).is_ok());
+    assert!(gas.try_estimate_payment_fee(&Operation::SettlePayment).is_ok());
+}
+
+// ── Issue #1169: CEI / no double-claim or double-refund ────────────────────────
+
+#[test]
+fn test_refund_claim_is_single_use_after_status_committed_first() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let processor_id = env.register(crate::PaymentProcessor, ());
+    let client = PaymentProcessorClient::new(&env, &processor_id);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let requester = Address::generate(&env);
+    let operator = Address::generate(&env);
+    client.initialize_payment_processor(&admin);
+    client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    client.grant_role(
+        &admin,
+        &Symbol::new(&env, "SETTLEMENT_OPERATOR"),
+        &operator,
+    );
+
+    let payment_id = String::from_str(&env, "cei_payment");
+    client.create_payment(&CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant,
+        payer: None,
+        amount: 1_000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: None,
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        idempotency_key: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        tip_enabled: false,
+    });
+
+    let refund_id = client
+        .create_refund(
+            &payment_id,
+            &100,
+            &String::from_str(&env, "CEI duplicate test"),
+            &requester,
+        )
+        .unwrap();
+    client.approve_refund(&operator, &refund_id);
+
+    // First claim succeeds and commits RefundStatus::Completed before transfer.
+    assert!(client.try_claim_refund(&requester, &refund_id).is_ok());
+
+    // A re-entrant or repeated claim sees Completed and is rejected: the
+    // terminal state was written before the token interaction.
+    assert_eq!(
+        client.try_claim_refund(&requester, &refund_id),
+        Err(Ok(crate::Error::RefundAlreadyProcessed))
+    );
+    assert_eq!(
+        client.try_process_refund(&operator, &refund_id),
+        Err(Ok(crate::Error::RefundAlreadyProcessed))
+    );
 }

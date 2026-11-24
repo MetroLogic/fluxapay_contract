@@ -164,6 +164,7 @@ fn link_args(env: &Env, id: &str) -> CreateLinkArgs {
         metadata: None,
         fiat: MaybeFiatConfig::None,
         base_url: None,
+        single_use: false,
     }
 }
 
@@ -174,6 +175,8 @@ fn batch_create_links_creates_all_and_they_are_retrievable() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let merchant = Address::generate(&env);
+    client.initialize(&merchant).unwrap();
+    client.grant_merchant_role(&merchant, &merchant);
 
     let batch = vec![
         &env,
@@ -200,6 +203,8 @@ fn batch_create_links_rejects_more_than_50() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let merchant = Address::generate(&env);
+    client.initialize(&merchant).unwrap();
+    client.grant_merchant_role(&merchant, &merchant);
 
     let mut batch: Vec<CreateLinkArgs> = vec![&env];
     for i in 0..51u32 {
@@ -221,6 +226,8 @@ fn batch_create_links_rejects_duplicate_id_atomically() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let merchant = Address::generate(&env);
+    client.initialize(&merchant).unwrap();
+    client.grant_merchant_role(&merchant, &merchant);
 
     let batch = vec![
         &env,
@@ -256,6 +263,7 @@ fn create_and_deactivate_subscription_plan_emit_events() {
         &1_000_000i128,
         &Symbol::new(&env, "USDC"),
         &crate::BillingInterval::Weekly,
+        &None,
     );
     assert!(
         events_contain(&env, "SUBSCRIPTION", "PLAN_CREATED"),
@@ -288,6 +296,9 @@ fn create_payment_link_invoice_links_both_records() {
     let plm = PaymentLinkManagerClient::new(&env, &plm_id);
 
     let merchant = Address::generate(&env);
+    plm.initialize(&admin).unwrap();
+    plm.grant_merchant_role(&admin, &merchant);
+    pp.grant_merchant_role(&admin, &merchant);
     let line_items = vec![
         &env,
         LineItem {
@@ -316,6 +327,7 @@ fn create_payment_link_invoice_links_both_records() {
             metadata: None,
             fiat: MaybeFiatConfig::None,
             base_url: None,
+            single_use: false,
         },
     );
 
@@ -346,8 +358,12 @@ fn create_payment_link_invoice_rejects_bad_link_atomically() {
     let admin = Address::generate(&env);
     pp.initialize_payment_processor(&admin);
     let plm_id = env.register(PaymentLinkManager, ());
+    let plm = PaymentLinkManagerClient::new(&env, &plm_id);
 
     let merchant = Address::generate(&env);
+    plm.initialize(&admin).unwrap();
+    plm.grant_merchant_role(&admin, &merchant);
+    pp.grant_merchant_role(&admin, &merchant);
     let res = pp.try_create_payment_link_invoice(
         &merchant,
         &plm_id,
@@ -368,6 +384,7 @@ fn create_payment_link_invoice_rejects_bad_link_atomically() {
             metadata: None,
             fiat: MaybeFiatConfig::None,
             base_url: None,
+            single_use: false,
         },
     );
     assert!(res.is_err());
@@ -413,6 +430,7 @@ fn test_invoice_overdue_grace_period() {
         &100i128,
         &Symbol::new(&env, "USDC"),
         &due_date,
+        &None,
     );
 
     // Before due date -> Created status
@@ -473,6 +491,7 @@ fn test_invoice_lifecycle_events() {
         &500i128,
         &Symbol::new(&env, "USDC"),
         &due_date,
+        &None,
     );
 
     // Verify INVOICE/CREATED event emission
@@ -487,6 +506,91 @@ fn test_invoice_lifecycle_events() {
     assert!(!events_after_paid.events().is_empty());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #764 — Two-step time-locked admin ownership transfer
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_propose_and_accept_admin_after_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+
+    // Propose admin
+    client.propose_admin(&admin, &new_admin);
+
+    // Advance ledger past MIN_TIMELOCK_LEDGERS (17,280 ledgers)
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + crate::access_control::MIN_TIMELOCK_LEDGERS);
+
+    // Accept admin transfer
+    client.accept_admin(&new_admin);
+
+    // Verify admin was updated
+    assert_eq!(client.get_admin(), Some(new_admin));
+}
+
+#[test]
+#[should_panic(expected = "Admin transfer timelock has not expired")]
+fn test_accept_admin_before_timelock_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    // Only advance 100 ledgers (less than 17,280)
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + 100);
+
+    // Must panic because timelock has not elapsed
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Caller is not the pending admin")]
+fn test_accept_admin_by_non_pending_address_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + crate::access_control::MIN_TIMELOCK_LEDGERS);
+
+    // Attacker calls accept_admin -> must panic
+    client.accept_admin(&attacker);
+}
+
+#[test]
+#[should_panic(expected = "No pending admin transfer")]
+fn test_cancel_admin_transfer_clears_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_refund_manager(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    // Admin cancels the transfer
+    client.cancel_admin_transfer(&admin);
+
+    let current_seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(current_seq + crate::access_control::MIN_TIMELOCK_LEDGERS);
+
+    // Attempting to accept after cancellation must panic
+    client.accept_admin(&new_admin);
+}
+
 // keep the unused-import checker quiet if a feature test is removed
 #[allow(unused_imports)]
 use crate as _fluxapay;
@@ -494,3 +598,4 @@ use crate as _fluxapay;
 fn _use_into_val(env: &Env, a: Address) -> soroban_sdk::Val {
     a.into_val(env)
 }
+
