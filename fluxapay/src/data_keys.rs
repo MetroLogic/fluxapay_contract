@@ -181,4 +181,6 @@ pub enum DataKey {
     PendingTimelockAction(String),
     /// Issue #624: Counter for generating unique pending action IDs.
     TimelockActionCounter,
+    /// Append-only index of dispute IDs for paginated dispute enumeration.
+    DisputeIndex,
 }

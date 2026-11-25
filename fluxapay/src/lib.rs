@@ -2955,6 +2955,17 @@ pub use merchant_registry::{
             .persistent()
             .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
 
+        let mut dispute_index: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeIndex)
+            .unwrap_or_else(|| vec![env]);
+        dispute_index.push_back(dispute_id.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeIndex, &dispute_index);
+        Self::bump_ttl(env, &DataKey::DisputeIndex, LONG_LIVE_TTL);
+
         let mut payment_disputes = Self::get_payment_disputes_internal(env, &payment_id);
         payment_disputes.push_back(dispute_id.clone());
         env.storage().persistent().set(
@@ -4307,6 +4318,28 @@ pub use merchant_registry::{
             }
         }
         Ok(disputes)
+    }
+
+    /// Get all disputes with pagination in creation order.
+    pub fn get_all_disputes(env: Env, offset: u32, limit: u32) -> Vec<Dispute> {
+        let dispute_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeIndex)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut disputes = vec![&env];
+        let end = core::cmp::min(dispute_ids.len(), offset.saturating_add(limit));
+        let mut index = offset;
+        while index < end {
+            if let Some(dispute_id) = dispute_ids.get(index) {
+                if let Ok(dispute) = Self::get_dispute_internal(&env, &dispute_id) {
+                    disputes.push_back(dispute);
+                }
+            }
+            index += 1;
+        }
+        disputes
     }
 
     pub fn get_dispute_summary(env: Env) -> DisputeSummary {
@@ -11530,6 +11563,7 @@ pub use payment_link::{
 #[cfg(test)] mod pause_test;
 #[cfg(test)] mod payment_link_test;
 #[cfg(test)] mod payment_metadata_test;
+#[cfg(test)] mod refund_manager_edge_test;
 #[cfg(test)] mod proptests;
 #[cfg(test)] mod router_allowlist_test;
 #[cfg(test)] mod settlement_test;
