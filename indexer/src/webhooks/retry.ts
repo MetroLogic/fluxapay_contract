@@ -8,12 +8,86 @@ import {
 
 /** Webhook delivery retry with exponential backoff + DLQ promotion (#961). */
 export const WEBHOOK_RETRY_INTERVAL_MS = Number(process.env.WEBHOOK_RETRY_INTERVAL_MS) || 60_000;
-export const MAX_RETRY_ATTEMPTS = 7;
-export const BASE_DELAY_MS = 60_000;
-// 7 attempts: immediately -> 1m -> 5m -> 30m -> 2h -> 8h -> 24h. Realizes the
-// exponential backoff delay = BASE_DELAY * 2^attempt, capped per the spec so a
-// delivery is never deferred past 24h. schedule[0]=0 is the immediate first try.
-export const BACKOFF_SCHEDULE_MS = [0, 60_000, 300_000, 1_800_000, 7_200_000, 28_800_000, 86_400_000];
+
+/**
+ * Default per-endpoint retry policy. Endpoints that do not configure their own
+ * policy use these values, which reproduce the original hard-coded schedule:
+ * immediate first try, then 1m, 5m, 30m, 2h, 8h, 24h.
+ */
+export const DEFAULT_MAX_RETRIES = 6;
+export const DEFAULT_INITIAL_DELAY_MS = 60_000;
+export const DEFAULT_BACKOFF_MULTIPLIER = 5;
+export const DEFAULT_MAX_DELAY_MS = 86_400_000;
+
+/** Hard bounds enforced when validating endpoint-supplied policy values. */
+export const RETRY_POLICY_BOUNDS = {
+  maxRetries: { min: 0, max: 20 },
+  initialDelayMs: { min: 1_000, max: 86_400_000 },
+  backoffMultiplier: { min: 1, max: 10 },
+  maxDelayMs: { min: 1_000, max: 86_400_000 },
+} as const;
+
+export interface WebhookRetryPolicy {
+  /** Number of retries after the initial attempt. */
+  maxRetries: number;
+  /** Delay before the first retry, in milliseconds. */
+  initialDelayMs: number;
+  /** Multiplier applied to the delay for each subsequent retry. */
+  backoffMultiplier: number;
+  /** Upper bound on any single retry delay, in milliseconds. */
+  maxDelayMs: number;
+}
+
+export const DEFAULT_WEBHOOK_RETRY_POLICY: Readonly<WebhookRetryPolicy> = Object.freeze({
+  maxRetries: DEFAULT_MAX_RETRIES,
+  initialDelayMs: DEFAULT_INITIAL_DELAY_MS,
+  backoffMultiplier: DEFAULT_BACKOFF_MULTIPLIER,
+  maxDelayMs: DEFAULT_MAX_DELAY_MS,
+});
+
+/**
+ * Validates a partial retry policy, filling missing fields with defaults.
+ * Throws a RangeError describing the first out-of-bounds or non-integer field.
+ */
+export function resolveWebhookRetryPolicy(
+  input: Partial<WebhookRetryPolicy> | null | undefined,
+): WebhookRetryPolicy {
+  const policy: WebhookRetryPolicy = { ...DEFAULT_WEBHOOK_RETRY_POLICY, ...(input ?? {}) };
+
+  const checkInt = (name: string, value: number, min: number, max: number) => {
+    if (!Number.isInteger(value) || value < min || value > max) {
+      throw new RangeError(`${name} must be an integer between ${min} and ${max}, got ${value}`);
+    }
+  };
+
+  checkInt("max_retries", policy.maxRetries, RETRY_POLICY_BOUNDS.maxRetries.min, RETRY_POLICY_BOUNDS.maxRetries.max);
+  checkInt("initial_delay_ms", policy.initialDelayMs, RETRY_POLICY_BOUNDS.initialDelayMs.min, RETRY_POLICY_BOUNDS.initialDelayMs.max);
+  checkInt("max_delay_ms", policy.maxDelayMs, RETRY_POLICY_BOUNDS.maxDelayMs.min, RETRY_POLICY_BOUNDS.maxDelayMs.max);
+  if (
+    !Number.isFinite(policy.backoffMultiplier) ||
+    policy.backoffMultiplier < RETRY_POLICY_BOUNDS.backoffMultiplier.min ||
+    policy.backoffMultiplier > RETRY_POLICY_BOUNDS.backoffMultiplier.max
+  ) {
+    throw new RangeError(
+      `backoff_multiplier must be between ${RETRY_POLICY_BOUNDS.backoffMultiplier.min} and ${RETRY_POLICY_BOUNDS.backoffMultiplier.max}, got ${policy.backoffMultiplier}`,
+    );
+  }
+  if (policy.maxDelayMs < policy.initialDelayMs) {
+    throw new RangeError("max_delay_ms must be greater than or equal to initial_delay_ms");
+  }
+  return policy;
+}
+
+/**
+ * Delay before retry number `retryIndex` (0-based: 0 is the first retry),
+ * computed as initialDelay * multiplier^retryIndex, capped at maxDelay.
+ * Returns null when retries are exhausted.
+ */
+export function computeRetryDelayMs(policy: WebhookRetryPolicy, retryIndex: number): number | null {
+  if (!Number.isInteger(retryIndex) || retryIndex < 0 || retryIndex >= policy.maxRetries) return null;
+  const raw = policy.initialDelayMs * Math.pow(policy.backoffMultiplier, retryIndex);
+  return Math.min(Math.round(raw), policy.maxDelayMs);
+}
 
 /**
  * Lease held on a claimed DLQ row (#1258). Must outlast one delivery attempt
@@ -22,11 +96,6 @@ export const BACKOFF_SCHEDULE_MS = [0, 60_000, 300_000, 1_800_000, 7_200_000, 28
  */
 export const WEBHOOK_CLAIM_LEASE_MS =
   Number(process.env.WEBHOOK_CLAIM_LEASE_MS) || DEFAULT_WEBHOOK_CLAIM_LEASE_MS;
-
-export function computeBackoffDelayMs(attempt: number): number | null {
-  if (attempt < 0 || attempt >= MAX_RETRY_ATTEMPTS) return null;
-  return BACKOFF_SCHEDULE_MS[attempt] ?? BACKOFF_SCHEDULE_MS[BACKOFF_SCHEDULE_MS.length - 1];
-}
 
 export interface RetryJobHandle {
   stop: () => void;
@@ -51,6 +120,9 @@ export interface WebhookRetryDaemonOptions {
  * Each sweep claims due rows atomically (#1258): a row is delivered by exactly
  * one worker, and every terminal write is fenced on the claim token so a
  * worker whose lease expired cannot overwrite the work of its successor.
+ *
+ * Retry count and delays are governed by the owning endpoint's policy; an
+ * endpoint with no stored policy falls back to DEFAULT_WEBHOOK_RETRY_POLICY.
  */
 export function startWebhookRetryDaemon(
   store: WebhookStore,
@@ -76,6 +148,7 @@ export function startWebhookRetryDaemon(
         if (!endpoint || !endpoint.enabled) {
           throw new Error(`endpoint ${job.endpointId} unavailable`);
         }
+        const policy = resolveWebhookRetryPolicy(endpoint.retryPolicy);
 
         const { attempt } = await deliverOnce(endpoint, job.payload, nextCount, {
           fetch: doFetch,
@@ -95,7 +168,10 @@ export function startWebhookRetryDaemon(
         throw new Error(attempt.responseBody ?? `HTTP ${attempt.httpStatus ?? "no-response"}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        const backoff = computeBackoffDelayMs(nextCount);
+        const endpoint = await store.getEndpoint(job.endpointId).catch(() => null);
+        const policy = resolveWebhookRetryPolicy(endpoint?.retryPolicy);
+        // retryIndex is the 0-based index of the retry that would run next.
+        const backoff = computeRetryDelayMs(policy, job.retryCount);
 
         if (backoff === null) {
           const failed = await store.failWebhookRetryPermanently(job.id, job.claimToken, {
