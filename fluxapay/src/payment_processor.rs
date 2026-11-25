@@ -6254,7 +6254,7 @@ impl PaymentProcessor {
     }
 
     #[allow(dead_code)]
-    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
+    pub(crate) fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Refund(refund_id.clone()))
@@ -6262,7 +6262,7 @@ impl PaymentProcessor {
     }
 
     #[allow(dead_code)]
-    fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
+    pub(crate) fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentRefunds(payment_id.clone()))
@@ -7618,7 +7618,7 @@ impl PaymentProcessor {
     }
 
     /// Internal helper: assign an action ID, persist the pending action, and emit an event.
-    fn enqueue_timelocked_action(
+    pub(crate) fn enqueue_timelocked_action(
         env: &Env,
         proposed_by: Address,
         kind: TimelockActionKind,
@@ -7921,7 +7921,7 @@ impl PaymentProcessor {
     /// Read the effective refund cooldown period in seconds.
     /// Falls back to the compile-time constant if not overridden by admin.
     #[allow(dead_code)]
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+    pub(crate) fn get_refund_cooldown_secs(env: &Env) -> u64 {
         env.storage()
             .persistent()
             .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
