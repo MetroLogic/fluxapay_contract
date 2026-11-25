@@ -88,6 +88,10 @@ cd fluxapay && make build
 cd fluxapay && cargo test --all-features
 ```
 
+Every `fluxapay/src/*_test.rs` file must be declared as a test module in
+`fluxapay/src/lib.rs` (for example, `#[cfg(test)] mod example_test;`). CI checks
+this wiring, so add the declaration whenever you add a test file.
+
 ### Property-based tests (bounded)
 
 ```bash
