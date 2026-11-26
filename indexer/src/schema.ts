@@ -16,6 +16,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -255,6 +256,15 @@ export const deadLetterEvents = pgTable("dead_letter_events", {
   error: text("error").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
   retryCount: integer("retry_count").default(0),
+  // Retry scheduling added by migration 013 (Issue #961).
+  nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+  status: text("status").notNull().default("pending"),
+  // Durable per-attempt claim/lease added by migration 015 (Issue #1258).
+  // `claimToken` fences a late worker whose lease was already reclaimed.
+  claimedBy: text("claimed_by"),
+  claimToken: uuid("claim_token"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
 });
 
 export const indexerCheckpoint = pgTable("indexer_checkpoint", {
@@ -269,7 +279,12 @@ export const settlements = pgTable("settlements", {
   id: serial("id").primaryKey(),
   paymentId: varchar("payment_id", { length: 255 }).notNull(),
   merchantId: varchar("merchant_id", { length: 255 }).notNull(),
+  anchorDomain: varchar("anchor_domain", { length: 255 }).notNull(),
+  anchorTxnId: varchar("anchor_txn_id", { length: 255 }),
+  sep24Endpoint: text("sep24_endpoint"),
+  interactiveUrl: text("interactive_url"),
   amount: bigint("amount", { mode: "bigint" }).notNull(),
+  currency: varchar("currency", { length: 50 }),
   status: varchar("status", { length: 50 }),
   createdAt: timestamp("created_at"),
   settledAt: timestamp("settled_at"),

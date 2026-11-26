@@ -2583,18 +2583,41 @@ fn test_create_payment_explicit_expires_at_overrides_duration() {
 fn test_create_payment_past_expires_at_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (admin, client) = setup_payment_processor(&env);
+    env.ledger().with_mut(|ledger| ledger.timestamp = 1_000);
+    let (_admin, client) = setup_payment_processor(&env);
 
     let merchant_id = Address::generate(&env);
-    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
-
     let now = env.ledger().timestamp();
-    // expires_at in the past (or equal to now)
-    let payment_id = String::from_str(&env, "pay_past_expiry");
-    let mut args = create_payment_args(&env, &payment_id, &merchant_id, 1000i128);
-    args.expires_at = Some(now);
-    let result = client.try_create_payment(&args);
-    assert_eq!(result, Err(Ok(Error::InvalidExpiry)));
+    for (payment_id, expires_at) in [
+        ("pay_past_expiry", now - 1),
+        ("pay_current_expiry", now),
+    ] {
+        let payment_id = String::from_str(&env, payment_id);
+        let mut args = create_payment_args(&env, &payment_id, &merchant_id, 1000i128);
+        args.expires_at = Some(expires_at);
+        assert_eq!(
+            client.try_create_payment(&args),
+            Err(Ok(Error::InvalidExpiry))
+        );
+    }
+}
+
+#[test]
+fn test_create_payment_rejects_non_positive_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    let amount = 0i128;
+    for (payment_id, amount) in [("pay_zero_amount", amount), ("pay_negative_amount", -1)] {
+        let payment_id = String::from_str(&env, payment_id);
+        let args = create_payment_args(&env, &payment_id, &merchant_id, amount);
+        assert_eq!(
+            client.try_create_payment(&args),
+            Err(Ok(Error::InvalidAmount))
+        );
+    }
 }
 
 #[test]

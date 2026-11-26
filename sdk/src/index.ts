@@ -2644,9 +2644,8 @@ export class FluxapayClient {
    * have agreed on a settlement amount off-chain and submit their Ed25519
    * signatures over `SHA-256(dispute_id || settlement_amount_le16)`.
    *
-   * Wraps `RefundManager::settle_dispute_collaboratively`. Note: bindings
-   * for this entry point haven't been regenerated yet (TODO: `npm run
-   * generate`), so this calls through `this.contract` untyped.
+   * Wraps `RefundManager::settle_dispute_collaboratively` via the typed
+   * generated client binding (issue #1270).
    *
    * @returns The refund ID created for the settlement.
    * @throws {FluxapayError} If the contract operation fails or returns an error.
@@ -2660,7 +2659,7 @@ export class FluxapayClient {
     signatureMerchant: Buffer;
   }): Promise<string> {
     return withMappedContractError(async () => {
-      const tx = await (this.contract as any).settle_dispute_collaboratively({
+      const tx = await this.contract.settle_dispute_collaboratively({
         dispute_id: params.disputeId,
         settlement_amount: params.settlementAmount,
         buyer_pubkey: params.buyerPubkey,
@@ -2681,7 +2680,7 @@ export class FluxapayClient {
   async getCollaborativeSettlement(disputeId: string): Promise<CollaborativeSettlement | null> {
     try {
       return await withMappedContractError(async () => {
-        const tx = await (this.contract as any).get_collaborative_settlement({
+        const tx = await this.contract.get_collaborative_settlement({
           dispute_id: disputeId,
         });
         return tx.result;
@@ -2700,9 +2699,8 @@ export class FluxapayClient {
    * charged immediately. Throws a mapped `InvalidStatusTransition` error if
    * the subscription is Cancelled/Expired (not currently billable).
    *
-   * Wraps `RefundManager::submit_usage_metrics`. Note: bindings for this
-   * entry point haven't been regenerated yet (TODO: `npm run generate`),
-   * so this calls through `this.contract` untyped.
+   * Wraps `RefundManager::submit_usage_metrics` via the typed generated
+   * client binding (issue #1270).
    * @throws {FluxapayError} If the contract operation fails or returns an error.
    */
   async submitUsageMetrics(params: {
@@ -2713,7 +2711,7 @@ export class FluxapayClient {
     caller: string;
   }): Promise<void> {
     return withMappedContractError(async () => {
-      const tx = await (this.contract as any).submit_usage_metrics({
+      const tx = await this.contract.submit_usage_metrics({
         operator: params.caller,
         subscription_id: params.subscriptionId,
         units_used: params.units,
@@ -2735,7 +2733,7 @@ export class FluxapayClient {
     toTimestamp: number,
   ): Promise<UsageMetrics[]> {
     return withMappedContractError(async () => {
-      const tx = await (this.contract as any).get_usage_metrics({
+      const tx = await this.contract.get_usage_metrics({
         subscription_id: subscriptionId,
         from_timestamp: BigInt(fromTimestamp),
         to_timestamp: BigInt(toTimestamp),
