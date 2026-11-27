@@ -793,7 +793,7 @@ fn test_get_payment_disputes() {
     refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(&env, "USDC"));
 
     // Create multiple disputes
-    let _dispute_id1 = refund_client.create_dispute(
+    let dispute_id1 = refund_client.create_dispute(
         &payment_id,
         &500i128,
         &String::from_str(&env, "Partial refund needed"),
@@ -802,7 +802,7 @@ fn test_get_payment_disputes() {
         &vec![&env],
     );
 
-    let _dispute_id2 = refund_client.create_dispute(
+    let dispute_id2 = refund_client.create_dispute(
         &payment_id,
         &700i128,
         &String::from_str(&env, "Additional dispute"),
@@ -814,6 +814,15 @@ fn test_get_payment_disputes() {
     // Get all disputes for payment
     let disputes = refund_client.get_payment_disputes(&payment_id);
     assert_eq!(disputes.len(), 2);
+
+    let all_disputes = refund_client.get_all_disputes(&0, &10);
+    assert_eq!(all_disputes.len(), 2);
+    assert_eq!(all_disputes.get(0).unwrap().dispute_id, dispute_id1);
+    assert_eq!(all_disputes.get(1).unwrap().dispute_id, dispute_id2);
+
+    let second_page = refund_client.get_all_disputes(&1, &1);
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page.get(0).unwrap().dispute_id, dispute_id2);
 }
 
 /// Issue #575: Filter payment disputes by DisputeStatus.
