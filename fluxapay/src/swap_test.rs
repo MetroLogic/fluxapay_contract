@@ -409,3 +409,194 @@ fn test_dummy_events() {
     let ev = env.events().all();
     ev.dummy_method();
 }
+
+#[test]
+fn test_execute_swap_success_with_slippage_tolerance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let router_id = env.register(crate::dex_router::DexRouter, ());
+    let client = crate::dex_router::DexRouterClient::new(&env, &router_id);
+
+    let caller = Address::generate(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+
+    let amount_in = 1000i128;
+    // With 1 hop, get_amounts_out simulates 1% slippage -> 990 output
+    let min_amount_out = 950i128;
+    let max_slippage_bps = 500u32; // 5%
+
+    let result = client.execute_swap(
+        &caller,
+        &token_in,
+        &token_out,
+        &amount_in,
+        &min_amount_out,
+        &max_slippage_bps,
+    );
+    assert_eq!(result, 990);
+}
+
+#[test]
+fn test_execute_swap_rejects_insufficient_output_slippage() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let router_id = env.register(crate::dex_router::DexRouter, ());
+    let client = crate::dex_router::DexRouterClient::new(&env, &router_id);
+
+    let caller = Address::generate(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+
+    let amount_in = 1000i128;
+    // get_amounts_out gives 990, require 995 -> should fail
+    let min_amount_out = 995i128;
+    let max_slippage_bps = 500u32;
+
+    let result = client.try_execute_swap(
+        &caller,
+        &token_in,
+        &token_out,
+        &amount_in,
+        &min_amount_out,
+        &max_slippage_bps,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_execute_swap_rejects_excessive_max_slippage_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let router_id = env.register(crate::dex_router::DexRouter, ());
+    let client = crate::dex_router::DexRouterClient::new(&env, &router_id);
+
+    let caller = Address::generate(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+
+    let amount_in = 1000i128;
+    let min_amount_out = 500i128;
+    let max_slippage_bps = 5001u32; // > 5000 bps (50%) must be rejected
+
+    let result = client.try_execute_swap(
+        &caller,
+        &token_in,
+        &token_out,
+        &amount_in,
+        &min_amount_out,
+        &max_slippage_bps,
+    );
+    assert!(result.is_err());
+}
+
+// ── Issue #1171: address validation at public entrypoints ─────────────────────
+
+#[test]
+fn test_swap_and_pay_rejects_malformed_dex_router() {
+    use soroban_sdk::testutils::MuxedAddress as _;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let mock_dex = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &mock_dex, 10_000, false);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
+
+    let mut args = build_swap_args(
+        &env,
+        "swap_bad_router",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        &token_out,
+        &mock_dex,
+        1_000,
+        1_000,
+    );
+
+    // Default/all-zero address is rejected before any token movement.
+    args.dex_router = Address::from_str(&env, ZERO_CONTRACT_STRKEY);
+    assert_eq!(
+        payment_client.try_swap_and_pay(&args),
+        Err(Ok(Error::InvalidAddress))
+    );
+
+    // An account address cannot stand in for a DEX router contract.
+    args.dex_router = soroban_sdk::testutils::MuxedAddress::generate(&env).address();
+    assert_eq!(
+        payment_client.try_swap_and_pay(&args),
+        Err(Ok(Error::InvalidAddress))
+    );
+
+    // Restoring a valid router succeeds, proving only the input was rejected.
+    args.dex_router = mock_dex;
+    assert!(payment_client.try_swap_and_pay(&args).is_ok());
+}
+
+// ── Issue #1172: independent DEX circuit breaker ──────────────────────────────
+
+#[test]
+fn test_swap_circuit_breaker_pauses_and_resumes_only_dex_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, merchant_client, token_in, token_out) = setup_swap_test_env(&env);
+    let mock_dex = env.register(MockDexRouter, ());
+    configure_mock_dex(&env, &mock_dex, 10_000, false);
+    let merchant = register_verified_merchant(&env, &admin, &payment_client, &merchant_client);
+    let payer = Address::generate(&env);
+    let deposit_address = Address::generate(&env);
+    mint_swap_input(&env, &token_in, &payer, 10_000);
+    let args = build_swap_args(
+        &env,
+        "swap_cb_payment",
+        &payer,
+        &merchant,
+        &deposit_address,
+        &token_in,
+        &token_out,
+        &mock_dex,
+        1_000,
+        1_000,
+    );
+
+    // Initially open.
+    assert!(!payment_client.get_swap_pause_info().paused);
+
+    let reason = String::from_str(&env, "simulated DEX unsafe");
+    let intruder = Address::generate(&env);
+    assert_eq!(
+        payment_client.try_set_swap_pause(&intruder, &true, &reason),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    payment_client.set_swap_pause(&admin, &true, &reason);
+    let info = payment_client.get_swap_pause_info();
+    assert!(info.paused);
+    assert_eq!(info.reason, reason);
+    assert_eq!(info.admin, Some(admin.clone()));
+
+    // The breaker blocks the swap path but leaves the global pause untouched.
+    assert_eq!(
+        payment_client.try_swap_and_pay(&args),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert!(!payment_client.get_pause_info().global.paused);
+    assert!(!payment_client.get_creation_pause_info().paused);
+
+    // Resuming restores the DEX path.
+    payment_client.set_swap_pause(
+        &admin,
+        &false,
+        &String::from_str(&env, "router fixed"),
+    );
+    assert!(!payment_client.get_swap_pause_info().paused);
+    assert!(payment_client.try_swap_and_pay(&args).is_ok());
+}

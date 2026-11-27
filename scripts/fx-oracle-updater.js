@@ -72,6 +72,7 @@ const CONFIG = {
   pairs: parsePairs(process.env.FX_PAIRS || "EUR,BRL,USD"),
   rateDecimals: parseInt(process.env.FX_RATE_DECIMALS || "7", 10),
   updateIntervalMs: parseInt(process.env.UPDATE_INTERVAL_MS || "60000", 10),
+  maxStalenessSecs: parseInt(process.env.MAX_STALENESS_SECS || "86400", 10),
   maxFeedRetries: parseInt(process.env.MAX_FEED_RETRIES || "3", 10),
   feedRetryBackoffMs: parseInt(process.env.FEED_RETRY_BACKOFF_MS || "2000", 10),
   alertWebhookUrl: process.env.ALERT_WEBHOOK_URL || null,
@@ -86,9 +87,13 @@ const FX_ORACLE_ERRORS = {
   4: "BatchTooLarge",
   5: "RateDeviationExceeded",
   6: "PairNotFound",
+  7: "InvalidStalenessThreshold",
 };
 // FXOracle::set_rates_batch caps a batch at 20 pairs.
 const MAX_BATCH_RATES = 20;
+const STALENESS_WARNING_RATIO = 0.8;
+let lastSuccessfulUpdateAt = null;
+let stalenessAlerted = false;
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -315,6 +320,20 @@ async function runCycle(server, keypair) {
   const startedAt = Date.now();
   log("info", "cycle_start", { pairs: CONFIG.pairs.map((p) => p.symbol) });
 
+  if (
+    lastSuccessfulUpdateAt !== null &&
+    Date.now() - lastSuccessfulUpdateAt >=
+      CONFIG.maxStalenessSecs * 1000 * STALENESS_WARNING_RATIO &&
+    !stalenessAlerted
+  ) {
+    stalenessAlerted = true;
+    await alert("rate_update_stale_warning", {
+      ageSecs: Math.floor((Date.now() - lastSuccessfulUpdateAt) / 1000),
+      maxStalenessSecs: CONFIG.maxStalenessSecs,
+      warningAtSecs: CONFIG.maxStalenessSecs * STALENESS_WARNING_RATIO,
+    });
+  }
+
   let feedRates;
   try {
     feedRates = await fetchPriceFeed();
@@ -363,6 +382,8 @@ async function runCycle(server, keypair) {
     hash: result.hash,
     durationMs: Date.now() - startedAt,
   });
+  lastSuccessfulUpdateAt = Date.now();
+  stalenessAlerted = false;
 }
 
 function validateConfig() {
@@ -391,6 +412,7 @@ async function main() {
     oracle: keypair.publicKey(),
     rpcUrl: CONFIG.rpcUrl,
     intervalMs: CONFIG.updateIntervalMs,
+    maxStalenessSecs: CONFIG.maxStalenessSecs,
     pairs: CONFIG.pairs,
     runOnce: CONFIG.runOnce,
   });

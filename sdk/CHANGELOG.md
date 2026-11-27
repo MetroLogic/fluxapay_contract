@@ -1,26 +1,17 @@
 # Changelog
 
-All notable changes to `@fluxapay/sdk` are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to the FluxaPay TypeScript SDK will be documented in this file.
 
 ## [Unreleased]
 
 ### Added
-- Initial npm publish workflow (`sdk/v*` tags) and scoped package configuration.
-- [SDK Migration Guide](../docs/sdk-migration-guide.md) documenting breaking
-  changes and upgrade steps between major SDK versions.
 
-## [0.1.0] - 2026-06-25
+- Automatic retry with exponential backoff for `429 Too Many Requests` and `5xx` server errors. All SDK HTTP calls now go through `fetchWithRetry` by default.
+- `Retry-After` header is respected on `429` responses when present.
+- Default of 3 retries with backoff delays of 1s, 2s, and 4s.
+- `maxRetries` option on the `FluxaPayClient` constructor to configure retry behavior.
+- Retry attempts are logged at debug level with the attempt number and delay.
 
-### Added
-- `FluxapayClient` high-level wrapper for payment, refund, and merchant contract calls.
-- `RefundManagerClient` and `MerchantRegistryClient` for dedicated contract interactions.
-- Typed contract models (`Merchant`, `PaymentCharge`, `Refund`, `Dispute`, etc.).
-- Network profile presets for testnet and mainnet.
-- Offline/hardware wallet signing helpers via `FluxapayOfflineSigner`.
-- Contract error mapping with `FluxapayError` and `FLUXAPAY_CONTRACT_ERROR_MAP`.
+### Notes
 
-[Unreleased]: https://github.com/MetroLogic/fluxapay_contract/compare/sdk/v0.1.0...HEAD
-[0.1.0]: https://github.com/MetroLogic/fluxapay_contract/releases/tag/sdk/v0.1.0
+- Non-retriable errors (`400`, `401`, `403`, `404`, `422`) are returned immediately without retrying.

@@ -63,6 +63,7 @@ export interface CreatePaymentArgs {
   memo_type: Option<string>;
   token_address: Option<string>;
   client_token: Option<string>;
+  idempotency_key: Option<string>;
   metadata_hash: Option<Buffer>;
   /**
    * Optional payment metadata.
@@ -71,6 +72,19 @@ export interface CreatePaymentArgs {
    */
   metadata: Option<Record<string, string>>;
   fee_waiver_code: Option<string>;
+  allow_partial?: Option<boolean>;
+  /** Issue #482 */
+  retry_of_payment_id?: Option<string>;
+  /** Issue #841: expected muxed sub-account ID (from M-address). */
+  payer_muxed_id?: Option<u64 | bigint>;
+  /** Issue #516 */
+  payer?: Option<string>;
+  /**
+   * Issue #844: when true, confirmPayment may accept tipAmount.
+   * Issue #1025 makes this enforceable: `verifyPayment`/`confirmPayment`
+   * validate and record a tip, capped at `MAX_TIP_BPS`, only when `true`.
+   */
+  tip_enabled: boolean;
 }
 
 export interface Merchant {
@@ -174,6 +188,10 @@ export interface PaymentCharge {
   payment_id: string;
   status: PaymentStatus;
   transaction_hash: Option<Buffer>;
+  /** Issue #1025: Whether this payment accepts an optional tip/gratuity. */
+  tip_enabled: boolean;
+  /** Issue #1025: Tip amount recorded by `verify_payment`, if any. */
+  tip_amount: Option<i128>;
 }
 
 export type PaymentStatus =
@@ -201,6 +219,56 @@ export const FXOracleError = {
 export type OracleDataKey =
   | { tag: "Rate"; values: readonly [string] }
   | { tag: "StalenessThreshold"; values: void };
+
+export interface SwapAndPayArgs {
+  payer: string;
+  payment_id: string;
+  merchant_id: string;
+  amount: i128;
+  currency: string;
+  deposit_address: string;
+  token_in: string;
+  amount_in: i128;
+  amount_out_min: i128;
+  path: Array<string>;
+  expires_at?: Option<u64>;
+  dex_router: string;
+  fx_oracle?: Option<string>;
+  oracle_pair?: Option<string>;
+  max_deviation_bps: u32;
+}
+
+export interface SwapRoute {
+  router: string;
+  path: Array<string>;
+  amount_in: i128;
+}
+
+/**
+ * Issue #1270: On-chain record for a collaboratively settled dispute.
+ * Mirrors the `CollaborativeSettlement` struct returned by
+ * `get_collaborative_settlement`.
+ */
+export interface CollaborativeSettlement {
+  dispute_id: string;
+  settlement_amount: i128;
+  refund_id: string;
+  settled_at: u64;
+}
+
+/**
+ * Issue #1270: A single metered-billing usage record as stored on-chain.
+ * Mirrors the `UsageMetrics` struct returned by `get_usage_metrics`.
+ */
+export interface UsageMetrics {
+  subscription_id: string;
+  units_used: i128;
+  unit_price: i128;
+  token: string;
+  total_amount: i128;
+  timestamp: u64;
+  operator: string;
+}
 
 export interface Client {
   /**
@@ -429,6 +497,29 @@ export interface Client {
       transaction_hash,
       payer_address,
       amount_received,
+      tip_amount,
+    }: {
+      oracle: string;
+      payment_id: string;
+      transaction_hash: Buffer;
+      payer_address: string;
+      amount_received: i128;
+      /** Issue #1025: Tip/gratuity portion of `amount_received`, if any. */
+      tip_amount?: Option<i128>;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentStatus>>>;
+
+  /**
+   * Construct and simulate a confirm_payment transaction.
+   */
+  confirm_payment: (
+    {
+      oracle,
+      payment_id,
+      transaction_hash,
+      payer_address,
+      amount_received,
     }: {
       oracle: string;
       payment_id: string;
@@ -470,6 +561,54 @@ export interface Client {
     { payment_id }: { payment_id: string },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<Array<Dispute>>>>;
+
+  /**
+   * Construct and simulate a get_payment_disputes_by_status transaction.
+   */
+  get_payment_disputes_by_status: (
+    { payment_id, status }: { payment_id: string; status: DisputeStatus },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<Dispute>>>>;
+
+  /**
+   * Construct and simulate a swap_and_pay transaction.
+   */
+  swap_and_pay: (
+    { args }: { args: SwapAndPayArgs },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
+
+  /**
+   * Construct and simulate a swap_and_pay_multi_route transaction.
+   */
+  swap_and_pay_multi_route: (
+    {
+      args,
+      routes,
+      min_output_amount,
+    }: {
+      args: SwapAndPayArgs;
+      routes: Array<SwapRoute>;
+      min_output_amount: i128;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
+
+  /**
+   * Construct and simulate a cancel_multiple_streams transaction.
+   */
+  cancel_multiple_streams: (
+    { sender, stream_ids }: { sender: string; stream_ids: Array<string> },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<string>>>>;
+
+  /**
+   * Construct and simulate a top_up_multiple_streams transaction.
+   */
+  top_up_multiple_streams: (
+    { sender, top_ups }: { sender: string; top_ups: Array<[string, i128]> },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a refund_renounce_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -629,6 +768,75 @@ export interface Client {
     { admin, threshold }: { admin: string; threshold: u64 },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<void>>>;
+
+  /**
+   * Issue #1270: Settle a dispute collaboratively when both parties have
+   * signed a settlement amount off-chain. Returns the refund ID created for
+   * the settlement.
+   */
+  settle_dispute_collaboratively: (
+    {
+      dispute_id,
+      settlement_amount,
+      buyer_pubkey,
+      signature_buyer,
+      merchant_pubkey,
+      signature_merchant,
+    }: {
+      dispute_id: string;
+      settlement_amount: i128;
+      buyer_pubkey: Buffer;
+      signature_buyer: Buffer;
+      merchant_pubkey: Buffer;
+      signature_merchant: Buffer;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<string>>>;
+
+  /**
+   * Issue #1270: Retrieve the collaborative settlement record for a dispute.
+   */
+  get_collaborative_settlement: (
+    { dispute_id }: { dispute_id: string },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<CollaborativeSettlement>>>;
+
+  /**
+   * Issue #1270: Submit metered usage for a subscription billing period.
+   */
+  submit_usage_metrics: (
+    {
+      operator,
+      subscription_id,
+      units_used,
+      unit_price,
+      token,
+    }: {
+      operator: string;
+      subscription_id: string;
+      units_used: i128;
+      unit_price: i128;
+      token: string;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
+
+  /**
+   * Issue #1270: Retrieve usage-metric records for a subscription within a
+   * timestamp range.
+   */
+  get_usage_metrics: (
+    {
+      subscription_id,
+      from_timestamp,
+      to_timestamp,
+    }: {
+      subscription_id: string;
+      from_timestamp: u64;
+      to_timestamp: u64;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<UsageMetrics>>>>;
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
@@ -730,10 +938,16 @@ export class Client extends ContractClient {
     expire_payment: (json: string) => (this as any).txFromJSON(json),
     settle_payment: (json: string) => (this as any).txFromJSON(json),
     verify_payment: (json: string) => (this as any).txFromJSON(json),
+    confirm_payment: (json: string) => (this as any).txFromJSON(json),
     refund_grant_role: (json: string) => (this as any).txFromJSON(json),
     refund_revoke_role: (json: string) => (this as any).txFromJSON(json),
     get_payment_refunds: (json: string) => (this as any).txFromJSON(json),
     get_payment_disputes: (json: string) => (this as any).txFromJSON(json),
+    get_payment_disputes_by_status: (json: string) => (this as any).txFromJSON(json),
+    swap_and_pay: (json: string) => (this as any).txFromJSON(json),
+    swap_and_pay_multi_route: (json: string) => (this as any).txFromJSON(json),
+    cancel_multiple_streams: (json: string) => (this as any).txFromJSON(json),
+    top_up_multiple_streams: (json: string) => (this as any).txFromJSON(json),
     refund_renounce_role: (json: string) => (this as any).txFromJSON(json),
     payment_grant_role: (json: string) => (this as any).txFromJSON(json),
     refund_transfer_admin: (json: string) => (this as any).txFromJSON(json),
@@ -754,5 +968,11 @@ export class Client extends ContractClient {
     get_settlement_amount: (json: string) => (this as any).txFromJSON(json),
     get_staleness_threshold: (json: string) => (this as any).txFromJSON(json),
     set_staleness_threshold: (json: string) => (this as any).txFromJSON(json),
+    settle_dispute_collaboratively: (json: string) =>
+      (this as any).txFromJSON(json),
+    get_collaborative_settlement: (json: string) =>
+      (this as any).txFromJSON(json),
+    submit_usage_metrics: (json: string) => (this as any).txFromJSON(json),
+    get_usage_metrics: (json: string) => (this as any).txFromJSON(json),
   };
 }

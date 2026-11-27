@@ -48,6 +48,26 @@ fn test_unauthorized_set_rate() {
 }
 
 #[test]
+fn test_set_rate_rejects_non_positive_rates_and_unsupported_precision() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    let pair = Symbol::new(&env, "USDC_NGN");
+    assert_eq!(
+        client.try_set_rate(&oracle, &pair, &0, &7),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+    assert_eq!(
+        client.try_set_rate(&oracle, &pair, &100, &39),
+        Err(Ok(FXOracleError::InvalidRate))
+    );
+}
+
+#[test]
 fn test_staleness_check() {
     let env = Env::default();
     env.mock_all_auths();
@@ -76,8 +96,8 @@ fn test_hard_staleness_cap_despite_high_threshold() {
     let oracle = Address::generate(&env);
     client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
 
-    // Admin sets a permissive 7-day threshold; hard cap still applies at 24 h.
-    client.set_staleness_threshold(&admin, &(7 * 86_400));
+    // The maximum accepted threshold is 24 hours.
+    client.set_staleness_threshold(&admin, &86_400);
 
     let pair = Symbol::new(&env, "USDC_NGN");
     client.set_rate(&oracle, &pair, &1500i128, &0);
@@ -137,6 +157,40 @@ fn test_update_staleness_threshold() {
 
     client.set_staleness_threshold(&admin, &3600);
     assert_eq!(client.get_staleness_threshold(), 3600);
+}
+
+#[test]
+fn test_staleness_threshold_bounds_are_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    assert_eq!(
+        client.try_set_max_staleness(&admin, &59),
+        Err(Ok(FXOracleError::InvalidStalenessThreshold))
+    );
+    assert_eq!(
+        client.try_set_max_staleness(&admin, &86_401),
+        Err(Ok(FXOracleError::InvalidStalenessThreshold))
+    );
+    client.set_max_staleness(&admin, &60);
+    assert_eq!(client.get_staleness_threshold(), 60);
+}
+
+#[test]
+fn test_rate_within_configured_staleness_window_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+    client.set_max_staleness(&admin, &60);
+
+    let pair = Symbol::new(&env, "USDC_NGN");
+    client.set_rate(&oracle, &pair, &1500i128, &0);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 59);
+
+    assert!(client.try_get_rate(&pair).is_ok());
 }
 
 #[test]
@@ -424,4 +478,258 @@ fn test_set_rates_batch_rejects_oversized_batch() {
 
     let result = client.try_set_rates_batch(&oracle, &rates);
     assert_eq!(result, Err(Ok(FXOracleError::BatchTooLarge)));
+}
+
+// ─── Token allowlist (Issue #811) ────────────────────────────────────────────
+//
+// `set_rate` accepted any pair symbol, so an admin key — including a
+// compromised one — could publish a rate for a fabricated token and have
+// `PaymentLinkManager::use_link` settle against it.
+
+/// Oracle with a populated allowlist and an ORACLE-role operator.
+fn setup_allowlisted(env: &Env) -> (Address, Address, FXOracleClient<'_>) {
+    let contract_id = env.register(FXOracle, ());
+    let client = FXOracleClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+
+    let mut allowed = soroban_sdk::Vec::new(env);
+    allowed.push_back(Symbol::new(env, "USDC"));
+    allowed.push_back(Symbol::new(env, "NGN"));
+    client.oracle_initialize_with_tokens(&admin, &86400, &allowed);
+
+    let operator = Address::generate(env);
+    client.oracle_grant_role(&admin, &Symbol::new(env, "ORACLE"), &operator);
+
+    (admin, operator, client)
+}
+
+#[test]
+fn allowlist_permits_a_pair_of_allowed_tokens() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, client) = setup_allowlisted(&env);
+
+    client.set_rate(&operator, &Symbol::new(&env, "USDC_NGN"), &1500_0000000i128, &7);
+
+    assert_eq!(client.get_rate(&Symbol::new(&env, "USDC_NGN")).rate, 1500_0000000i128);
+}
+
+#[test]
+fn allowlist_rejects_a_fabricated_quote_token() {
+    // The attack in the issue: invent a token, publish a manipulated rate.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, client) = setup_allowlisted(&env);
+
+    let result = client.try_set_rate(
+        &operator,
+        &Symbol::new(&env, "USDC_FAKECOIN"),
+        &1i128,
+        &7,
+    );
+
+    assert_eq!(result, Err(Ok(FXOracleError::TokenNotAllowed)));
+}
+
+#[test]
+fn allowlist_rejects_a_fabricated_base_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, client) = setup_allowlisted(&env);
+
+    let result = client.try_set_rate(&operator, &Symbol::new(&env, "SCAM_NGN"), &1i128, &7);
+
+    assert_eq!(result, Err(Ok(FXOracleError::TokenNotAllowed)));
+}
+
+#[test]
+fn allowlist_rejects_a_malformed_pair() {
+    // An unparseable pair cannot be checked, and an unparseable pair is exactly
+    // the shape a fabricated one takes — so it is rejected, not waved through.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, client) = setup_allowlisted(&env);
+
+    for pair in ["USDCNGN", "USDC_NGN_EUR", "_NGN", "USDC_"] {
+        let result = client.try_set_rate(&operator, &Symbol::new(&env, pair), &1i128, &7);
+        assert_eq!(
+            result,
+            Err(Ok(FXOracleError::TokenNotAllowed)),
+            "pair {pair} should have been rejected"
+        );
+    }
+}
+
+#[test]
+fn an_empty_allowlist_permits_everything() {
+    // Deliberate: an instance upgraded from before this existed has no
+    // allowlist, and failing closed would take FX settlement down as a side
+    // effect of a security fix.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let operator = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+
+    assert!(client.get_allowed_tokens().is_empty());
+    client.set_rate(&operator, &Symbol::new(&env, "ANY_THING"), &1i128, &7);
+}
+
+#[test]
+fn add_allowed_token_activates_enforcement() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let operator = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &operator);
+
+    // Before: anything goes. After: only listed tokens.
+    client.set_rate(&operator, &Symbol::new(&env, "USDC_NGN"), &1i128, &7);
+
+    client.add_allowed_token(&admin, &Symbol::new(&env, "USDC"));
+    client.add_allowed_token(&admin, &Symbol::new(&env, "NGN"));
+
+    client.set_rate(&operator, &Symbol::new(&env, "USDC_NGN"), &2i128, &7);
+    assert_eq!(
+        client.try_set_rate(&operator, &Symbol::new(&env, "USDC_FAKE"), &3i128, &7),
+        Err(Ok(FXOracleError::TokenNotAllowed))
+    );
+}
+
+#[test]
+fn add_allowed_token_is_idempotent() {
+    // A re-run of a deployment script must not fail.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, client) = setup_allowlisted(&env);
+
+    client.add_allowed_token(&admin, &Symbol::new(&env, "USDC"));
+    client.add_allowed_token(&admin, &Symbol::new(&env, "USDC"));
+
+    assert_eq!(client.get_allowed_tokens().len(), 2);
+}
+
+#[test]
+fn remove_allowed_token_blocks_new_rates() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, operator, client) = setup_allowlisted(&env);
+
+    client.set_rate(&operator, &Symbol::new(&env, "USDC_NGN"), &1500i128, &7);
+    client.remove_allowed_token(&admin, &Symbol::new(&env, "NGN"));
+
+    assert_eq!(
+        client.try_set_rate(&operator, &Symbol::new(&env, "USDC_NGN"), &1600i128, &7),
+        Err(Ok(FXOracleError::TokenNotAllowed))
+    );
+}
+
+#[test]
+fn remove_allowed_token_leaves_the_existing_rate_readable() {
+    // Deleting it would fail an in-flight settlement with RateNotFound
+    // mid-payment; the rate ages out through the normal staleness path instead.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, operator, client) = setup_allowlisted(&env);
+
+    client.set_rate(&operator, &Symbol::new(&env, "USDC_NGN"), &1500i128, &7);
+    client.remove_allowed_token(&admin, &Symbol::new(&env, "NGN"));
+
+    assert_eq!(client.get_rate(&Symbol::new(&env, "USDC_NGN")).rate, 1500i128);
+}
+
+#[test]
+fn remove_allowed_token_is_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _, client) = setup_allowlisted(&env);
+
+    client.remove_allowed_token(&admin, &Symbol::new(&env, "NGN"));
+    client.remove_allowed_token(&admin, &Symbol::new(&env, "NGN"));
+
+    assert_eq!(client.get_allowed_tokens().len(), 1);
+}
+
+#[test]
+fn allowlist_management_requires_the_admin_role() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, client) = setup_allowlisted(&env);
+
+    // An ORACLE-role operator may publish rates but must not widen the set of
+    // tokens it can publish for — that separation is the point of the control.
+    assert_eq!(
+        client.try_add_allowed_token(&operator, &Symbol::new(&env, "SCAM")),
+        Err(Ok(FXOracleError::Unauthorized))
+    );
+    assert_eq!(
+        client.try_remove_allowed_token(&operator, &Symbol::new(&env, "USDC")),
+        Err(Ok(FXOracleError::Unauthorized))
+    );
+}
+
+#[test]
+fn batch_rejects_the_whole_batch_when_one_pair_is_disallowed() {
+    // Validated up front: store_rate has already mutated state by the time a
+    // later entry fails, and Soroban gives no partial rollback inside a call.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, client) = setup_allowlisted(&env);
+
+    let mut rates = soroban_sdk::Vec::new(&env);
+    rates.push_back((Symbol::new(&env, "USDC_NGN"), 1500i128, 7u32));
+    rates.push_back((Symbol::new(&env, "USDC_FAKE"), 1i128, 7u32));
+
+    assert_eq!(
+        client.try_set_rates_batch(&operator, &rates),
+        Err(Ok(FXOracleError::TokenNotAllowed))
+    );
+
+    // The allowed pair in the batch was not written either.
+    assert!(client.try_get_rate(&Symbol::new(&env, "USDC_NGN")).is_err());
+}
+
+#[test]
+fn batch_accepts_an_all_allowed_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, operator, client) = setup_allowlisted(&env);
+    client.add_allowed_token(&admin, &Symbol::new(&env, "EUR"));
+
+    let mut rates = soroban_sdk::Vec::new(&env);
+    rates.push_back((Symbol::new(&env, "USDC_NGN"), 1500i128, 7u32));
+    rates.push_back((Symbol::new(&env, "USDC_EUR"), 92i128, 7u32));
+
+    assert_eq!(client.set_rates_batch(&operator, &rates), 2);
+}
+
+#[test]
+fn is_token_allowed_reports_the_configured_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _, client) = setup_allowlisted(&env);
+
+    assert!(client.is_token_allowed(&Symbol::new(&env, "USDC")));
+    assert!(client.is_token_allowed(&Symbol::new(&env, "NGN")));
+    assert!(!client.is_token_allowed(&Symbol::new(&env, "SCAM")));
+}
+
+#[test]
+fn a_disallowed_pair_cannot_accumulate_quorum_submissions() {
+    // Checked before the quorum bookkeeping, so a disallowed pair cannot build
+    // up submissions and be rejected only once quorum is reached.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, operator, client) = setup_allowlisted(&env);
+    client.set_oracle_quorum(&admin, &2);
+
+    assert_eq!(
+        client.try_set_rate(&operator, &Symbol::new(&env, "USDC_FAKE"), &1i128, &7),
+        Err(Ok(FXOracleError::TokenNotAllowed))
+    );
+    assert!(client
+        .get_oracle_submissions(&Symbol::new(&env, "USDC_FAKE"))
+        .is_empty());
 }

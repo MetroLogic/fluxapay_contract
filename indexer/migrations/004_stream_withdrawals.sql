@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS stream_withdrawals (
   recipient VARCHAR(255),
   amount BIGINT,
   remaining_deposit BIGINT,
+  memo VARCHAR(255) DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_stream_withdrawal_stream_id (stream_id)
 );

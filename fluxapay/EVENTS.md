@@ -164,7 +164,9 @@ Emitted when an expired payment link is automatically deactivated by `expire_lin
 - **Data**: `link_id: String`
 
 ### LINK/VIEWED
-Emitted when a payment link is viewed via `record_link_view`.
+Emitted when a payment link is viewed via `record_link_view`. The viewer must
+authorize the call and pass the per-viewer rate limit before the event is
+emitted.
 - **Topics**: `(LINK, VIEWED)`
 - **Data**: `link_id: String`
 

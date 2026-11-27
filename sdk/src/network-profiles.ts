@@ -1,6 +1,6 @@
 import { Networks } from "@stellar/stellar-sdk";
 
-export type NetworkEnvironment = "mainnet" | "testnet" | "standalone";
+export type NetworkEnvironment = "mainnet" | "testnet" | "sandbox" | "standalone";
 
 export interface NetworkProfile {
   environment: NetworkEnvironment;
@@ -48,6 +48,13 @@ export const FLUXAPAY_CONTRACT_IDS: Record<NetworkEnvironment, FluxapayContractI
     fxOracle: UNSET_CONTRACT_ID,
     paymentLinkManager: UNSET_CONTRACT_ID,
   },
+  sandbox: {
+    paymentProcessor: UNSET_CONTRACT_ID,
+    refundManager: UNSET_CONTRACT_ID,
+    merchantRegistry: UNSET_CONTRACT_ID,
+    fxOracle: UNSET_CONTRACT_ID,
+    paymentLinkManager: UNSET_CONTRACT_ID,
+  },
   standalone: {
     paymentProcessor: UNSET_CONTRACT_ID,
     refundManager: UNSET_CONTRACT_ID,
@@ -70,6 +77,12 @@ export const NetworkProfiles: Record<NetworkEnvironment, NetworkProfile> = {
     rpcUrl: "https://soroban-testnet.stellar.org",
     defaultContractId: FLUXAPAY_CONTRACT_IDS.testnet.paymentProcessor,
   },
+  sandbox: {
+    environment: "sandbox",
+    networkPassphrase: Networks.STANDALONE,
+    rpcUrl: "http://localhost:8000/soroban/rpc",
+    defaultContractId: FLUXAPAY_CONTRACT_IDS.sandbox.paymentProcessor,
+  },
   standalone: {
     environment: "standalone",
     networkPassphrase: Networks.STANDALONE,
@@ -82,14 +95,18 @@ export class NetworkProfileSwitcher {
   private currentProfile: NetworkProfile;
 
   constructor(initialEnvironment: NetworkEnvironment = "testnet") {
-    this.currentProfile = NetworkProfiles[initialEnvironment];
+    const profile = NetworkProfiles[initialEnvironment];
+    if (!Object.prototype.hasOwnProperty.call(NetworkProfiles, initialEnvironment) || !profile) {
+      throw new Error(`Unsupported network environment: ${String(initialEnvironment)}`);
+    }
+    this.currentProfile = profile;
   }
 
   /**
    * Switch the current network environment.
    */
   public switchEnvironment(environment: NetworkEnvironment): void {
-    if (!NetworkProfiles[environment]) {
+    if (!Object.prototype.hasOwnProperty.call(NetworkProfiles, environment)) {
       throw new Error(`Unsupported network environment: ${environment}`);
     }
     this.currentProfile = NetworkProfiles[environment];
@@ -106,8 +123,9 @@ export class NetworkProfileSwitcher {
    * Update the default contract ID for a specific environment.
    */
   public setContractId(environment: NetworkEnvironment, contractId: string): void {
-    if (NetworkProfiles[environment]) {
-      NetworkProfiles[environment].defaultContractId = contractId;
+    const profile = NetworkProfiles[environment];
+    if (profile) {
+      profile.defaultContractId = contractId;
     }
   }
 }

@@ -2,7 +2,7 @@
 
 use crate::merchant_registry::KycTier;
 use soroban_sdk::{
-    contracterror, contracttype, Env, Address, BytesN, Map, String, Symbol, Vec,
+    contracterror, contracttype, Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 #[contracttype]
@@ -47,6 +47,12 @@ pub struct PaymentCharge {
     pub payer_muxed_id: Option<u64>,
     /// Issue #668: ID of the payment link that created this payment via `use_link`
     pub payment_link_id: Option<String>,
+    /// Issue #767: When true, allows funding the payment across multiple transactions.
+    pub allow_partial: Option<bool>,
+    /// Issue #844: Whether the merchant enabled an optional tip/gratuity on this payment.
+    pub tip_enabled: bool,
+    /// Issue #844: Tip/gratuity amount paid by the customer; stored separately from `amount`.
+    pub tip_amount: Option<i128>,
 }
 
 #[contracttype]
@@ -64,6 +70,8 @@ pub struct VerifyPaymentArgs {
 pub struct PaymentSummary {
     pub payment_id: String,
     pub amount: i128,
+    /// Issue #844: Tip itemized separately from base `amount` for reconciliation.
+    pub tip_amount: i128,
     pub fee: i128,
     pub refund_amount: i128,
     pub status: PaymentStatus,
@@ -179,6 +187,7 @@ pub enum InvoiceStatus {
     Created,
     Paid,
     Overdue,
+    Voided,
 }
 
 #[contracttype]
@@ -202,6 +211,8 @@ pub struct Invoice {
     pub status: InvoiceStatus,
     pub payment_link_id: Option<String>,
     pub created_at: u64,
+    pub paid_at: Option<u64>,
+    pub voided_at: Option<u64>,
 }
 
 #[contracttype]
@@ -334,6 +345,7 @@ pub enum Error {
     DirectTransferNotDisputable = 60,
     /// Issue #482: Maximum retry chain depth (3) exceeded for payment retry.
     MaxRetriesExceeded = 61,
+    RetryChainTooDeep = 347,
     /// Issue #505: Invalid payment status transition attempted.
     InvalidStatusTransition = 62,
     /// Issue #450: Customer called `claim_refund` before an operator approved it.
@@ -350,6 +362,83 @@ pub enum Error {
     TimelockNotExpired = 68,
     /// Issue #622: Evidence field is not a valid IPFS CID (CIDv0 starts with "Qm"/46 chars; CIDv1 starts with "bafy"/≥59 chars).
     InvalidEvidenceCid = 69,
+    /// Issue #841: Incoming muxed sub-account ID does not match the expected muxed_payer.
+    MuxedAccountMismatch = 70,
+    /// Treasury multisig configuration not set or invalid.
+    TreasuryMultisigNotConfigured = 71,
+    /// Caller is not an authorized treasury multisig signer.
+    NotAuthorizedTreasurySigner = 72,
+    /// Treasury withdrawal proposal not found.
+    TreasuryProposalNotFound = 73,
+    /// Treasury withdrawal proposal has already been executed.
+    TreasuryProposalAlreadyExecuted = 74,
+    /// Treasury withdrawal proposal has been cancelled.
+    TreasuryProposalCancelled = 75,
+    /// Treasury withdrawal proposal timelock has not expired.
+    TreasuryTimelockNotExpired = 76,
+    /// Treasury withdrawal proposal has expired.
+    TreasuryProposalExpired = 77,
+    /// Signer has already approved this treasury withdrawal proposal.
+    TreasuryAlreadyApproved = 78,
+    /// Insufficient approvals to execute treasury withdrawal.
+    TreasuryInsufficientApprovals = 79,
+    /// Invalid treasury multisig threshold (zero or exceeds signer count).
+    InvalidTreasuryThreshold = 80,
+    /// Treasury withdrawal amount exceeds token balance.
+    InsufficientTokenTreasuryBalance = 81,
+    /// Issue #836: Subscription is still in its free trial; no charge yet.
+    TrialActive = 82,
+    /// Issue #836: Requested trial_days exceeds the maximum of 90 days.
+    TrialTooLong = 83,
+    /// Payment link does not exist or belongs to a different merchant.
+    InvalidPaymentLink = 84,
+    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
+    KycLimitExceeded = 85,
+    /// Issue #1061: A single-use payment link has already been redeemed and cannot be used again.
+    LinkAlreadyUsed = 86,
+    /// Issue #1033: FX rate used by `confirm_payment` is older than the
+    /// PaymentProcessor's own configured staleness threshold
+    /// (`MAX_ORACLE_STALENESS_SECS` / `set_oracle_staleness_threshold`),
+    /// independent of the oracle's own internal cap (`StaleOracleRate`).
+    OracleStale = 87,
+    /// Issue #1032: The requested `deposit_address` is already assigned to
+    /// another open (`Pending`, unexpired) payment.
+    DepositAddressInUse = 88,
+    /// Issues #1026/#1027: `leaf_count` is zero or exceeds `MAX_MERKLE_BATCH_LEAVES`.
+    InvalidMerkleLeafCount = 87,
+    /// Issues #1026/#1027: No Merkle batch distribution exists with the given ID.
+    MerkleDistributionNotFound = 88,
+    /// Issues #1026/#1027: This `(distribution_id, index)` allocation was already claimed.
+    MerkleAlreadyClaimed = 89,
+    /// Issues #1026/#1027: Submitted Merkle proof does not resolve to the stored root.
+    InvalidMerkleProof = 90,
+    /// Issues #1026/#1027: Batch distribution's `expires_at` has passed; claims are closed.
+    MerkleDistributionExpired = 91,
+    /// Issues #1026/#1027: Batch distribution has not yet expired; defund not allowed.
+    MerkleDistributionNotExpired = 92,
+    /// Issues #1026/#1027: Batch distribution was already defunded by its creator.
+    MerkleDistributionAlreadyDefunded = 93,
+    /// Issue #1013: Withdrawal amount exceeds the configured single-admin threshold
+    /// and must instead go through `propose_treasury_withdrawal` multisig governance.
+    TreasuryExceedsSingleAdminThreshold = 94,
+    /// Issue #1014: Payment amount exceeds the merchant's KYC tier single-payment limit.
+    ExceedsTierSingleLimit = 95,
+    /// Issue #1014: Payment would exceed the merchant's KYC tier monthly volume limit.
+    ExceedsTierMonthlyLimit = 96,
+}
+
+/// Issue #841: Muxed account (M-address) wrapping a G-address and 64-bit sub-account ID.
+///
+/// Stellar muxed accounts virtualise a single G-address into many sub-accounts by
+/// embedding a memo ID in the address. Merchants use this to route customer payments
+/// without managing multiple keypairs.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MuxedAccount {
+    /// Underlying G-address (ed25519 public key).
+    pub account: Address,
+    /// 64-bit sub-account / memo ID embedded in the M-address.
+    pub id: u64,
 }
 
 #[contracttype]
@@ -374,11 +463,51 @@ pub struct CreatePaymentArgs {
     pub fee_waiver_code: Option<String>,
     /// Issue #482: Payment ID of the original payment if this is a retry; None if original or not retried.
     pub retry_of_payment_id: Option<String>,
-    /// Issue #484: Muxed account ID from payer M-address; None for G-addresses or on-chain payments.
+    /// Issue #484 / #841: Muxed account ID from payer M-address; None for G-addresses
+    /// or when any payer is accepted. When set, verify/confirm requires a matching ID.
     pub payer_muxed_id: Option<u64>,
     /// Customer/payer address, checked against the merchant's whitelist when
     /// `Merchant.whitelist_mode` is enabled (issue #516).
     pub payer: Option<Address>,
+    /// Issue #767: Optional flag to allow partial payment accumulation.
+    pub allow_partial: Option<bool>,
+    /// Issue #844: When true, customers may submit a tip via `confirm_payment`.
+    pub tip_enabled: bool,
+}
+
+/// Issue #844: Arguments for confirming a payment with an optional tip.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmPaymentArgs {
+    pub payment_id: String,
+    pub transaction_hash: BytesN<32>,
+    pub payer_address: Address,
+    pub amount_received: i128,
+    /// Tip/gratuity on top of the base payment. Accepted only when
+    /// `PaymentCharge.tip_enabled` is true.
+    pub tip_amount: Option<i128>,
+    pub payer_muxed_id: Option<u64>,
+}
+
+/// Issue #771: Payment request item for `create_payment_batch`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentRequest {
+    pub payment_id: String,
+    pub amount: i128,
+    pub currency: Symbol,
+    pub deposit_address: Address,
+    pub expires_at: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub token_address: Option<Address>,
+    pub client_token: Option<String>,
+    pub metadata_hash: Option<BytesN<32>>,
+    pub metadata: Option<Map<String, String>>,
+    pub fee_waiver_code: Option<String>,
+    pub payer: Option<Address>,
+    pub payer_muxed_id: Option<u64>,
 }
 
 /// Arguments for a single dispute in `batch_create_disputes` / `create_dispute`.
@@ -435,6 +564,17 @@ pub struct SwapRoute {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PauseScope {
+    All,
+    CreatePayment,
+    VerifyPayment,
+    SettlePayment,
+    CreateRefund,
+    Swap,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PauseState {
     pub paused: bool,
     pub reason: String,
@@ -478,6 +618,28 @@ pub struct SettlementSplit {
     pub amount: i128,
 }
 
+/// Issue #1200: One settlement request within a `batch_settle_payments` call —
+/// the same `payment_id` / `splits` pair accepted by `settle_payment`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSettlePaymentItem {
+    pub payment_id: String,
+    pub splits: Vec<SettlementSplit>,
+}
+
+/// Issue #1200: Per-item outcome of a `batch_settle_payments` call. The batch
+/// never reverts as a whole: each item either settles (`success: true`,
+/// `error_code: None`) or fails independently (`success: false`,
+/// `error_code` holding the numeric `Error` discriminant that `settle_payment`
+/// would have returned had it been called for that payment on its own).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSettleResult {
+    pub payment_id: String,
+    pub success: bool,
+    pub error_code: Option<u32>,
+}
+
 /// Vote choice for stake-weighted dispute voting.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -486,6 +648,15 @@ pub enum VoteChoice {
     Favour,
     /// Vote against the disputer (dispute should be rejected).
     Against,
+}
+
+/// Issue #843: Binary stake-weighted vote recorded by `cast_vote`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeWeightedVote {
+    pub choice: VoteChoice,
+    /// `stake_amount / VOTE_WEIGHT_UNIT` at the time of the vote.
+    pub vote_weight: i128,
 }
 
 /// Accumulated vote tally for a dispute.
@@ -498,6 +669,18 @@ pub struct VoteTally {
     pub against_weight: i128,
     /// Number of arbitrators who have voted.
     pub vote_count: u32,
+    /// Issue #843: Sum of registered vote weights from `lock_stake`.
+    pub total_registered_weight: i128,
+}
+
+/// Issue #846: Pending WASM upgrade proposal with ledger-based timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmUpgradeProposal {
+    pub new_wasm_hash: BytesN<32>,
+    /// Earliest ledger sequence at which `execute_upgrade` may run.
+    pub earliest_execute: u32,
+    pub proposed_by: Address,
 }
 
 /// Vote choice for the simple `ARBITRATOR`-role voting flow (as opposed to
@@ -534,6 +717,68 @@ pub struct TreasuryWithdrawal {
     pub destination: Address,
     pub admin: Address,
     pub withdrawn_at: u64,
+    /// Token contract address the withdrawal was paid out in.
+    pub token_address: Address,
+}
+
+/// Treasury withdrawal proposal with M-of-N multi-sig and timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryWithdrawalProposal {
+    pub proposal_id: String,
+    pub token_address: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub proposer: Address,
+    pub approvals: Vec<Address>,
+    pub created_at: u64,
+    pub earliest_execution_time: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
+/// Treasury multisig configuration for withdrawal governance.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryMultisigConfig {
+    pub required_approvals: u32,
+    pub admin_signers: Vec<Address>,
+    pub min_delay_secs: u64,
+    pub max_delay_secs: u64,
+}
+
+/// Issues #1026/#1027: A Merkle-root batch payment distribution for bulk
+/// disbursements (payroll, airdrops). The creator deposits `total_amount` of
+/// `token` up front; recipients independently withdraw their share by
+/// proving inclusion of `(index, recipient, amount)` under `merkle_root`.
+///
+/// `claimed_bitmap` tracks which leaf indices have been claimed using one bit
+/// per leaf, packed into a single persistent storage entry per distribution
+/// (replay protection without a storage write per recipient).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerkleDistribution {
+    pub distribution_id: u64,
+    pub creator: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_amount: i128,
+    pub claimed_amount: i128,
+    pub leaf_count: u32,
+    pub expires_at: u64,
+    pub defunded: bool,
+    pub claimed_bitmap: Bytes,
+}
+
+/// Treasury withdrawal proposal status for querying.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TreasuryProposalStatus {
+    Pending,
+    Approved,
+    Executed,
+    Cancelled,
+    Expired,
 }
 
 /// Issue #666: Record of a single settlement's platform-fee collection,
@@ -657,6 +902,9 @@ pub enum SubscriptionStatus {
     Paused,
     Cancelled,
     Expired,
+    PastDue,
+    CancelledDueToPaymentFailure,
+    Completed,
 }
 
 #[contracttype]
@@ -675,6 +923,14 @@ pub struct Subscription {
     pub last_payment_at: Option<u64>,
     pub total_payments: u32,
     pub max_payments: Option<u32>,
+    /// Billing interval in seconds between recurring charges.
+    pub interval_secs: u64,
+    /// Maximum number of billing cycles allowed; `None` means unlimited.
+    pub max_cycles: Option<u32>,
+    /// Number of billing cycles successfully charged so far.
+    pub current_cycle: u32,
+    /// Number of consecutive dunning retry attempts for the current cycle.
+    pub dunning_attempts: u32,
     /// Number of consecutive failed payment attempts in the current grace period.
     pub retry_count: u32,
     /// Timestamp of the next retry attempt (set when a payment fails and grace period begins).
@@ -687,6 +943,12 @@ pub struct Subscription {
     /// Affiliate fee in basis points (bps). If set and `affiliate` is Some,
     /// `affiliate_fee_bps / 10000` of each payment will be routed to the affiliate.
     pub affiliate_fee_bps: Option<u32>,
+    /// Issue #836: Ledger timestamp when the free trial ends. `None` if the
+    /// plan has no trial. While `now < trial_ends_at`, `charge_subscription`
+    /// returns `Error::TrialActive` and does not bill.
+    pub trial_ends_at: Option<u64>,
+    /// Ledger timestamp of the last successful charge; used for interval verification.
+    pub last_charge_at: u64,
 }
 
 #[contracttype]
@@ -722,10 +984,17 @@ pub struct SubscriptionPlan {
     pub interval_secs: u64,
     pub billing_interval: BillingInterval,
     pub active: bool,
+    /// Billing interval in seconds between recurring charges.
+    pub interval_secs: u64,
+    /// Maximum number of billing cycles allowed; `None` means unlimited.
+    pub max_cycles: Option<u32>,
     /// Optional split payout configuration for bundle subscriptions.
     /// If non-empty, the plan amount will be distributed to the configured
     /// `SettlementSplit` recipients on each subscription charge.
     pub payout_splits: Vec<SettlementSplit>,
+    /// Issue #836: Optional free-trial length in days (max 90). When set,
+    /// subscribers are not charged until `trial_ends_at`.
+    pub trial_days: Option<u32>,
 }
 
 #[contracttype]
@@ -806,7 +1075,9 @@ impl<'a> Drop for RefundLockGuard<'a> {
         self.env
             .storage()
             .persistent()
-            .remove(&crate::data_keys::DataKey::RefundLock(self.refund_id.clone()));
+            .remove(&crate::data_keys::DataKey::RefundLock(
+                self.refund_id.clone(),
+            ));
     }
 }
 
@@ -889,4 +1160,105 @@ pub struct ContractHealth {
     pub active_payment_count: u32,
     pub fx_oracle_configured: bool,
     pub merchant_registry_configured: bool,
+}
+
+/// A single rolling-reserve deposit bucket created when a payment settles.
+///
+/// Each settlement that withholds a reserve portion appends a bucket to the
+/// merchant's maturity queue. The bucket becomes releasable once
+/// `unlock_at` (ledger timestamp) has elapsed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingReserveBucket {
+    /// Monotonic bucket identifier, unique per merchant.
+    pub bucket_id: u64,
+    /// Merchant whose proceeds are locked in this bucket.
+    pub merchant_id: Address,
+    /// Payment that produced this reserve deposit.
+    pub payment_id: String,
+    /// Locked amount in the settlement token's smallest unit.
+    pub amount: i128,
+    /// Ledger timestamp at which this bucket matures and may be released.
+    pub unlock_at: u64,
+    /// Ledger timestamp when the bucket was created.
+    pub created_at: u64,
+    /// True once `release_matured_reserves` has credited the bucket.
+    pub released: bool,
+    /// True once `slash_reserve_for_dispute` has consumed the bucket.
+    pub slashed: bool,
+}
+
+/// Aggregate reserve accounting for a merchant, returned by
+/// `get_merchant_reserve_balance`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantReserveBalance {
+    /// Total reserve currently locked (matured + unmatured, unreleased).
+    pub total_locked: i128,
+    /// Portion of `total_locked` whose holding period has already elapsed
+    /// and is claimable via `release_matured_reserves`.
+    pub matured: i128,
+    /// Portion of `total_locked` still within its holding period.
+    pub upcoming: i128,
+    /// Scheduled future releases, ordered by ascending `unlock_at`.
+    pub schedule: Vec<ReserveReleaseScheduleEntry>,
+}
+
+/// A single entry in a merchant's upcoming reserve release schedule.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveReleaseScheduleEntry {
+    /// Ledger timestamp at which `amount` becomes releasable.
+    pub unlock_at: u64,
+    /// Amount maturing at `unlock_at`.
+    pub amount: i128,
+}
+
+/// Per-merchant reserve accounting state persisted in contract storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantReserveState {
+    /// Next bucket id to assign for this merchant.
+    pub next_bucket_id: u64,
+    /// Total reserve currently locked (unreleased, unslashed).
+    pub total_locked: i128,
+    /// Total reserve that has been released to the merchant.
+    pub total_released: i128,
+    /// Total reserve that has been slashed to cover lost disputes.
+    pub total_slashed: i128,
+    /// Policy snapshot applied to this merchant's most recent settlement.
+    pub policy: RollingReservePolicy,
+}
+
+/// Issue #1066: A single platform-fee collection record appended to
+/// `DataKey::FeeCollectionHistory` during `settle_payment` and
+/// `process_refund`. Paginated by `get_fee_collection_history`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecord {
+    /// Payment or refund ID that generated this fee event.
+    pub payment_id: String,
+    /// Fee amount charged (in the token's smallest unit).
+    pub fee_amount: i128,
+    /// Token contract address the fee was collected in.
+    pub token: Address,
+    /// Ledger timestamp when the fee was collected.
+    pub collected_at: u64,
+}
+
+/// Issue #1064: A single merchant's leaderboard entry returned by
+/// `get_top_merchants`, enriched with score, KYC tier, and volume metrics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantRankEntry {
+    /// Merchant contract address.
+    pub merchant_id: Address,
+    /// Composite score used for leaderboard ranking (same as cumulative gross volume).
+    pub score: i128,
+    /// KYC verification tier of the merchant.
+    pub kyc_tier: crate::merchant_registry::KycTier,
+    /// Total number of confirmed payments for this merchant.
+    pub confirmed_payment_count: u64,
+    /// Cumulative gross payment volume across all payments.
+    pub cumulative_volume: i128,
 }

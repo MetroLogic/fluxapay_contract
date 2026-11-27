@@ -12,6 +12,8 @@ fn setup_payment_link(env: &Env) -> (Address, PaymentLinkManagerClient<'_>) {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(env, &contract_id);
     let admin = Address::generate(env);
+    client.initialize(&admin).unwrap();
+    client.grant_merchant_role(&admin, &admin);
     (admin, client)
 }
 
@@ -46,6 +48,66 @@ fn test_create_link() {
     assert_eq!(link.amount, amount);
     assert!(link.active);
     assert!(!link.direct_transfer);
+}
+
+#[test]
+fn create_link_requires_merchant_role_and_rejects_revoked_merchants() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let link_id = String::from_str(&env, "role_link");
+
+    let attacker = Address::generate(&env);
+    assert_eq!(
+        client.try_initialize(&attacker),
+        Err(Ok(crate::Error::Unauthorized))
+    );
+
+    let ungranted = Address::generate(&env);
+    let ungranted_result = client.try_create_link(
+        &ungranted,
+        &String::from_str(&env, "ungranted_link"),
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Unassigned"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+    assert_eq!(ungranted_result, Err(Ok(crate::Error::Unauthorized)));
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Role required"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+    client.revoke_merchant_role(&merchant, &merchant);
+
+    let revoked_result = client.try_create_link(
+        &merchant,
+        &String::from_str(&env, "revoked_link"),
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Revoked"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+    assert_eq!(revoked_result, Err(Ok(crate::Error::Unauthorized)));
 }
 
 #[test]
@@ -887,6 +949,7 @@ fn test_record_link_view_increments_view_count() {
     env.mock_all_auths();
     let (_merchant, client) = setup_payment_link(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "view_link");
     client.create_link(
         &_merchant,
@@ -907,9 +970,9 @@ fn test_record_link_view_increments_view_count() {
     assert_eq!(link.view_count, 0);
 
     // Record 3 views
-    client.record_link_view(&link_id);
-    client.record_link_view(&link_id);
-    client.record_link_view(&link_id);
+    client.record_link_view(&viewer, &link_id);
+    client.record_link_view(&viewer, &link_id);
+    client.record_link_view(&viewer, &link_id);
 
     let link = client.get_link(&link_id);
     assert_eq!(link.view_count, 3);
@@ -961,6 +1024,7 @@ fn test_get_link_analytics_conversion_rate() {
     let (merchant, client) = setup_payment_link(&env);
     let payer = Address::generate(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "analytics_link");
     let amount = 1000i128;
     client.create_link(
@@ -979,7 +1043,7 @@ fn test_get_link_analytics_conversion_rate() {
 
     // Record 10 views
     for _ in 0..10 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
     }
 
     // Use the link once (1 conversion out of 10 views = 10%)
@@ -1035,6 +1099,7 @@ fn test_get_link_analytics_full_conversion() {
     let (merchant, client) = setup_payment_link(&env);
     let payer = Address::generate(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "full_conv_link");
     let amount = 1000i128;
     client.create_link(
@@ -1053,7 +1118,7 @@ fn test_get_link_analytics_full_conversion() {
 
     // 4 views, 4 uses → 100% conversion = 10000 bps
     for _ in 0..4 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
         let p = Address::generate(&env);
         client.use_link(&p, &link_id, &amount, &None);
     }
@@ -1072,6 +1137,7 @@ fn test_record_link_view_rejects_inactive_link() {
     env.mock_all_auths();
     let (merchant, client) = setup_payment_link(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "inactive_view_link");
     client.create_link(
         &merchant,
@@ -1089,7 +1155,39 @@ fn test_record_link_view_rejects_inactive_link() {
 
     client.deactivate_link(&merchant, &link_id);
     // Should fail because the link is no longer active
-    client.record_link_view(&link_id);
+    client.record_link_view(&viewer, &link_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_record_link_view_enforces_per_viewer_rate_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_link(&env);
+    client.initialize(&admin);
+    // Allow only 2 views per 60s for this viewer.
+    client.set_link_view_rate_limit(&admin, &2u32, &60u64);
+
+    let viewer = Address::generate(&env);
+    let link_id = String::from_str(&env, "rate_limited_view_link");
+    client.create_link(
+        &admin,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Rate Limited View"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    client.record_link_view(&viewer, &link_id);
+    client.record_link_view(&viewer, &link_id);
+    // Third view within the same window must be rejected.
+    client.record_link_view(&viewer, &link_id);
 }
 
 #[test]
@@ -1198,9 +1296,10 @@ fn test_set_payment_base_url_used_as_default() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin).unwrap();
 
     let merchant = Address::generate(&env);
+    client.grant_merchant_role(&admin, &merchant);
     let base = String::from_str(&env, "https://checkout.example.com");
     client.set_payment_base_url(&admin, &base);
 
@@ -1496,7 +1595,7 @@ fn test_use_link_zero_fee_bps_collects_no_fee() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin).unwrap();
 
     let token_admin = Address::generate(&env);
     let usdc_token = env
@@ -1507,6 +1606,7 @@ fn test_use_link_zero_fee_bps_collects_no_fee() {
 
     let merchant = Address::generate(&env);
     let payer = Address::generate(&env);
+    client.grant_merchant_role(&admin, &merchant);
     token_admin_client.mint(&payer, &5000i128);
 
     let link_id = String::from_str(&env, "zero_fee_link");
@@ -1545,7 +1645,7 @@ fn test_use_link_falls_back_to_global_fee_bps_when_link_has_none() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin).unwrap();
 
     let token_admin = Address::generate(&env);
     let usdc_token = env
@@ -1556,6 +1656,7 @@ fn test_use_link_falls_back_to_global_fee_bps_when_link_has_none() {
 
     let merchant = Address::generate(&env);
     let payer = Address::generate(&env);
+    client.grant_merchant_role(&admin, &merchant);
     token_admin_client.mint(&payer, &5000i128);
 
     // Admin sets a 5% (500 bps) global default fee for links.
@@ -1603,7 +1704,7 @@ fn test_set_payment_link_fee_bps_requires_admin() {
     let contract_id = env.register(PaymentLinkManager, ());
     let client = PaymentLinkManagerClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin).unwrap();
 
     let not_admin = Address::generate(&env);
 
@@ -1618,6 +1719,7 @@ fn test_link_analytics_revenue_and_conversion_rate() {
     let (merchant, client) = setup_payment_link(&env);
     let payer1 = Address::generate(&env);
     let payer2 = Address::generate(&env);
+    let viewer = Address::generate(&env);
 
     let link_id = String::from_str(&env, "revenue_link");
     client.create_link(
@@ -1636,7 +1738,7 @@ fn test_link_analytics_revenue_and_conversion_rate() {
 
     // Record 3 views
     for _ in 0..3 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
     }
 
     // Record 2 uses at 100 and 200 USDC
@@ -1701,6 +1803,7 @@ fn test_link_analytics_zero_uses() {
     env.mock_all_auths();
     let (merchant, client) = setup_payment_link(&env);
 
+    let viewer = Address::generate(&env);
     let link_id = String::from_str(&env, "zero_uses_link");
     client.create_link(
         &merchant,
@@ -1718,7 +1821,7 @@ fn test_link_analytics_zero_uses() {
 
     // Record views but no uses
     for _ in 0..5 {
-        client.record_link_view(&link_id);
+        client.record_link_view(&viewer, &link_id);
     }
 
     let analytics = client.get_link_analytics(&link_id).unwrap();
@@ -1768,4 +1871,308 @@ fn test_link_analytics_last_used_at_tracking() {
     // After using, last_used_at should be set to current or later timestamp
     assert!(analytics_after.last_used_at.is_some());
     assert!(analytics_after.last_used_at.unwrap() >= initial_timestamp);
+}
+
+#[test]
+fn test_single_use_link_max_uses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "promo_link");
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Promo"),
+        &None,
+        &Some(1),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // First use should succeed
+    let res1 = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert!(res1.is_ok());
+
+    // Second use should fail with LinkMaxUsesReached (#59)
+    let res2 = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert_eq!(res2.err(), Some(Ok(crate::Error::LinkMaxUsesReached)));
+}
+
+#[test]
+fn test_update_link_max_uses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "updatable_link");
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Updatable"),
+        &None,
+        &Some(1),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // First use
+    client.use_link(&payer, &link_id, &100i128, &None);
+
+    // Second use fails
+    let res = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert_eq!(res.err(), Some(Ok(crate::Error::LinkMaxUsesReached)));
+
+    // Merchant updates max_uses to 2
+    client.update_link_max_uses(&merchant, &link_id, &2);
+
+    // Now second use succeeds
+    let res_after = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert!(res_after.is_ok());
+}
+
+
+// ── Issue #1061: single-use link enforcement ──────────────────────────────────
+
+#[test]
+fn test_single_use_link_used_once_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "single_use_ok");
+
+    client.create_single_use_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Single use link"),
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Verify the flag is set
+    let link = client.get_link(&link_id);
+    assert!(link.single_use);
+    assert!(link.used_at.is_none());
+
+    // First use must succeed
+    let result = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert!(result.is_ok(), "First use of single-use link should succeed");
+
+    // used_at is now populated
+    let link_after = client.get_link(&link_id);
+    assert!(link_after.used_at.is_some());
+}
+
+#[test]
+fn test_single_use_link_rejected_on_second_use() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "single_use_reject");
+
+    client.create_single_use_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Single use – reject on retry"),
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // First use succeeds
+    client.use_link(&payer, &link_id, &100i128, &None);
+
+    // Second use must be rejected with LinkAlreadyUsed
+    let res = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert_eq!(
+        res,
+        Err(Ok(crate::Error::LinkAlreadyUsed)),
+        "Second use of single-use link must return LinkAlreadyUsed"
+    );
+}
+
+#[test]
+fn test_multi_use_link_allows_multiple_uses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "multi_use_link");
+
+    // Regular create_link — single_use defaults to false
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Multi-use link"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Both uses must succeed
+    let r1 = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert!(r1.is_ok(), "First use of multi-use link should succeed");
+
+    let r2 = client.try_use_link(&payer, &link_id, &100i128, &None);
+    assert!(r2.is_ok(), "Second use of multi-use link should succeed");
+}
+
+// ── Issue #1175: payment-link max_uses update (raise cap) path ────────────────
+
+#[test]
+fn test_update_link_max_uses_raises_cap_above_current_use_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+    let link_id = String::from_str(&env, "raise_cap_link");
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Raise cap"),
+        &None,
+        &Some(1),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Exhaust the original cap.
+    client.use_link(&payer, &link_id, &100i128, &None);
+    assert_eq!(
+        client.try_use_link(&payer, &link_id, &100i128, &None),
+        Err(Ok(crate::Error::LinkMaxUsesReached))
+    );
+    assert_eq!(client.get_link(&link_id).use_count, 1);
+
+    // Raise the cap above the current use_count.
+    client.update_link_max_uses(&merchant, &link_id, &3);
+    let link = client.get_link(&link_id);
+    assert_eq!(link.max_uses, Some(3));
+    assert_eq!(link.use_count, 1);
+
+    // Two further redemptions are allowed, then the new cap bites.
+    assert!(client.try_use_link(&payer, &link_id, &100i128, &None).is_ok());
+    assert!(client.try_use_link(&payer, &link_id, &100i128, &None).is_ok());
+    assert_eq!(
+        client.try_use_link(&payer, &link_id, &100i128, &None),
+        Err(Ok(crate::Error::LinkMaxUsesReached))
+    );
+    assert_eq!(client.get_link(&link_id).use_count, 3);
+}
+
+#[test]
+fn test_update_link_max_uses_rejects_unauthorized_and_lowering_below_use_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+    let intruder = Address::generate(&env);
+    let link_id = String::from_str(&env, "guarded_cap_link");
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &Some(100i128),
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Guarded cap"),
+        &None,
+        &Some(2),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+    client.use_link(&payer, &link_id, &100i128, &None);
+
+    // A non-merchant, non-admin caller cannot change the cap.
+    assert_eq!(
+        client.try_update_link_max_uses(&intruder, &link_id, &5),
+        Err(Ok(crate::Error::Unauthorized))
+    );
+    assert_eq!(client.get_link(&link_id).max_uses, Some(2));
+
+    // Neither lowering below the recorded use_count nor lowering an existing
+    // cap is permitted.
+    assert_eq!(
+        client.try_update_link_max_uses(&merchant, &link_id, &0),
+        Err(Ok(crate::Error::InvalidAmount))
+    );
+    assert_eq!(
+        client.try_update_link_max_uses(&merchant, &link_id, &1),
+        Err(Ok(crate::Error::InvalidAmount))
+    );
+
+    // A valid raise still works after the rejected attempts.
+    assert!(client.try_update_link_max_uses(&merchant, &link_id, &4).is_ok());
+    assert_eq!(client.get_link(&link_id).max_uses, Some(4));
+}
+
+#[test]
+fn test_link_use_count_increments_once_per_redemption() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (merchant, client) = setup_payment_link(&env);
+    let payer_a = Address::generate(&env);
+    let payer_b = Address::generate(&env);
+    let link_id = String::from_str(&env, "atomic_count_link");
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Counted"),
+        &None,
+        &Some(3),
+        &false,
+        &None,
+        &MaybeFiatConfig::None,
+        &None,
+    );
+
+    // Back-to-back redemptions in the same ledger: each successful call must
+    // commit exactly one increment (no lost updates / no double counting).
+    for amount in [10i128, 20, 30] {
+        assert!(client.try_use_link(&payer_a, &link_id, &amount, &None).is_ok());
+    }
+    assert_eq!(client.get_link(&link_id).use_count, 3);
+    assert_eq!(
+        client.try_use_link(&payer_b, &link_id, &10i128, &None),
+        Err(Ok(crate::Error::LinkMaxUsesReached))
+    );
+    assert_eq!(client.get_link(&link_id).use_count, 3);
 }

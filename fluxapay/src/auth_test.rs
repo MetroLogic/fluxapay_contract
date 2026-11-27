@@ -83,6 +83,47 @@ fn test_renounce_role_self_removes_role() {
     assert!(!refund_client.has_role(&role, &account));
 }
 
+/// Issue #815: known roles in `KNOWN_ROLES` can still be granted.
+#[test]
+fn test_grant_known_role_ok() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, refund_client, _merchant_client) = setup_contracts(&env);
+    let account = Address::generate(&env);
+    let role = Symbol::new(&env, "SETTLEMENT_OPERATOR");
+
+    refund_client.grant_role(&admin, &role, &account);
+    assert!(refund_client.has_role(&role, &account));
+}
+
+/// Issue #815: typo'd / unrecognised roles must be rejected (no phantom perms).
+#[test]
+fn test_grant_unknown_role_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, refund_client, _merchant_client) = setup_contracts(&env);
+    let account = Address::generate(&env);
+    // Typo of SETTLEMENT_OPERATOR — must not create a phantom role entry.
+    let role = Symbol::new(&env, "SETLMENT_OPERATOR");
+
+    let result = refund_client.try_grant_role(&admin, &role, &account);
+    assert_eq!(result, Err(Ok(crate::Error::AccessControlError)));
+    assert!(!refund_client.has_role(&role, &account));
+}
+
+/// Issue #815: revoke also validates against the role registry.
+#[test]
+fn test_revoke_unknown_role_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _payment_client, refund_client, _merchant_client) = setup_contracts(&env);
+    let account = Address::generate(&env);
+    let role = Symbol::new(&env, "NOT_A_REAL_ROLE");
+
+    let result = refund_client.try_revoke_role(&admin, &role, &account);
+    assert_eq!(result, Err(Ok(crate::Error::AccessControlError)));
+}
+
 #[test]
 fn test_renounce_role_non_holder_is_idempotent() {
     let env = Env::default();

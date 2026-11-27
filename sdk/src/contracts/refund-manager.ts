@@ -8,6 +8,17 @@ export interface RefundManagerConfig {
 }
 
 /**
+ * RefundStatus mirrors the on-chain `RefundStatus` enum used by the
+ * RefundManager contract. Values are the string variant names expected by
+ * the contract when passing a status argument.
+ */
+export type RefundStatus =
+  | "Pending"
+  | "Processed"
+  | "Rejected"
+  | "Cancelled";
+
+/**
  * RefundManagerClient provides a high-level interface for interacting with the RefundManager contract.
  * Handles refund creation, processing, rejection, and cancellation operations.
  */
@@ -166,7 +177,7 @@ export class RefundManagerClient {
   /**
    * Retrieve all refunds for a specific payment.
    * @param paymentId - The ID of the payment
-   * @returns A promise resolving to an array of refund IDs for the payment
+   * @returns A promise resolving to an array of refund IDs of the payment
    * @throws Error if the payment is not found
    */
   async getPaymentRefunds(paymentId: string): Promise<string[]> {
@@ -178,12 +189,105 @@ export class RefundManagerClient {
   }
 
   /**
+   * Retrieve a paginated list of all refunds recorded on the contract.
+   *
+   * This backs the global refund index maintained on-chain and appended on
+   * every `create_refund` / `create_refund_with_receipt` call, allowing operators
+   * to enumerate refunds without already knowing their IDs.
+   *
+   * @param offset - Number of refunds to skip from the start of the index
+   * @param limit - Maximum number of refunds to return
+   * @returns A promise resolving to the page of refund records
+   * @throws Error if the query fails
+   */
+  async getAllRefunds(offset: number, limit: number): Promise<any[]> {
+    return withMappedContractError(() =>
+      this.getContract().get_all_refunds({
+        offset: offset,
+        limit: limit,
+      }),
+    );
+  }
+
+  /**
+   * Retrieve a paginated list of refunds filtered by their status.
+   *
+   * The contract filters in-memory over the paginated slice of the global
+   * refund index, so the `offset` / `limit` window applies to the underlying
+   * index before the status filter is applied.
+   *
+   * @param status - The refund status to filter by (e.g., "Pending")
+   * @param offset - Number of refunds to skip from the start of the index
+   * @param limit - Maximum number of refunds to return
+   * @returns A promise resolving to the page of matching refund records
+   * @throws Error if the query fails
+   */
+  async getRefundsByStatus(
+    status: RefundStatus,
+    offset: number,
+    limit: number,
+  ): Promise<any[]> {
+    return withMappedContractError(() =>
+      this.getContract().get_refunds_by_status({
+        status: status,
+        offset: offset,
+        limit: limit,
+      }),
+    );
+  }
+
+  /**
    * Issue #676: Read the consolidated refund policy — `require_receipt_hash`,
    * `refund_expiry_secs`, `refund_fee_bps`, and `cooldown_secs` — in one call.
    * @returns A promise resolving to the current `RefundPolicy`.
    */
   async getRefundPolicy(): Promise<RefundPolicy> {
     return withMappedContractError(() => this.getContract().get_refund_policy());
+  }
+
+  /**
+   * Read the treasury balance for a specific settlement token.
+   *
+   * Fees are accrued per-token on-chain, so the token address must be
+   * supplied to avoid commingling balances from different settlement tokens.
+   * @param token - The settlement token address
+   * @returns A promise resolving to the treasury balance for that token
+   * @throws Error if the query fails
+   */
+  async getTreasuryBalance(token: string): Promise<bigint> {
+    return withMappedContractError(() =>
+      this.getContract().get_treasury_balance({
+        token: token,
+      }),
+    );
+  }
+
+  /**
+   * Withdraw accrued treasury fees in a specific settlement token.
+   *
+   * The token address is required so that the contract pays out only the
+   * fees actually collected in that token.
+   * @param admin - The administrator authorized to withdraw
+   * @param token - The settlement token address to withdraw
+   * @param amount - The amount to withdraw in stroops
+   * @param recipient - The address to receive the withdrawal
+   * @returns A promise that resolves when the withdrawal completes
+   * @throws Error if the withdrawal fails
+   */
+  async withdrawTreasury(
+    admin: string,
+    token: string,
+    amount: bigint,
+    recipient: string,
+  ): Promise<void> {
+    return withMappedContractError(() =>
+      this.getContract().withdraw_treasury({
+        admin: admin,
+        token: token,
+        amount: amount,
+        recipient: recipient,
+      }),
+    );
   }
 }
 

@@ -2,18 +2,25 @@
 
 This checklist covers every step required to deploy FluxaPay to Stellar mainnet. Each step includes the responsible role.
 
+> **Automated pre-flight:** run `scripts/pre-mainnet-check.sh` before launch.
+> It validates the automated items below (CI, WASM size, `cargo deny`,
+> `cargo audit`, `.env.example` secrets, contract IDs, multisig, FX rates)
+> and prints remaining manual steps. The script exits `0` only when every
+> automated check passes.
+
 ## Pre-Deployment
 
 - [ ] **External audit completed and all findings resolved** — Security
 - [ ] **SECURITY.md updated with audit report and status** — Security
-- [ ] **All CI tests passing on `main`** — Dev
+- [ ] **All CI tests passing on `main`** — Dev *(automated by `scripts/pre-mainnet-check.sh`)*
 - [ ] **Testnet smoke test passing end-to-end** — Dev / QA
 - [ ] **CHANGELOG.md updated with release notes** — Dev
+- [ ] **`scripts/pre-mainnet-check.sh` exits 0** — Dev / DevOps
 
 ## Contract Configuration
 
 - [ ] **USDC token address configured** (Stellar mainnet USDC issuer) — Admin
-- [ ] **Multi-sig threshold configured** (minimum 2-of-3 for admin operations) — Admin / Security
+- [ ] **Multi-sig threshold configured** (minimum 2-of-3 for admin operations) — Admin / Security *(signer count ≥ 3 checked by pre-mainnet script when env is set)*
 - [ ] **KYC tier limits set for production values** — Admin
 - [ ] **Admin key stored in hardware wallet or HSM** — Security
 
@@ -28,7 +35,7 @@ This checklist covers every step required to deploy FluxaPay to Stellar mainnet.
 
 - [ ] **Contract IDs populated in `sdk/src/network-profiles.ts`** — Dev
 - [ ] **Contract IDs updated in `DEPLOYMENT.md`** — Dev
-- [ ] **`scripts/check-mainnet-contract-ids.js` CI check passes** — CI
+- [ ] **`scripts/check-mainnet-contract-ids.js` CI check passes** — CI *(also covered by pre-mainnet script)*
 - [ ] **SDK version published with mainnet contract IDs** — Dev
 
 ## Deployment Execution

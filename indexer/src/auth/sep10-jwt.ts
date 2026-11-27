@@ -9,7 +9,11 @@
  * `SEP10Authenticator.generateJWT` byte-for-byte so tokens minted by that
  * class validate here without a shared library: a compact
  * `header.payload.signature` string (base64url segments), HMAC-SHA256 signed
- * with the server's Stellar account key used as HMAC key material.
+ * with the configured SEP10_JWT_SECRET.
+ *
+ * Issue #802: the `iss` claim is validated against the expected SEP-10 home
+ * domain (`SEP10_HOME_DOMAIN`) so tokens minted by any other issuer are
+ * rejected even when their signature is valid.
  */
 import * as crypto from "crypto";
 
@@ -18,6 +22,8 @@ export interface SEP10JWTClaims {
   iss: string;
   /** Subject — the authenticated Stellar account (merchant or admin). */
   sub: string;
+  /** Merchant identifier resolved during SEP-10 authentication, when available. */
+  merchant_id?: string;
   iat: number;
   exp: number;
   /** Optional scope claim, e.g. "merchant" or "admin". */
@@ -26,19 +32,43 @@ export interface SEP10JWTClaims {
 
 export class SEP10JWTError extends Error {}
 
+/**
+ * Resolve the expected SEP-10 home domain.
+ *
+ * `SEP10_HOME_DOMAIN` is required: without it the server cannot distinguish
+ * tokens minted by the legitimate SEP-10 server from tokens minted by an
+ * attacker-controlled one, so startup must fail fast.
+ *
+ * @throws {SEP10JWTError} if `SEP10_HOME_DOMAIN` is unset or empty.
+ */
+export function getExpectedHomeDomain(): string {
+  const domain = process.env.SEP10_HOME_DOMAIN;
+  if (!domain || domain.trim() === "") {
+    throw new SEP10JWTError(
+      "SEP10_HOME_DOMAIN is required but not set; refusing to verify SEP-10 JWTs",
+    );
+  }
+  return domain;
+}
+
 function base64urlDecode(segment: string): Buffer {
   return Buffer.from(segment, "base64url");
 }
 
 /**
- * Verify a SEP-10 JWT's signature and expiry.
+ * Verify a SEP-10 JWT's signature, expiry, and issuer.
  *
  * @param token - The compact JWT string from the `Authorization: Bearer <token>` header.
- * @param serverPublicKey - The Stellar account whose key material signed the token
- *   (must match `STELLAR_SERVER_PUBLIC_KEY`).
- * @throws {SEP10JWTError} if the token is malformed, the signature is invalid, or it has expired.
+ * @param jwtSecret - Shared secret configured on both auth service and indexer.
+ * @param expectedIssuer - The expected `iss` home domain.
+ * @throws {SEP10JWTError} if the token is malformed, the signature is invalid, it has
+ *   expired, or it was issued by an unexpected issuer.
  */
-export function verifySEP10JWT(token: string, serverPublicKey: string): SEP10JWTClaims {
+export function verifySEP10JWT(
+  token: string,
+  jwtSecret: string,
+  expectedIssuer: string = getExpectedHomeDomain(),
+): SEP10JWTClaims {
   const parts = token.split(".");
   if (parts.length !== 3) {
     throw new SEP10JWTError("Malformed JWT: expected 3 segments");
@@ -47,7 +77,7 @@ export function verifySEP10JWT(token: string, serverPublicKey: string): SEP10JWT
 
   const message = `${headerB64}.${payloadB64}`;
   const expectedSignature = crypto
-    .createHmac("sha256", Buffer.from(serverPublicKey, "base64"))
+    .createHmac("sha256", jwtSecret)
     .update(message)
     .digest("base64url");
 
@@ -69,6 +99,10 @@ export function verifySEP10JWT(token: string, serverPublicKey: string): SEP10JWT
 
   if (!claims.sub || typeof claims.sub !== "string") {
     throw new SEP10JWTError("JWT missing 'sub' claim");
+  }
+
+  if (typeof claims.iss !== "string" || claims.iss !== expectedIssuer) {
+    throw new SEP10JWTError("Invalid issuer");
   }
 
   const now = Math.floor(Date.now() / 1000);

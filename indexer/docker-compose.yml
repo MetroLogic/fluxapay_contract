@@ -32,6 +32,11 @@ services:
         condition: service_healthy
     ports:
       - "3001:3001"
+    # Secrets are injected via env_file (Docker-native) instead of bind-mounting
+    # the host .env file into the container. This prevents a compromised container
+    # from reading or overwriting host secrets on the filesystem.
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgres://postgres:password@postgres:5432/fluxapay
       SOROBAN_RPC_URL: http://stellar-quickstart:8000/soroban/rpc

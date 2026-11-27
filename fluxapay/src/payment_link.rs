@@ -3,6 +3,7 @@ use soroban_sdk::{
     String, Symbol, Vec,
 };
 
+use crate::access_control::{role_merchant, AccessControl};
 use crate::utils;
 use crate::{format_id, PaymentCharge, PaymentStatus};
 
@@ -59,6 +60,8 @@ pub struct CreateLinkArgs {
     pub metadata: Option<Map<String, String>>,
     pub fiat: MaybeFiatConfig,
     pub base_url: Option<String>,
+    /// Issue #1061: When `true`, the created link may only be redeemed once.
+    pub single_use: bool,
 }
 
 /// Issue #637: Maximum number of links that may be created in one
@@ -97,6 +100,12 @@ pub struct PaymentLink {
     /// via `set_payment_link_fee_bps(admin, None, bps)`. Only settable by
     /// the admin via `set_payment_link_fee_bps`.
     pub fee_bps: Option<i128>,
+    /// Issue #1061: When `true`, the link may only be used once; subsequent
+    /// calls to `use_link` are rejected with `LinkAlreadyUsed`.
+    pub single_use: bool,
+    /// Issue #1061: Timestamp (Unix seconds) when the link was first
+    /// successfully used. `None` means the link has never been used.
+    pub used_at: Option<u64>,
 }
 
 /// Analytics summary for a payment link.
@@ -140,6 +149,10 @@ pub enum LinkDataKey {
     LinkRateLimitConfig,
     /// Issue #623: Per-payer rolling window of link-use timestamps, keyed by payer address.
     PayerLinkUseWindow(Address),
+    /// Issue #754: Contract-wide per-viewer view rate limit config (max_views, window_secs).
+    LinkViewRateLimitConfig,
+    /// Issue #754: Per-viewer rolling window of link-view timestamps, keyed by viewer address.
+    PayerLinkViewWindow(Address),
 }
 
 #[contract]
@@ -156,10 +169,70 @@ impl PaymentLinkManager {
     }
 
     /// Initialize the contract with an admin address.
-    pub fn initialize(env: Env, admin: Address) {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), crate::Error> {
+        admin.require_auth();
+        if env.storage().persistent().has(&LinkDataKey::LinkAdmin) {
+            return Err(crate::Error::Unauthorized);
+        }
+        AccessControl::initialize(&env, admin.clone());
         env.storage()
             .persistent()
             .set(&LinkDataKey::LinkAdmin, &admin);
+        Ok(())
+    }
+
+    pub fn grant_merchant_role(
+        env: Env,
+        admin: Address,
+        merchant_id: Address,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+
+        Self::ensure_access_control_initialized(&env, &admin);
+        AccessControl::grant_role(&env, admin, role_merchant(&env), merchant_id)
+            .map_err(|_| crate::Error::AccessControlError)
+    }
+
+    pub fn revoke_merchant_role(
+        env: Env,
+        admin: Address,
+        merchant_id: Address,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+
+        Self::ensure_access_control_initialized(&env, &admin);
+        AccessControl::revoke_role(&env, admin, role_merchant(&env), merchant_id)
+            .map_err(|_| crate::Error::AccessControlError)
+    }
+
+    fn ensure_access_control_initialized(env: &Env, admin: &Address) {
+        if AccessControl::get_admin(env).is_none() {
+            AccessControl::initialize(env, admin.clone());
+        }
+    }
+
+    fn require_merchant_role(env: &Env, merchant_id: &Address) -> Result<(), crate::Error> {
+        if AccessControl::has_role(env, &role_merchant(env), merchant_id) {
+            Ok(())
+        } else {
+            Err(crate::Error::Unauthorized)
+        }
     }
 
     /// Upgrade the contract WASM.
@@ -316,6 +389,7 @@ impl PaymentLinkManager {
         base_url: Option<String>,
     ) -> Result<String, crate::Error> {
         merchant.require_auth();
+        Self::require_merchant_role(&env, &merchant)?;
         Self::build_and_store_link(
             &env,
             &merchant,
@@ -330,6 +404,47 @@ impl PaymentLinkManager {
                 metadata,
                 fiat,
                 base_url,
+                single_use: false,
+            },
+        )
+    }
+
+    /// Issue #1061: Create a payment link that can only be redeemed once.
+    ///
+    /// Identical to `create_link` but sets `single_use: true` on the resulting
+    /// `PaymentLink`. A second call to `use_link` on such a link will return
+    /// `Error::LinkAlreadyUsed`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_single_use_link(
+        env: Env,
+        merchant: Address,
+        link_id: String,
+        amount: Option<i128>,
+        currency: Symbol,
+        description: String,
+        expires_at: Option<u64>,
+        direct_transfer: bool,
+        metadata: Option<Map<String, String>>,
+        fiat: MaybeFiatConfig,
+        base_url: Option<String>,
+    ) -> Result<String, crate::Error> {
+        merchant.require_auth();
+        Self::require_merchant_role(&env, &merchant)?;
+        Self::build_and_store_link(
+            &env,
+            &merchant,
+            CreateLinkArgs {
+                link_id,
+                amount,
+                currency,
+                description,
+                expires_at,
+                max_uses: Some(1),
+                direct_transfer,
+                metadata,
+                fiat,
+                base_url,
+                single_use: true,
             },
         )
     }
@@ -350,6 +465,7 @@ impl PaymentLinkManager {
         links: Vec<CreateLinkArgs>,
     ) -> Result<Vec<String>, crate::Error> {
         merchant.require_auth();
+        Self::require_merchant_role(&env, &merchant)?;
 
         if links.len() > MAX_LINKS_PER_BATCH {
             return Err(crate::Error::BatchTooLarge);
@@ -423,6 +539,8 @@ impl PaymentLinkManager {
             fiat: args.fiat,
             shareable_url,
             fee_bps: None,
+            single_use: args.single_use,
+            used_at: None,
         };
 
         env.storage()
@@ -504,14 +622,28 @@ impl PaymentLinkManager {
             .and_then(|link| link.shareable_url)
     }
 
-    /// Record a view of a payment link.
+    /// Record a view of a payment link on behalf of `viewer`.
     ///
-    /// This is a permissionless entry point — any caller may increment the
-    /// `view_count` for an active link. Merchants use this (typically from
-    /// their storefront or checkout page) to track how many people viewed
-    /// the link versus how many actually paid, enabling conversion-rate
-    /// analytics via `get_link_analytics`.
-    pub fn record_link_view(env: Env, link_id: String) -> Result<(), crate::Error> {
+    /// The `viewer` must authorize the call. Merchants (or the storefront
+    /// acting on their behalf) use this to track how many people viewed the
+    /// link versus how many actually paid, enabling conversion-rate analytics
+    /// via `get_link_analytics`.
+    ///
+    /// Issue #754: previously this was a permissionless entry point, which let
+    /// any address force unbounded persistent-storage writes and event
+    /// emissions for every active link. It now requires authorization and
+    /// enforces a per-viewer rolling-window rate limit (see
+    /// `enforce_link_view_rate_limit`), mirroring `use_link`.
+    pub fn record_link_view(
+        env: Env,
+        viewer: Address,
+        link_id: String,
+    ) -> Result<(), crate::Error> {
+        viewer.require_auth();
+
+        // Issue #754: Enforce the per-viewer rate limit before any storage write.
+        Self::enforce_link_view_rate_limit(&env, &viewer)?;
+
         let mut link = Self::get_link_internal(&env, &link_id)?;
 
         if !link.active {
@@ -562,6 +694,11 @@ impl PaymentLinkManager {
             }
         }
 
+        // Issue #1061: Reject single-use links that have already been redeemed.
+        if link.single_use && link.used_at.is_some() {
+            return Err(crate::Error::LinkAlreadyUsed);
+        }
+
         // Resolve the effective USDC amount:
         // - If fiat config is set, compute USDC equivalent via the FX oracle
         // - Otherwise use the caller-supplied amount (validated against link.amount if fixed)
@@ -578,7 +715,11 @@ impl PaymentLinkManager {
             for _ in 0..rate_data.decimals {
                 divisor = divisor.saturating_mul(10);
             }
-            let usdc_equivalent = fiat_cfg.amount.saturating_mul(divisor) / rate_data.rate;
+            let usdc_equivalent = fiat_cfg
+                .amount
+                .saturating_mul(divisor)
+                .checked_div(rate_data.rate)
+                .ok_or(crate::Error::InvalidAmount)?;
 
             // If the link also has a fixed USDC amount, validate against it
             if let Some(fixed_amount) = link.amount {
@@ -614,6 +755,10 @@ impl PaymentLinkManager {
         // Accumulate revenue from this payment and record the timestamp.
         link.total_revenue = link.total_revenue.saturating_add(resolved_amount);
         link.last_used_at = Some(env.ledger().timestamp());
+        // Issue #1061: Mark a single-use link as consumed on its first redemption.
+        if link.single_use && link.used_at.is_none() {
+            link.used_at = Some(env.ledger().timestamp());
+        }
         env.storage()
             .persistent()
             .set(&LinkDataKey::Link(link_id.clone()), &link);
@@ -639,7 +784,10 @@ impl PaymentLinkManager {
                 .unwrap_or(None)
         };
         let fee_amount: i128 = match effective_fee_bps {
-            Some(bps) if bps > 0 => resolved_amount.saturating_mul(bps) / 10_000,
+            Some(bps) if bps > 0 => resolved_amount
+                .saturating_mul(bps)
+                .checked_div(10_000)
+                .unwrap_or(0),
             _ => 0,
         };
 
@@ -716,6 +864,9 @@ impl PaymentLinkManager {
             payer_muxed_id: None,
             // Issue #668: trace this payment back to the link that created it.
             payment_link_id: Some(link_id.clone()),
+            allow_partial: None,
+            tip_enabled: false,
+            tip_amount: None,
         };
 
         // Store the payment charge
@@ -746,13 +897,24 @@ impl PaymentLinkManager {
         env.events().publish(
             (Symbol::new(&env, "LINK"), Symbol::new(&env, "USED")),
             (
-                link_id,
+                link_id.clone(),
                 payer,
                 resolved_amount,
                 payment_id.clone(),
                 link.metadata.clone(),
             ),
         );
+
+        // Issue #1061: Emit PAYMENT_LINK/USED event when a single-use link is consumed.
+        if link.single_use {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "PAYMENT_LINK"),
+                    Symbol::new(&env, "USED"),
+                ),
+                (link_id, payment_id.clone()),
+            );
+        }
 
         Ok(payment_id)
     }
@@ -798,6 +960,51 @@ impl PaymentLinkManager {
         env.events().publish(
             (Symbol::new(&env, "LINK"), Symbol::new(&env, "DEACTIVATED")),
             link_id,
+        );
+
+        Ok(())
+    }
+
+    /// Admin or merchant can update max_uses on an existing link (only increase, not decrease below use_count).
+    pub fn update_link_max_uses(
+        env: Env,
+        caller: Address,
+        link_id: String,
+        new_max_uses: u32,
+    ) -> Result<(), crate::Error> {
+        caller.require_auth();
+
+        let mut link = Self::get_link_internal(&env, &link_id)?;
+
+        let is_merchant = link.merchant_id == caller;
+        let stored_admin: Option<Address> = env.storage().persistent().get(&LinkDataKey::LinkAdmin);
+        let is_admin = stored_admin.map(|a| a == caller).unwrap_or(false);
+
+        if !is_merchant && !is_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+
+        if new_max_uses < link.use_count {
+            return Err(crate::Error::InvalidAmount);
+        }
+
+        if let Some(current_max) = link.max_uses {
+            if new_max_uses < current_max {
+                return Err(crate::Error::InvalidAmount);
+            }
+        }
+
+        link.max_uses = Some(new_max_uses);
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::Link(link_id.clone()), &link);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "LINK"),
+                Symbol::new(&env, "MAX_USES_UPDATED"),
+            ),
+            (link_id, new_max_uses),
         );
 
         Ok(())
@@ -903,19 +1110,24 @@ impl PaymentLinkManager {
         let link = Self::get_link_internal(&env, &link_id)?;
 
         let conversion_rate = if link.view_count > 0 {
-            link.use_count.saturating_mul(10_000) / link.view_count
+            link.use_count
+                .saturating_mul(10_000)
+                .checked_div(link.view_count)
+                .unwrap_or(0)
         } else {
             0
         };
 
         let average_payment = if link.use_count > 0 {
-            link.total_revenue / (link.use_count as i128)
+            link.total_revenue
+                .checked_div(link.use_count as i128)
+                .unwrap_or(0)
         } else {
             0
         };
 
         Ok(LinkAnalytics {
-            merchant_id: link.merchant,
+            merchant_id: link.merchant_id,
             view_count: link.view_count,
             use_count: link.use_count,
             total_revenue: link.total_revenue,
@@ -1020,6 +1232,82 @@ impl PaymentLinkManager {
         env.storage()
             .instance()
             .set(&LinkDataKey::PayerLinkUseWindow(payer.clone()), &fresh);
+
+        Ok(())
+    }
+
+    // ── Issue #754: Per-viewer link-view rate limiting ────────────────────────
+
+    /// Default per-viewer rate-limit config: 100 views per 60 seconds.
+    const DEFAULT_LINK_VIEW_MAX_VIEWS: u32 = 100;
+    const DEFAULT_LINK_VIEW_WINDOW_SECS: u64 = 60;
+
+    /// Admin-only: configure the per-viewer payment-link view rate limit.
+    ///
+    /// * `max_views`   – Maximum number of `record_link_view` calls allowed per viewer within the window.
+    /// * `window_secs` – Rolling window length in seconds.
+    pub fn set_link_view_rate_limit(
+        env: Env,
+        admin: Address,
+        max_views: u32,
+        window_secs: u64,
+    ) -> Result<(), crate::Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkViewRateLimitConfig, &(max_views, window_secs));
+        Ok(())
+    }
+
+    /// Enforce the per-viewer payment-link view rate limit.
+    ///
+    /// Mirrors [`Self::enforce_payer_link_rate_limit`] but keeps its own
+    /// window so that recording a view never consumes a viewer's `use_link`
+    /// quota (and vice versa).
+    fn enforce_link_view_rate_limit(env: &Env, viewer: &Address) -> Result<(), crate::Error> {
+        let (max_views, window_secs): (u32, u64) = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkViewRateLimitConfig)
+            .unwrap_or((
+                Self::DEFAULT_LINK_VIEW_MAX_VIEWS,
+                Self::DEFAULT_LINK_VIEW_WINDOW_SECS,
+            ));
+
+        let now = env.ledger().timestamp();
+        let cutoff = now.saturating_sub(window_secs);
+
+        // Load existing timestamps, drop stale ones.
+        let timestamps: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&LinkDataKey::PayerLinkViewWindow(viewer.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut fresh: Vec<u64> = Vec::new(env);
+        for ts in timestamps.iter() {
+            if ts >= cutoff {
+                fresh.push_back(ts);
+            }
+        }
+
+        if fresh.len() >= max_views {
+            return Err(crate::Error::RateLimitExceeded);
+        }
+
+        // Record this view and persist.
+        fresh.push_back(now);
+        env.storage()
+            .instance()
+            .set(&LinkDataKey::PayerLinkViewWindow(viewer.clone()), &fresh);
 
         Ok(())
     }

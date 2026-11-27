@@ -1,4 +1,5 @@
 use crate::{
+    merchant_registry::{MaybeFeeConfig, MerchantRegistry, MerchantRegistryClient},
     DataKey, Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
     RefundManagerClient, RefundStatus,
 };
@@ -49,11 +50,13 @@ fn create_and_verify(
         memo_type: None,
         token_address: None,
         client_token: None,
+        idempotency_key: None,
         metadata_hash: None,
         metadata: None,
         fee_waiver_code: None,
         retry_of_payment_id: None,
         payer_muxed_id: None,
+            tip_enabled: false,
     };
     payment_client.create_payment(&args);
 
@@ -180,4 +183,336 @@ fn test_overpaid_emits_event() {
 
     let overpaid_count = count_event(&env, "PAYMENT", "OVERPAID");
     assert_eq!(overpaid_count, 1, "PAYMENT/OVERPAID must be emitted");
+}
+
+#[test]
+fn test_partial_payment_accumulation_multi_tx() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, payment_client, _) = setup(&env);
+    let merchant = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    payment_client.grant_role(&Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&Symbol::new(&env, "ORACLE"), &oracle);
+
+    let payment_id = String::from_str(&env, "PAY_PARTIAL_ACCUM");
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        payer: Some(payer.clone()),
+        amount: 1000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        allow_partial: Some(true),
+    };
+    payment_client.create_payment(&args);
+
+    // First partial contribution: 400 of 1000
+    let status1 = payment_client.confirm_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::random(&env),
+        &payer,
+        &400,
+        &None,
+    );
+    assert_eq!(status1, PaymentStatus::PartiallyPaid);
+    let p1 = payment_client.get_payment(&payment_id);
+    assert_eq!(p1.amount_received, Some(400));
+    assert_eq!(p1.status, PaymentStatus::PartiallyPaid);
+
+    // Second contribution: 600 of 1000 (total 1000) -> Confirmed
+    let status2 = payment_client.confirm_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::random(&env),
+        &payer,
+        &600,
+        &None,
+    );
+    assert_eq!(status2, PaymentStatus::Confirmed);
+    let p2 = payment_client.get_payment(&payment_id);
+    assert_eq!(p2.amount_received, Some(1000));
+    assert_eq!(p2.status, PaymentStatus::Confirmed);
+}
+
+#[test]
+fn test_partial_payment_expiry_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, payment_client, _) = setup(&env);
+    let merchant = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    payment_client.grant_role(&Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&Symbol::new(&env, "ORACLE"), &oracle);
+
+    let payment_id = String::from_str(&env, "PAY_PARTIAL_EXPIRE");
+    let expiry_ts = env.ledger().timestamp() + 3600;
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        payer: Some(payer.clone()),
+        amount: 1000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(expiry_ts),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        allow_partial: Some(true),
+    };
+    payment_client.create_payment(&args);
+
+    // Partially fund 300
+    payment_client.confirm_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::random(&env),
+        &payer,
+        &300,
+        &None,
+    );
+
+    // Advance time past expiry
+    env.ledger().with_mut(|li| li.timestamp = expiry_ts + 1);
+
+    // Expire payment
+    assert!(payment_client.try_expire_payment(&payment_id).is_ok());
+    let payment = payment_client.get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Expired);
+}
+
+/// Issue #1018: With the merchant registry wired up (so `expire_payment` can
+/// reach `RefundManager`), an expired partially-funded payment must
+/// automatically create a real, claimable `Refund` record for the
+/// accumulated partial amount, and emit `PAYMENT/PARTIAL_REFUNDED`.
+#[test]
+fn test_partial_payment_expiry_auto_creates_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, refund_client) = setup(&env);
+
+    let merchant_registry = env.register(MerchantRegistry, ());
+    let merchant_client = MerchantRegistryClient::new(&env, &merchant_registry);
+    merchant_client.initialize(&admin);
+    payment_client.set_merchant_registry_address(&admin, &merchant_registry);
+    merchant_client.set_refund_manager_address(&admin, &refund_client.address);
+
+    let merchant = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    merchant_client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "Test Merchant"),
+        &String::from_str(&env, "USD"),
+        &Some(merchant.clone()),
+        &None::<String>,
+        &MaybeFeeConfig::None,
+    );
+    merchant_client.verify_merchant(&admin, &merchant);
+
+    payment_client.grant_role(&Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&Symbol::new(&env, "ORACLE"), &oracle);
+
+    let payment_id = String::from_str(&env, "PAY_PARTIAL_AUTO_REFUND");
+    let expiry_ts = env.ledger().timestamp() + 3600;
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        payer: Some(payer.clone()),
+        amount: 1000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(expiry_ts),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        allow_partial: Some(true),
+    };
+    payment_client.create_payment(&args);
+
+    // Partially fund 300 of 1000.
+    payment_client.confirm_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::random(&env),
+        &payer,
+        &300,
+        &None,
+    );
+
+    env.ledger().with_mut(|li| li.timestamp = expiry_ts + 1);
+    assert!(payment_client.try_expire_payment(&payment_id).is_ok());
+
+    let payment = payment_client.get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Expired);
+
+    let refunds = refund_client.get_payment_refunds(&payment_id);
+    assert_eq!(refunds.len(), 1, "expiry must auto-create exactly one refund");
+    let refund = refunds.get(0).unwrap();
+    assert_eq!(refund.amount, 300);
+    assert_eq!(refund.status, RefundStatus::Pending);
+    assert_eq!(refund.requester, payer);
+
+    let partial_refunded_count = count_event(&env, "PAYMENT", "PARTIAL_REFUNDED");
+    assert_eq!(
+        partial_refunded_count, 1,
+        "PAYMENT/PARTIAL_REFUNDED must be emitted once"
+    );
+}
+
+/// Issue #1185: exact/over/partial amounts produce the right pending refunds
+/// around expiry; overpayment refunds are created at confirmation (amount =
+/// overpayment) and must not be duplicated at expiry.
+#[test]
+fn test_overpayment_auto_refund_amounts_at_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, refund_client) = setup(&env);
+
+    let merchant_registry = env.register(MerchantRegistry, ());
+    let merchant_client = MerchantRegistryClient::new(&env, &merchant_registry);
+    merchant_client.initialize(&admin);
+    payment_client.set_merchant_registry_address(&admin, &merchant_registry);
+    merchant_client.set_refund_manager_address(&admin, &refund_client.address);
+
+    let merchant = Address::generate(&env);
+    merchant_client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "Overpay Merchant"),
+        &String::from_str(&env, "USD"),
+        &Some(merchant.clone()),
+        &None::<String>,
+        &MaybeFeeConfig::None,
+    );
+    merchant_client.verify_merchant(&admin, &merchant);
+    payment_client.grant_role(&Symbol::new(&env, "MERCHANT"), &merchant);
+    let oracle = Address::generate(&env);
+    let payer = Address::generate(&env);
+    payment_client.grant_role(&Symbol::new(&env, "ORACLE"), &oracle);
+
+    let expiry = env.ledger().timestamp() + 3600;
+    let make_args = |env: &Env, id: &str, allow_partial: bool| crate::CreatePaymentArgs {
+        payment_id: String::from_str(env, id),
+        merchant_id: merchant.clone(),
+        payer: Some(payer.clone()),
+        amount: 1000,
+        currency: Symbol::new(env, "USDC"),
+        deposit_address: Address::generate(env),
+        expires_at: Some(expiry),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        idempotency_key: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        allow_partial: if allow_partial { Some(true) } else { None },
+    };
+
+    let exact_id = String::from_str(&env, "PAY_REFUND_EXACT");
+    let over_id = String::from_str(&env, "PAY_REFUND_OVER");
+    let partial_id = String::from_str(&env, "PAY_REFUND_PARTIAL");
+    payment_client.create_payment(&make_args(&env, "PAY_REFUND_EXACT", false));
+    payment_client.create_payment(&make_args(&env, "PAY_REFUND_OVER", false));
+    payment_client.create_payment(&make_args(&env, "PAY_REFUND_PARTIAL", true));
+
+    payment_client.confirm_payment(&oracle, &exact_id, &BytesN::random(&env), &payer, 1000, &None);
+    payment_client.confirm_payment(&oracle, &over_id, &BytesN::random(&env), &payer, 1500, &None);
+    payment_client.confirm_payment(&oracle, &partial_id, &BytesN::random(&env), &payer, 700, &None);
+
+    assert_eq!(payment_client.get_payment(&exact_id).status, PaymentStatus::Confirmed);
+    assert_eq!(payment_client.get_payment(&over_id).status, PaymentStatus::Overpaid);
+    assert_eq!(payment_client.get_payment(&partial_id).status, PaymentStatus::PartiallyPaid);
+
+    // Refund amount equals the overpayment (1500 - 1000 = 500).
+    let over_refunds = refund_client.get_payment_refunds(&over_id);
+    assert_eq!(over_refunds.len(), 1);
+    let over_refund = over_refunds.get(0).unwrap();
+    assert_eq!(over_refund.amount, 500);
+    assert_eq!(over_refund.status, RefundStatus::Pending);
+    assert_eq!(refund_client.get_payment_refunds(&exact_id).len(), 0);
+    assert_eq!(refund_client.get_payment_refunds(&partial_id).len(), 0);
+
+    env.ledger().with_mut(|li| li.timestamp = expiry + 1);
+    assert!(payment_client.try_expire_payment(&partial_id).is_ok());
+    let partial_refunds = refund_client.get_payment_refunds(&partial_id);
+    assert_eq!(partial_refunds.len(), 1);
+    assert_eq!(partial_refunds.get(0).unwrap().amount, 700);
+    assert_eq!(partial_refunds.get(0).unwrap().status, RefundStatus::Pending);
+
+    // Confirmed/Overpaid payments are already processed: no refund is added at expiry.
+    assert!(payment_client.try_expire_payment(&over_id).is_err());
+    assert!(payment_client.try_expire_payment(&exact_id).is_err());
+    assert_eq!(refund_client.get_payment_refunds(&over_id).len(), 1);
+    assert_eq!(refund_client.get_payment_refunds(&exact_id).len(), 0);
+}
+
+#[test]
+fn test_bump_payment_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, payment_client, _) = setup(&env);
+    let merchant = Address::generate(&env);
+
+    payment_client.grant_role(&Symbol::new(&env, "MERCHANT"), &merchant);
+    let payment_id = String::from_str(&env, "PAY_TTL_TEST");
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        payer: None,
+        amount: 100,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+        metadata: None,
+        fee_waiver_code: None,
+        retry_of_payment_id: None,
+        payer_muxed_id: None,
+        allow_partial: None,
+    };
+    payment_client.create_payment(&args);
+
+    // Permissionless bump_payment_ttl call succeeds
+    assert!(payment_client.try_bump_payment_ttl(&payment_id).is_ok());
 }

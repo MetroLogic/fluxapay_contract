@@ -7,8 +7,8 @@ use crate::access_control::{
 use crate::utils::{self, format_id, is_valid_cid, validate_id, validate_ipfs_multihash};
 use crate::*;
 use soroban_sdk::{
-    contract, contractimpl, map, token, vec, Address, BytesN, Env, Map, MuxedAddress, String, Symbol,
-    Vec,
+    contract, contractimpl, map, token, vec, Address, BytesN, Env, Map, MuxedAddress, String,
+    Symbol, Vec,
 };
 
 #[contract]
@@ -22,6 +22,12 @@ pub struct PaymentProcessor;
 impl PaymentProcessor {
     /// Returns the current contract version string from persistent storage.
     /// Falls back to INITIAL_CONTRACT_VERSION if not set.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn version(env: Env) -> String {
         env.storage()
             .persistent()
@@ -29,13 +35,60 @@ impl PaymentProcessor {
             .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION))
     }
 
+    /// Admin-only: update the stored contract version after a WASM upgrade.
+    pub fn set_version(env: Env, admin: Address, version: String) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if !utils::is_valid_contract_version(&version) {
+            return Err(Error::InvalidVersion);
+        }
+
+        let old_version = Self::version(env.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &version);
+        env.storage().instance().set(
+            &DataKey::ContractMetadata(Symbol::new(&env, "version")),
+            &version,
+        );
+        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ContractVersion, threshold, LONG_LIVE_TTL);
+        env.storage()
+            .instance()
+            .extend_ttl(threshold, LONG_LIVE_TTL);
+        env.events().publish(
+            (
+                Symbol::new(&env, "CONTRACT"),
+                Symbol::new(&env, "VERSION_UPDATED"),
+            ),
+            (old_version, version),
+        );
+        Ok(())
+    }
+
     /// Alias for version() — returns the current contract version string.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_version(env: Env) -> String {
         Self::version(env)
     }
 
     /// Issue #683: Return a summary of key contract metrics for dashboards
     /// and monitoring. No authentication required — this is a public read.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_contract_health(env: Env) -> ContractHealth {
         let version = Self::version(env.clone());
         let is_paused = Self::is_paused(env.clone());
@@ -82,6 +135,15 @@ impl PaymentProcessor {
     /// description, deployment notes, or audit commit hash. Stored in instance
     /// storage under a caller-chosen key, with the instance TTL bumped to
     /// `LONG_LIVE_TTL` so metadata survives archival.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `key` (`Symbol`) - Storage or lookup key identifying the requested value.
+    /// - `value` (`String`) - Value to store or apply to the selected setting.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_contract_metadata(
         env: Env,
         admin: Address,
@@ -108,6 +170,13 @@ impl PaymentProcessor {
 
     /// Public read of an on-chain metadata entry set via `set_contract_metadata`
     /// (issue #667). Returns `None` if the key was never set.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `key` (`Symbol`) - Storage or lookup key identifying the requested value.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
     pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
         env.storage()
             .instance()
@@ -140,6 +209,15 @@ impl PaymentProcessor {
         String::from_str(env, s)
     }
 
+    /// Initialize payment processor.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::validate_init_admin`.
     pub fn initialize_payment_processor(env: Env, admin: Address) -> Result<(), Error> {
         Self::validate_init_admin(&env, admin.clone())?;
         AccessControl::initialize(&env, admin);
@@ -187,6 +265,15 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets Merchant registry address.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `registry_address` (`Address`) - Address used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_merchant_registry_address(
         env: Env,
         admin: Address,
@@ -206,6 +293,14 @@ impl PaymentProcessor {
 
     /// Admin: configure the FX oracle used to snapshot rates during
     /// `verify_payment` (Issue #304).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `fx_oracle` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_fx_oracle(env: Env, admin: Address, fx_oracle: Address) -> Result<(), Error> {
         admin.require_auth();
 
@@ -229,6 +324,15 @@ impl PaymentProcessor {
     /// # Arguments
     /// * `admin` – Must hold the admin role.
     /// * `bps`   – Fee in basis points (e.g. 100 = 1 %). Must be 0–10 000.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `bps` (`i128`) - Rate expressed in basis points for the selected fee or reserve.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::enqueue_timelocked_action`.
     pub fn set_fee_rate(env: Env, admin: Address, bps: i128) -> Result<String, Error> {
         admin.require_auth();
 
@@ -245,6 +349,14 @@ impl PaymentProcessor {
     /// Admin-only: enable or disable automatic pending refund creation for overpaid payments.
     /// When enabled (default), any payment verified as Overpaid will automatically create
     /// a pending refund for the excess amount and emit a REFUND/AUTO_CREATED event.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `enabled` (`bool`) - Whether to enable or disable the selected feature.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_auto_refund_overpayment(
         env: Env,
         admin: Address,
@@ -262,6 +374,12 @@ impl PaymentProcessor {
 
     /// Check whether automatic refund creation for overpaid payments is enabled.
     /// Defaults to true if not explicitly configured.
+    ///
+    /// # Parameters
+    /// - `env` (`&Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_auto_refund_overpayment(env: &Env) -> bool {
         env.storage()
             .persistent()
@@ -269,8 +387,332 @@ impl PaymentProcessor {
             .unwrap_or(true)
     }
 
+    /// Issue: tier-based rolling reserve — split merchant proceeds into
+    /// immediately claimable funds and a rolling reserve deposit based on the
+    /// merchant's KYC tier. Returns (immediate_amount, reserve_amount).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `amount` (`i128`) - Amount used by this operation, in the units expected by the contract.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`.
+    /// - Propagates errors returned by `Self::deposit_rolling_reserve`.
+    /// - Propagates errors returned by `Self::get_merchant_reserve_policy`.
+    pub fn split_merchant_proceeds(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<(i128, i128), Error> {
+        if amount < 0 {
+            return Err(Error::InvalidAmount);
+        }
+        let (reserve_bps, holding_period_secs) =
+            Self::get_merchant_reserve_policy(env.clone(), merchant_id.clone())?;
+        let reserve_amount = amount
+            .checked_mul(reserve_bps as i128)
+            .ok_or(Error::InvalidAmount)?
+            / 10_000;
+        let immediate_amount = amount
+            .checked_sub(reserve_amount)
+            .ok_or(Error::InvalidAmount)?;
+        if reserve_amount > 0 {
+            Self::deposit_rolling_reserve(
+                env,
+                merchant_id,
+                reserve_amount,
+                holding_period_secs,
+            )?;
+        }
+        Ok((immediate_amount, reserve_amount))
+    }
+
+    /// Issue: tier-based rolling reserve — look up the reserve policy for a
+    /// merchant's KYC tier from the configured MerchantRegistry. Falls back to
+    /// a conservative default (Tier 0: 10% / 14 days) when no registry or
+    /// policy is configured.
+    fn get_merchant_reserve_policy(
+        env: Env,
+        merchant_id: Address,
+    ) -> Result<(u32, u64), Error> {
+        let registry: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantRegistryAddress);
+        if let Some(registry_address) = registry {
+            let tier: u32 = env.invoke_contract(
+                &registry_address,
+                &Symbol::new(&env, "get_merchant_tier"),
+                vec![&env, merchant_id.to_val()],
+            );
+            let policy: Option<(u32, u64)> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RollingReservePolicy(tier));
+            if let Some((reserve_bps, holding_period_secs)) = policy {
+                return Ok((reserve_bps, holding_period_secs));
+            }
+        }
+        Ok((DEFAULT_RESERVE_BPS, DEFAULT_HOLDING_PERIOD_SECS))
+    }
+
+    /// Issue: tier-based rolling reserve — append a new reserve bucket to the
+    /// merchant's maturity ledger queue.
+    fn deposit_rolling_reserve(
+        env: Env,
+        merchant_id: Address,
+        amount: i128,
+        holding_period_secs: u64,
+    ) -> Result<(), Error> {
+        let now = env.ledger().timestamp();
+        let unlock_at = now.saturating_add(holding_period_secs);
+        let bucket = RollingReserveBucket {
+            amount,
+            created_at: now,
+            unlock_at,
+        };
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let mut buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+        buckets.push_back(bucket);
+        env.storage().persistent().set(&key, &buckets);
+
+        let total_key = DataKey::RollingReserveTotal(merchant_id.clone());
+        let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_key, &total.saturating_add(amount));
+
+        env.events().publish(
+            (Symbol::new(&env, "RESERVE"), Symbol::new(&env, "FUNDS_HELD")),
+            (merchant_id, amount, unlock_at),
+        );
+        Ok(())
+    }
+
+    /// Issue: tier-based rolling reserve — release all mature reserve buckets
+    /// whose holding periods have elapsed. Returns the total released amount.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    pub fn release_matured_reserves(env: Env, merchant_id: Address) -> Result<i128, Error> {
+        let now = env.ledger().timestamp();
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut remaining: Vec<RollingReserveBucket> = vec![&env];
+        let mut released: i128 = 0;
+        for bucket in buckets.iter() {
+            if bucket.unlock_at <= now {
+                released = released.saturating_add(bucket.amount);
+            } else {
+                remaining.push_back(bucket);
+            }
+        }
+
+        if released > 0 {
+            env.storage().persistent().set(&key, &remaining);
+            let total_key = DataKey::RollingReserveTotal(merchant_id.clone());
+            let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&total_key, &total.saturating_sub(released));
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "RESERVE"),
+                    Symbol::new(&env, "FUNDS_RELEASED"),
+                ),
+                (merchant_id, released),
+            );
+        }
+        Ok(released)
+    }
+
+    /// Issue: tier-based rolling reserve — slash locked reserve to satisfy a
+    /// lost dispute payout. Callable by authorized dispute modules.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `caller` (`Address`) - Value used by this operation.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `amount` (`i128`) - Amount used by this operation, in the units expected by the contract.
+    ///
+    /// # Errors
+    /// - Returns `Error::InvalidAmount` for a nonpositive amount and `Error::Unauthorized` when the caller lacks permission.
+    /// - If no reserve can be slashed, the current body attempts to return an error variant that is not declared in `Error`.
+    pub fn slash_reserve_for_dispute(
+        env: Env,
+        caller: Address,
+        merchant_id: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        caller.require_auth();
+        if !AccessControl::has_role(&env, &role_arbitrator(&env), &caller)
+            && !AccessControl::has_role(&env, &role_admin(&env), &caller)
+        {
+            return Err(Error::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut remaining: Vec<RollingReserveBucket> = vec![&env];
+        let mut to_slash = amount;
+        for bucket in buckets.iter() {
+            if to_slash <= 0 {
+                remaining.push_back(bucket);
+                continue;
+            }
+            if bucket.amount <= to_slash {
+                to_slash -= bucket.amount;
+            } else {
+                remaining.push_back(RollingReserveBucket {
+                    amount: bucket.amount - to_slash,
+                    created_at: bucket.created_at,
+                    unlock_at: bucket.unlock_at,
+                });
+                to_slash = 0;
+            }
+        }
+
+        let slashed = amount - to_slash;
+        if slashed <= 0 {
+            return Err(Error::InsufficientBalance);
+        }
+
+        env.storage().persistent().set(&key, &remaining);
+        let total_key = DataKey::RollingReserveTotal(merchant_id.clone());
+        let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_key, &total.saturating_sub(slashed));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "RESERVE"),
+                Symbol::new(&env, "FUNDS_SLASHED"),
+            ),
+            (merchant_id, slashed),
+        );
+        Ok(slashed)
+    }
+
+    /// Issue: tier-based rolling reserve — query total locked reserve, matured
+    /// reserve, and the upcoming release schedule for a merchant.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - No errors are returned.
+    pub fn get_merchant_reserve_balance(
+        env: Env,
+        merchant_id: Address,
+    ) -> MerchantReserveBalance {
+        let now = env.ledger().timestamp();
+        let key = DataKey::RollingReserveBuckets(merchant_id.clone());
+        let buckets: Vec<RollingReserveBucket> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut total_locked: i128 = 0;
+        let mut matured: i128 = 0;
+        let mut schedule: Vec<RollingReserveBucket> = vec![&env];
+        for bucket in buckets.iter() {
+            total_locked = total_locked.saturating_add(bucket.amount);
+            if bucket.unlock_at <= now {
+                matured = matured.saturating_add(bucket.amount);
+            } else {
+                schedule.push_back(bucket);
+            }
+        }
+
+        MerchantReserveBalance {
+            total_locked,
+            matured,
+            upcoming_releases: schedule,
+        }
+    }
+
+    /// Admin: configure the rolling reserve policy for a KYC tier.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `tier` (`u32`) - Merchant or policy tier whose configuration is selected.
+    /// - `reserve_bps` (`u32`) - Value used by this operation.
+    /// - `holding_period_secs` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::Unauthorized`.
+    pub fn set_rolling_reserve_policy(
+        env: Env,
+        admin: Address,
+        tier: u32,
+        reserve_bps: u32,
+        holding_period_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if reserve_bps > 10_000 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage().persistent().set(
+            &DataKey::RollingReservePolicy(tier),
+            &(reserve_bps, holding_period_secs),
+        );
+        Ok(())
+    }
+
+    /// Public read of the rolling reserve policy for a KYC tier.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `tier` (`u32`) - Merchant or policy tier whose configuration is selected.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
+    pub fn get_rolling_reserve_policy(env: Env, tier: u32) -> Option<(u32, u64)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RollingReservePolicy(tier))
+    }
+
     /// Return the accumulated treasury balance collected via settlement fees
     /// and platform fees (when no custom fee_recipient).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `min_secs` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_min_payment_duration_secs(
         env: Env,
         admin: Address,
@@ -292,6 +734,15 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets Max payment duration secs.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `max_secs` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_max_payment_duration_secs(
         env: Env,
         admin: Address,
@@ -313,12 +764,126 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Return the accumulated treasury balance collected via settlement fees.
-    pub fn get_treasury_balance(env: Env) -> i128 {
+    /// Issue #1206: Admin-configurable default payment duration (seconds),
+    /// used by `create_payment`/batch variants when the caller supplies
+    /// neither `expires_at` nor `duration_secs`. Bounded by the existing
+    /// Min/MaxPaymentDurationSecs policy so it can never resolve to an
+    /// expiry outside the admin-configured safe window.
+    pub fn set_default_payment_duration(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
         env.storage()
             .persistent()
-            .get(&DataKey::TreasuryBalance)
-            .unwrap_or(0)
+            .set(&DataKey::DefaultPaymentDurationSecs, &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Per-merchant override for the default payment duration
+    /// (seconds). Self-service: the merchant authorizes the call and sets
+    /// their own override, bounded by the same Min/MaxPaymentDurationSecs
+    /// policy as the global default.
+    pub fn set_merchant_payment_duration(
+        env: Env,
+        merchant_id: Address,
+        secs: u64,
+    ) -> Result<(), Error> {
+        merchant_id.require_auth();
+        if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
+            return Err(Error::Unauthorized);
+        }
+
+        let (min_duration, max_duration) = Self::payment_duration_bounds(&env);
+        if secs < min_duration || secs > max_duration {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantPaymentDurationSecs(merchant_id), &secs);
+        Ok(())
+    }
+
+    /// Issue #1206: Read the admin-configured min/max payment duration bounds,
+    /// falling back to the same defaults used by `create_payment`.
+    fn payment_duration_bounds(env: &Env) -> (u64, u64) {
+        let min_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MinPaymentDurationSecs)
+            .unwrap_or(CREATE_PAYMENT_WINDOW_SECS);
+        let max_duration = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MaxPaymentDurationSecs)
+            .unwrap_or(30 * 24 * 3600);
+        (min_duration, max_duration)
+    }
+
+    /// Issue #1206: Resolve the effective default payment duration (seconds)
+    /// for a merchant when the caller does not supply `duration_secs` or
+    /// `expires_at`. Resolution order: per-merchant override, then the
+    /// admin-configured global default, then the compile-time
+    /// `DEFAULT_PAYMENT_DURATION_SECS` constant.
+    fn get_default_payment_duration(env: &Env, merchant_id: &Address) -> u64 {
+        if let Some(secs) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::MerchantPaymentDurationSecs(merchant_id.clone()))
+        {
+            return secs;
+        }
+        env.storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::DefaultPaymentDurationSecs)
+            .unwrap_or(DEFAULT_PAYMENT_DURATION_SECS)
+    }
+
+    /// Return the accumulated treasury balance collected via settlement fees.
+    /// Uses the default USDC token for backward compatibility.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
+    pub fn get_treasury_balance(env: Env) -> i128 {
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcToken)
+            .ok_or(Error::Unauthorized)
+            .unwrap_or_else(|_| Address::from_str(&env, ZERO_CONTRACT_STRKEY));
+        Self::get_token_treasury_balance(env, usdc_token)
+    }
+
+    /// Return the treasury balance accrued for a specific settlement token.
+    /// Fees are tracked per-token so that non-USDC settlement fees remain
+    /// redeemable in the token they were actually collected in.
+    pub fn get_treasury_balance_for_token(env: Env, token_address: Address) -> i128 {
+        Self::get_token_treasury_balance(env, token_address)
+    }
+
+    /// Get treasury balance for a specific token.
+    fn get_token_treasury_balance(env: Env, token_address: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenTreasuryBalance(token_address))
+            .unwrap_or_else(|| {
+                // Fallback to global TreasuryBalance for backward compatibility
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::TreasuryBalance)
+                    .unwrap_or(0)
+            })
     }
 
     fn record_treasury_withdrawal(env: &Env, record: TreasuryWithdrawal) {
@@ -336,6 +901,14 @@ impl PaymentProcessor {
     }
 
     /// Return a page of treasury withdrawal history (newest-first).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `offset` (`u32`) - Zero-based position from which to return records.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_treasury_withdrawal_history(
         env: Env,
         offset: u32,
@@ -396,6 +969,14 @@ impl PaymentProcessor {
     /// entries; queries for periods older than the retained window will
     /// undercount. A follow-up should move this to time-bucketed storage
     /// (e.g. per-day accumulator keys) if long-horizon reporting is needed.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `from_ts` (`u64`) - Inclusive start timestamp for the requested period.
+    /// - `to_ts` (`u64`) - Inclusive end timestamp for the requested period.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_platform_fee_report(env: Env, from_ts: u64, to_ts: u64) -> PlatformFeeReport {
         let history: Vec<FeeCollectionRecord> = env
             .storage()
@@ -427,6 +1008,15 @@ impl PaymentProcessor {
 
     /// Admin withdrawal of accumulated treasury fees. Emits `TREASURY/WITHDRAWN`
     /// with `(amount, destination)` and appends to the paginated history log.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `amount` (`i128`) - Amount used by this operation, in the units expected by the contract.
+    /// - `destination` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InsufficientTreasuryBalance`, `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn withdraw_treasury(
         env: Env,
         admin: Address,
@@ -442,21 +1032,45 @@ impl PaymentProcessor {
             return Err(Error::InvalidAmount);
         }
 
-        let treasury_balance = Self::get_treasury_balance(env.clone());
-        if amount > treasury_balance {
-            return Err(Error::InsufficientTreasuryBalance);
-        }
-
         let usdc_token_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::UsdcToken)
             .ok_or(Error::Unauthorized)?;
+        Self::withdraw_treasury_for_token(env, admin, usdc_token_address, amount, destination)
+    }
+
+    /// Admin withdrawal of accumulated treasury fees for a specific settlement
+    /// token. Fees are tracked per-token, so only the balance accrued in
+    /// `token_address` can be withdrawn in that token. Emits
+    /// `TREASURY/WITHDRAWN` with `(amount, destination)` and appends to the
+    /// paginated history log.
+    pub fn withdraw_treasury_for_token(
+        env: Env,
+        admin: Address,
+        token_address: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let treasury_balance = Self::get_token_treasury_balance(env.clone(), token_address.clone());
+        if amount > treasury_balance {
+            return Err(Error::InsufficientTreasuryBalance);
+        }
+
         let token_client = token::TokenClient::new(&env, &usdc_token_address);
         let contract_address = env.current_contract_address();
 
         env.storage().persistent().set(
-            &DataKey::TreasuryBalance,
+            &DataKey::TokenTreasuryBalance(token_address),
             &treasury_balance.saturating_sub(amount),
         );
 
@@ -500,6 +1114,16 @@ impl PaymentProcessor {
     /// * `expires_at` – Unix ledger timestamp after which the code is invalid.
     /// * `max_uses` – Maximum total payments that may use this code. Must be `>= 1`
     ///   when creating a new code; may be `0` when revoking an existing one.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `code` (`String`) - Value used by this operation.
+    /// - `expires_at` (`u64`) - Optional expiration timestamp for the payment.
+    /// - `max_uses` (`u32`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::Unauthorized`.
     pub fn add_fee_waiver_code(
         env: Env,
         admin: Address,
@@ -540,6 +1164,16 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets Global rate limit.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `window_secs` (`u64`) - Value used by this operation.
+    /// - `max_per_window` (`u32`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_global_rate_limit(
         env: Env,
         admin: Address,
@@ -560,6 +1194,17 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Sets Merchant rate limit.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `window_secs` (`u64`) - Value used by this operation.
+    /// - `max_per_window` (`u32`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_merchant_rate_limit(
         env: Env,
         admin: Address,
@@ -581,6 +1226,16 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Grants Role.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `role` (`Symbol`) - Access-control role to grant, revoke, or inspect.
+    /// - `account` (`Address`) - Account address affected by the operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`.
     pub fn grant_role(
         env: Env,
         admin: Address,
@@ -590,6 +1245,16 @@ impl PaymentProcessor {
         AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
     }
 
+    /// Revokes Role.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `role` (`Symbol`) - Access-control role to grant, revoke, or inspect.
+    /// - `account` (`Address`) - Account address affected by the operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`.
     pub fn revoke_role(
         env: Env,
         admin: Address,
@@ -601,16 +1266,40 @@ impl PaymentProcessor {
     }
 
     /// Returns whether `account` holds `role` on this contract (issue #401).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `role` (`Symbol`) - Access-control role to grant, revoke, or inspect.
+    /// - `account` (`Address`) - Account address affected by the operation.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         AccessControl::has_role(&env, &role, &account)
     }
 
     /// Returns all addresses currently holding `role` on this contract (issue #401).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `role` (`Symbol`) - Access-control role to grant, revoke, or inspect.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_role_members(env: Env, role: Symbol) -> Vec<Address> {
         AccessControl::get_role_members(&env, &role)
     }
 
     /// Set the global paused state (admin only). When paused, create_payment, verify_payment, and cancel_payment are blocked.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `paused` (`bool`) - Value used by this operation.
+    /// - `reason` (`String`) - Reason associated with the requested action.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_global_pause(
         env: Env,
         admin: Address,
@@ -652,6 +1341,15 @@ impl PaymentProcessor {
     /// Settlement, verification, cancellation, and refund operations continue to work
     /// normally. This is narrower than `set_global_pause`, which halts all operations.
     /// Query the current state with `get_creation_pause_info`.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `paused` (`bool`) - Value used by this operation.
+    /// - `reason` (`String`) - Reason associated with the requested action.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_creation_pause(
         env: Env,
         admin: Address,
@@ -688,6 +1386,15 @@ impl PaymentProcessor {
     }
 
     /// Legacy wrapper for set_global_pause
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `paused` (`bool`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::set_global_pause`.
     pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), Error> {
         let reason = if paused {
             String::from_str(&env, "Legacy pause")
@@ -707,6 +1414,12 @@ impl PaymentProcessor {
     /// payment intake (e.g. during a maintenance window) while still allowing in-flight
     /// payments to be confirmed, settled, and refunded. Use `set_global_pause` instead when
     /// all operations need to be halted.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_creation_pause_info(env: Env) -> PauseState {
         env.storage()
             .persistent()
@@ -720,6 +1433,12 @@ impl PaymentProcessor {
     }
 
     /// Get the current consolidated pause info.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_pause_info(env: Env) -> PauseInfo {
         let empty_reason = String::from_str(&env, "");
         let default_state = PauseState {
@@ -745,6 +1464,12 @@ impl PaymentProcessor {
     }
 
     /// Get the current global paused state.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .persistent()
@@ -925,6 +1650,15 @@ impl PaymentProcessor {
 
     /// Set per-merchant min/max payment amount limits (merchant self-service).
     /// Pass None to clear a bound. Requires the caller to hold the MERCHANT role.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `min` (`Option<i128>`) - Optional value used by this operation.
+    /// - `max` (`Option<i128>`) - Optional value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_merchant_amount_limits(
         env: Env,
         merchant_id: Address,
@@ -948,6 +1682,13 @@ impl PaymentProcessor {
     }
 
     /// Read per-merchant amount limits.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
     pub fn get_merchant_amount_limits(env: Env, merchant_id: Address) -> Option<AmountLimits> {
         env.storage()
             .persistent()
@@ -956,6 +1697,15 @@ impl PaymentProcessor {
 
     /// Set global min/max payment amount limits (admin only).
     /// Pass None to clear a bound.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `min` (`Option<i128>`) - Optional value used by this operation.
+    /// - `max` (`Option<i128>`) - Optional value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn set_global_amount_limits(
         env: Env,
         admin: Address,
@@ -979,6 +1729,12 @@ impl PaymentProcessor {
     }
 
     /// Read global amount limits.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
     pub fn get_global_amount_limits(env: Env) -> Option<AmountLimits> {
         env.storage().persistent().get(&DataKey::GlobalAmountLimits)
     }
@@ -1008,6 +1764,15 @@ impl PaymentProcessor {
 
     /// Set the USDC token address used as the default settlement token.
     /// Also adds it to the supported tokens whitelist.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `token_address` (`Address`) - Address of the token being checked or configured.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::allow_token`.
     pub fn set_usdc_token(env: Env, admin: Address, token_address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -1021,6 +1786,14 @@ impl PaymentProcessor {
     }
 
     /// Allow or disallow a token address for use in payments (admin only).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `token_address` (`Address`) - Address of the token being checked or configured.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn allow_token(env: Env, admin: Address, token_address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -1045,6 +1818,15 @@ impl PaymentProcessor {
     }
     /// Issue #483: Set the currency symbol for an allowed token (e.g., USDC, EURC, BRLT).
     /// Must be called after allow_token() to establish token-to-currency mapping.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `token_address` (`Address`) - Address of the token being checked or configured.
+    /// - `currency` (`Symbol`) - Currency symbol identifying the payment or settlement currency.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`, `Error::UnsupportedToken`.
     pub fn set_token_currency(
         env: Env,
         admin: Address,
@@ -1071,6 +1853,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #301: Remove a token from the supported tokens list (admin only).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `token_address` (`Address`) - Address of the token being checked or configured.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn remove_supported_token(
         env: Env,
         admin: Address,
@@ -1108,6 +1898,12 @@ impl PaymentProcessor {
     }
 
     /// Issue #301: Return the list of supported token addresses.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_supported_tokens(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -1116,6 +1912,16 @@ impl PaymentProcessor {
     }
 
     /// Issue #303: Set per‑tier KYC payment limits (admin only).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `tier` (`KycTier`) - Merchant or policy tier whose configuration is selected.
+    /// - `max_amount` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::enqueue_timelocked_action`.
     pub fn set_kyc_tier_limits(
         env: Env,
         admin: Address,
@@ -1135,6 +1941,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #303: Set the FX oracle contract address (admin only).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `oracle_address` (`Address`) - Address used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_fx_oracle_address(
         env: Env,
         admin: Address,
@@ -1151,7 +1965,47 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1033: Admin-configurable staleness threshold (in seconds) that
+    /// `confirm_payment`/`verify_payment` enforces on the FX rate snapshot
+    /// before trusting it for settlement, independent of the FX oracle
+    /// contract's own internal staleness cap. Must be strictly positive.
+    pub fn set_oracle_staleness_threshold(
+        env: Env,
+        admin: Address,
+        threshold_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if threshold_secs == 0 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OracleStalenessThreshold, &threshold_secs);
+        Self::bump_ttl(&env, &DataKey::OracleStalenessThreshold, LONG_LIVE_TTL);
+        Ok(())
+    }
+
+    /// Issue #1033: Currently configured oracle staleness threshold, falling
+    /// back to `MAX_ORACLE_STALENESS_SECS` when the admin has not overridden it.
+    pub fn get_oracle_staleness_threshold(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OracleStalenessThreshold)
+            .unwrap_or(MAX_ORACLE_STALENESS_SECS)
+    }
+
     /// Add an address to the global blacklist (admin only).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `address` (`Address`) - Address affected by the operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn add_to_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -1164,6 +2018,14 @@ impl PaymentProcessor {
     }
 
     /// Remove an address from the global blacklist (admin only).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `address` (`Address`) - Address affected by the operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -1176,6 +2038,13 @@ impl PaymentProcessor {
     }
 
     /// Returns true when an address is globally blacklisted.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `address` (`Address`) - Address affected by the operation.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn is_blacklisted(env: Env, address: Address) -> bool {
         Self::is_blacklisted_address(&env, &address)
     }
@@ -1288,6 +2157,14 @@ impl PaymentProcessor {
         }
     }
 
+    /// Returns whether a token is allowed for payments.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `token_address` (`Address`) - Address of the token being checked or configured.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn is_token_allowed(env: Env, token_address: Address) -> bool {
         env.storage()
             .persistent()
@@ -1295,8 +2172,39 @@ impl PaymentProcessor {
             .unwrap_or(false)
     }
 
+    /// Creates a payment charge.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `args` (`CreatePaymentArgs`) - Structured arguments describing the requested operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AmountAboveMax`, `Error::AmountBelowMin`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidPaymentId`, `Error::KycLimitExceeded`, `Error::PayerNotWhitelisted`, `Error::PaymentAlreadyExists`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// - Propagates errors returned by `Self::enforce_amount_limits`.
+    /// - Propagates errors returned by `Self::enforce_create_payment_rate_limit`.
+    /// - Propagates errors returned by `Self::require_creation_not_paused`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
+    /// - Propagates errors returned by `Self::validate_memo`.
+    /// - Propagates errors returned by `utils::validate_metadata`.
+    ///
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> --source <MERCHANT_ACCOUNT> -- create_payment --args '{"payment_id":"<PAYMENT_ID>","merchant_id":"<MERCHANT_ADDRESS>","amount":1000,"currency":"USDC","deposit_address":"<DEPOSIT_ADDRESS>","expires_at":null,"duration_secs":3600,"memo":null,"memo_type":null,"token_address":null,"client_token":null,"idempotency_key":null,"metadata_hash":null,"metadata":null,"fee_waiver_code":null,"retry_of_payment_id":null,"payer_muxed_id":null,"payer":null,"allow_partial":null,"tip_enabled":false}'
+    /// ```
     #[allow(deprecated)]
     pub fn create_payment(env: Env, args: CreatePaymentArgs) -> Result<PaymentCharge, Error> {
+        if args.amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if let Some(expires_at) = args.expires_at {
+            if expires_at <= env.ledger().timestamp() {
+                return Err(Error::InvalidExpiry);
+            }
+        }
+
         Self::require_creation_not_paused(&env)?;
         args.merchant_id.require_auth();
         Self::require_not_blacklisted(&env, &args.merchant_id)?;
@@ -1305,7 +2213,7 @@ impl PaymentProcessor {
         // Idempotency check: if client_token was already used, return the existing payment
         // (or error if it maps to a different payment_id).
         if let Some(ref token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                 if existing_id == args.payment_id {
                     return Self::get_payment_internal(&env, &args.payment_id);
@@ -1354,11 +2262,8 @@ impl PaymentProcessor {
                 crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
             match registry_client.try_get_merchant(&args.merchant_id) {
                 Ok(Ok(merchant)) => {
-                    // Require merchant to be verified (not Unverified), active, and not suspended
-                    if merchant.kyc_tier == crate::merchant_registry::KycTier::Unverified
-                        || !merchant.active
-                        || merchant.suspension_reason.is_some()
-                    {
+                    // Require merchant to be active, and not suspended (Issue #777: Unverified allowed within tier 0 limits)
+                    if !merchant.active || merchant.suspension_reason.is_some() {
                         return Err(Error::Unauthorized);
                     }
 
@@ -1379,11 +2284,21 @@ impl PaymentProcessor {
             }
         }
 
-        if args.amount <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-
         Self::enforce_amount_limits(&env, &args.merchant_id, args.amount)?;
+
+        // Issue #777: Cross-call MerchantRegistry.check_kyc_limit before storing
+        if let Some(registry_address) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        {
+            let registry_client =
+                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            match registry_client.try_check_kyc_limit(&args.merchant_id, &args.amount) {
+                Ok(Ok(())) => {}
+                _ => return Err(Error::KycLimitExceeded),
+            }
+        }
 
         // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured
         if let Some(registry_address) = env
@@ -1412,7 +2327,7 @@ impl PaymentProcessor {
         if env
             .storage()
             .persistent()
-            .has(&DataKey::Payment(args.payment_id.clone()))
+            .has(&DataKey::Payment(payment_id_to_key(&env, &args.payment_id)))
         {
             return Err(Error::PaymentAlreadyExists);
         }
@@ -1443,6 +2358,24 @@ impl PaymentProcessor {
         Self::enforce_create_payment_rate_limit(&env, &args.merchant_id)?;
 
         let now = env.ledger().timestamp();
+
+        // Issue #1032: Reject reuse of a deposit_address that is already
+        // assigned to another open (Pending, unexpired) payment. Only an
+        // active Pending payment blocks the address — once that payment is
+        // confirmed, cancelled, failed, or simply expires, the address is
+        // free again (checked lazily here, no explicit release needed).
+        if let Some(existing_id) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, String>(&DataKey::DepositAddressPending(args.deposit_address.clone()))
+        {
+            if let Ok(existing) = Self::get_payment_internal(&env, &existing_id) {
+                if existing.status == PaymentStatus::Pending && existing.expires_at > now {
+                    return Err(Error::DepositAddressInUse);
+                }
+            }
+        }
+
         let min_duration = env
             .storage()
             .persistent()
@@ -1456,9 +2389,6 @@ impl PaymentProcessor {
 
         let resolved_expires_at = match args.expires_at {
             Some(ts) => {
-                if ts <= now {
-                    return Err(Error::InvalidExpiry);
-                }
                 let duration = ts.saturating_sub(now);
                 if duration < min_duration || duration > max_duration {
                     return Err(Error::InvalidExpiry);
@@ -1466,13 +2396,25 @@ impl PaymentProcessor {
                 ts
             }
             None => {
-                let duration = args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS);
+                let duration = args
+                    .duration_secs
+                    .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id));
                 if duration < min_duration || duration > max_duration {
                     return Err(Error::InvalidExpiry);
                 }
                 now.saturating_add(duration)
             }
         };
+
+        // Issue #1209: Validate an optional deferred-settlement timestamp. It must
+        // be strictly in the future and no later than the payment's own expiry,
+        // otherwise the payment could expire before `settle_payment` is ever
+        // allowed to run.
+        if let Some(settle_at) = args.settle_at {
+            if settle_at <= now || settle_at > resolved_expires_at {
+                return Err(Error::InvalidExpiry);
+            }
+        }
 
         let payment = PaymentCharge {
             payment_id: args.payment_id.clone(),
@@ -1498,15 +2440,30 @@ impl PaymentProcessor {
             metadata: args.metadata.clone(),
             fee_waiver_code: args.fee_waiver_code.clone(),
             retry_of_payment_id: None,
-            payer_muxed_id: None,
+            // Issue #841: persist expected muxed sub-account ID for confirm matching.
+            payer_muxed_id: args.payer_muxed_id,
             payment_link_id: None,
+            allow_partial: args.allow_partial,
+            tip_enabled: args.tip_enabled,
+            tip_amount: None,
         };
 
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &args.payment_id)),
+            &payment,
+        );
+        Self::record_payment_status(&env, &payment);
+        Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
+
+        // Issue #1032: Track this deposit_address as claimed by this Pending
+        // payment so a concurrent create_payment with the same address is
+        // rejected until this one leaves the Pending state or expires.
+        let deposit_key = DataKey::DepositAddressPending(payment.deposit_address.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Payment(args.payment_id.clone()), &payment);
-        Self::record_payment_status(&env, &payment);
-        Self::bump_payment_ttl(&env, &args.payment_id, &payment.status);
+            .set(&deposit_key, &args.payment_id);
+        Self::bump_ttl(&env, &deposit_key, LONG_LIVE_TTL);
+
         Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
         Self::index_payment_by_date(
             &env,
@@ -1554,7 +2511,7 @@ impl PaymentProcessor {
         // Issue #399: Persist idempotency key → payment_id mapping with a TTL that matches
         // the payment expiry window so keys do not accumulate indefinitely.
         if let Some(token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token.clone());
+            let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
             env.storage().persistent().set(&key, &args.payment_id);
             // TTL in ledgers ≈ (expires_at − now) / 5s per ledger, clamped to SHORT_LIVE_TTL min.
             let payment_duration_secs = resolved_expires_at.saturating_sub(now);
@@ -1565,9 +2522,21 @@ impl PaymentProcessor {
             // Store reverse mapping so cancel/expire can clean up the token.
             // We prefix the payment_id with "r:" to avoid collision with real tokens.
             let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-            let rev_key = DataKey::IdempotencyKey(rev_token_id);
+            let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
             env.storage().persistent().set(&rev_key, &token);
             Self::bump_ttl(&env, &rev_key, ttl_ledgers);
+        }
+
+        // Issue #1209: Persist the deferred-settlement timestamp so
+        // `settle_payment` can enforce it; TTL mirrors the payment's own expiry.
+        if let Some(settle_at) = args.settle_at {
+            let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+            env.storage().persistent().set(&settle_key, &settle_at);
+            let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+            let ledgers_per_sec: u64 = 5;
+            let ttl_ledgers =
+                ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
+            Self::bump_ttl(&env, &settle_key, ttl_ledgers);
         }
 
         Ok(payment)
@@ -1576,6 +2545,18 @@ impl PaymentProcessor {
     /// Issue #165: Batch payment creation for optimized gas usage.
     /// Creates multiple payment charges in a single transaction.
     /// Reverts all if any element violates validation rules.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `args_list` (`Vec<CreatePaymentArgs>`) - Structured requests to process as a batch.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AmountAboveMax`, `Error::BatchContainsDuplicates`, `Error::BatchTooLarge`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidPaymentId`, `Error::PaymentAlreadyExists`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// - Propagates errors returned by `Self::enforce_amount_limits`.
+    /// - Propagates errors returned by `Self::enforce_create_payment_batch_rate_limit`.
+    /// - Propagates errors returned by `Self::require_creation_not_paused`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
+    /// - Propagates errors returned by `utils::validate_metadata`.
     #[allow(deprecated)]
     pub fn create_payments_batch(
         env: Env,
@@ -1702,7 +2683,7 @@ impl PaymentProcessor {
             if env
                 .storage()
                 .persistent()
-                .has(&DataKey::Payment(args.payment_id.clone()))
+                .has(&DataKey::Payment(payment_id_to_key(&env, &args.payment_id)))
             {
                 return Err(Error::PaymentAlreadyExists);
             }
@@ -1729,7 +2710,7 @@ impl PaymentProcessor {
 
             // Check idempotency
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
                     if existing_id != args.payment_id {
                         return Err(Error::DuplicateIdempotencyKey);
@@ -1749,12 +2730,20 @@ impl PaymentProcessor {
         for args in args_list.iter() {
             let resolved_expires_at = match args.expires_at {
                 Some(ts) => ts,
-                None => {
-                    now.saturating_add(args.duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS))
-                }
+                None => now.saturating_add(
+                    args.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &args.merchant_id)),
+                ),
             };
             if resolved_expires_at <= now {
                 return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = args.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
             }
 
             let payment = PaymentCharge {
@@ -1781,15 +2770,26 @@ impl PaymentProcessor {
                 metadata: args.metadata.clone(),
                 fee_waiver_code: args.fee_waiver_code.clone(),
                 retry_of_payment_id: None,
-                payer_muxed_id: None,
+                payer_muxed_id: args.payer_muxed_id,
                 payment_link_id: None,
+                allow_partial: args.allow_partial,
+                tip_enabled: args.tip_enabled,
+                tip_amount: None,
             };
 
-            env.storage()
-                .persistent()
-                .set(&DataKey::Payment(args.payment_id.clone()), &payment);
-            Self::bump_payment_ttl(&env, &args.payment_id, &payment.status);
+            env.storage().persistent().set(
+                &DataKey::Payment(payment_id_to_key(&env, &args.payment_id)),
+                &payment,
+            );
+            Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
             Self::index_payment_expiry(&env, &args.payment_id, payment.expires_at);
+
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = args.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(args.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
 
             // Issue #489: Store reverse index for metadata_hash → payment_id lookup in batch
             if let Some(ref hash) = args.metadata_hash {
@@ -1819,7 +2819,7 @@ impl PaymentProcessor {
 
             // Issue #399: Persist idempotency key with TTL matching payment expiry window.
             if let Some(ref token) = args.client_token {
-                let key = DataKey::IdempotencyKey(token.clone());
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
                 env.storage().persistent().set(&key, &args.payment_id);
                 let payment_duration_secs = resolved_expires_at.saturating_sub(now);
                 let ledgers_per_sec: u64 = 5;
@@ -1828,7 +2828,7 @@ impl PaymentProcessor {
                 Self::bump_ttl(&env, &key, ttl_ledgers);
                 // Reverse mapping for cleanup on cancel/expire.
                 let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
-                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
                 env.storage().persistent().set(&rev_key, token);
                 Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
@@ -1848,6 +2848,336 @@ impl PaymentProcessor {
         Ok(payment_ids)
     }
 
+    /// Issue #771: Atomic batch payment creation — create up to 10 payments in a single transaction.
+    /// Emits a single PAYMENT/BATCH_CREATED event containing all payment IDs,
+    /// plus individual PAYMENT/CREATED events for each created payment.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `payments` (`Vec<PaymentRequest>`) - Payment requests to process as a batch.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AmountAboveMax`, `Error::BatchContainsDuplicates`, `Error::BatchTooLarge`, `Error::DuplicateIdempotencyKey`, `Error::InvalidAmount`, `Error::InvalidExpiry`, `Error::InvalidPaymentId`, `Error::PaymentAlreadyExists`, `Error::Unauthorized`, `Error::UnsupportedToken`.
+    /// - Propagates errors returned by `Self::enforce_amount_limits`.
+    /// - Propagates errors returned by `Self::enforce_create_payment_batch_rate_limit`.
+    /// - Propagates errors returned by `Self::require_creation_not_paused`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
+    /// - Propagates errors returned by `utils::validate_metadata`.
+    #[allow(deprecated)]
+    pub fn create_payment_batch(
+        env: Env,
+        merchant_id: Address,
+        payments: Vec<PaymentRequest>,
+    ) -> Result<Vec<String>, Error> {
+        Self::require_creation_not_paused(&env)?;
+        merchant_id.require_auth();
+
+        if payments.len() > 10 {
+            return Err(Error::BatchTooLarge);
+        }
+
+        if payments.is_empty() {
+            return Ok(vec![&env]);
+        }
+
+        Self::require_not_blacklisted(&env, &merchant_id)?;
+
+        // Verify merchant role
+        if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
+            return Err(Error::Unauthorized);
+        }
+
+        // Validate merchant is active and verified in registry if registry is configured
+        if let Some(registry_address) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        {
+            let registry_client =
+                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            match registry_client.try_get_merchant(&merchant_id) {
+                Ok(Ok(merchant)) => {
+                    if merchant.kyc_tier == crate::merchant_registry::KycTier::Unverified
+                        || !merchant.active
+                        || merchant.suspension_reason.is_some()
+                    {
+                        return Err(Error::Unauthorized);
+                    }
+                }
+                _ => {
+                    return Err(Error::Unauthorized);
+                }
+            }
+        }
+
+        // Detect duplicate payment_ids within the batch
+        let mut seen_payment_ids: Vec<String> = vec![&env];
+        for req in payments.iter() {
+            let mut is_duplicate = false;
+            for seen_id in seen_payment_ids.iter() {
+                if req.payment_id == seen_id {
+                    is_duplicate = true;
+                    break;
+                }
+            }
+            if is_duplicate {
+                return Err(Error::BatchContainsDuplicates);
+            }
+            seen_payment_ids.push_back(req.payment_id.clone());
+        }
+
+        // Check duplicate idempotency keys within the batch
+        let mut seen_client_tokens: Vec<String> = vec![&env];
+        for req in payments.iter() {
+            if let Some(ref token) = req.client_token {
+                let mut is_duplicate = false;
+                for seen_token in seen_client_tokens.iter() {
+                    if *token == seen_token {
+                        is_duplicate = true;
+                        break;
+                    }
+                }
+                if is_duplicate {
+                    return Err(Error::DuplicateIdempotencyKey);
+                }
+                seen_client_tokens.push_back(token.clone());
+            }
+        }
+
+        // Validate all payments first before writing any
+        for req in payments.iter() {
+            Self::require_not_blacklisted(&env, &req.deposit_address)?;
+
+            if let Some(ref token_addr) = req.token_address {
+                let allowed: bool = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, bool>(&DataKey::AllowedToken(token_addr.clone()))
+                    .unwrap_or(false);
+                if !allowed {
+                    return Err(Error::UnsupportedToken);
+                }
+                if let Some(token_currency) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Symbol>(&DataKey::TokenCurrency(token_addr.clone()))
+                {
+                    if token_currency != req.currency {
+                        return Err(Error::UnsupportedToken);
+                    }
+                }
+            }
+
+            if req.amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            Self::enforce_amount_limits(&env, &merchant_id, req.amount)?;
+
+            if let Some(limits) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, KycTierLimits>(&DataKey::KycTierLimitsConfig)
+            {
+                if let Some(registry_address) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+                {
+                    let registry_client = crate::merchant_registry::MerchantRegistryClient::new(
+                        &env,
+                        &registry_address,
+                    );
+                    if let Ok(Ok(merchant)) = registry_client.try_get_merchant(&merchant_id) {
+                        if limits.tier == merchant.kyc_tier && req.amount > limits.max_amount {
+                            return Err(Error::AmountAboveMax);
+                        }
+                    }
+                }
+            }
+
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::Payment(payment_id_to_key(&env, &req.payment_id)))
+            {
+                return Err(Error::PaymentAlreadyExists);
+            }
+
+            if let Some(ref hash) = req.metadata_hash {
+                if env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::MetadataHashPayment(hash.clone()))
+                {
+                    return Err(Error::DuplicateIdempotencyKey);
+                }
+            }
+
+            if req.payment_id.is_empty() {
+                return Err(Error::InvalidPaymentId);
+            }
+
+            if let Some(ref meta_map) = req.metadata {
+                utils::validate_metadata(meta_map)?;
+            }
+
+            if let Some(ref token) = req.client_token {
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
+                if let Some(existing_id) = env.storage().persistent().get::<DataKey, String>(&key) {
+                    if existing_id != req.payment_id {
+                        return Err(Error::DuplicateIdempotencyKey);
+                    }
+                }
+            }
+        }
+
+        Self::enforce_create_payment_batch_rate_limit(&env, &merchant_id)?;
+
+        // All validations passed, atomically store all payments and emit events
+        let mut payment_ids = vec![&env];
+        let now = env.ledger().timestamp();
+
+        for req in payments.iter() {
+            let resolved_expires_at = match req.expires_at {
+                Some(ts) => ts,
+                None => now.saturating_add(
+                    req.duration_secs
+                        .unwrap_or_else(|| Self::get_default_payment_duration(&env, &merchant_id)),
+                ),
+            };
+            if resolved_expires_at <= now {
+                return Err(Error::InvalidExpiry);
+            }
+
+            // Issue #1209: Validate an optional deferred-settlement timestamp.
+            if let Some(settle_at) = req.settle_at {
+                if settle_at <= now || settle_at > resolved_expires_at {
+                    return Err(Error::InvalidExpiry);
+                }
+            }
+
+            let payment = PaymentCharge {
+                payment_id: req.payment_id.clone(),
+                merchant_id: merchant_id.clone(),
+                amount: req.amount,
+                currency: req.currency.clone(),
+                deposit_address: req.deposit_address.clone(),
+                status: PaymentStatus::Pending,
+                payer_address: req.payer.clone(),
+                transaction_hash: None,
+                created_at: now,
+                confirmed_at: None,
+                expires_at: resolved_expires_at,
+                amount_received: None,
+                memo: req.memo.clone(),
+                memo_type: req.memo_type.clone(),
+                token_address: req.token_address.clone(),
+                metadata_hash: req.metadata_hash.clone(),
+                original_token: None,
+                swap_path: None,
+                fx_rate: None,
+                fx_rate_at: None,
+                metadata: req.metadata.clone(),
+                fee_waiver_code: req.fee_waiver_code.clone(),
+                retry_of_payment_id: None,
+                payer_muxed_id: req.payer_muxed_id,
+                payment_link_id: None,
+                allow_partial: None,
+                tip_enabled: false,
+                tip_amount: None,
+            };
+
+            env.storage().persistent().set(
+                &DataKey::Payment(payment_id_to_key(&env, &req.payment_id)),
+                &payment,
+            );
+            Self::extend_payment_ttl(&env, &req.payment_id, &payment.status);
+            Self::index_payment_expiry(&env, &req.payment_id, payment.expires_at);
+
+            // Issue #1209: Persist the deferred-settlement timestamp (batch path).
+            if let Some(settle_at) = req.settle_at {
+                let settle_key = DataKey::PaymentSettleAt(req.payment_id.clone());
+                env.storage().persistent().set(&settle_key, &settle_at);
+                Self::bump_ttl(&env, &settle_key, LONG_LIVE_TTL);
+            }
+
+            if let Some(ref hash) = req.metadata_hash {
+                let key = DataKey::MetadataHashPayment(hash.clone());
+                env.storage().persistent().set(&key, &req.payment_id);
+                Self::bump_ttl(&env, &key, LONG_LIVE_TTL);
+            }
+
+            let mut merchant_payments = Self::get_merchant_payments_internal(&env, &merchant_id);
+            merchant_payments.push_back(req.payment_id.clone());
+            let merchant_payments_key = DataKey::MerchantPayments(merchant_id.clone());
+            env.storage()
+                .persistent()
+                .set(&merchant_payments_key, &merchant_payments);
+            Self::bump_ttl(&env, &merchant_payments_key, LONG_LIVE_TTL);
+
+            // Individual PAYMENT/CREATED event
+            env.events().publish(
+                (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "CREATED")),
+                (
+                    req.payment_id.clone(),
+                    merchant_id.clone(),
+                    req.amount,
+                    req.metadata.clone(),
+                ),
+            );
+
+            if let Some(ref token) = req.client_token {
+                let key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token));
+                env.storage().persistent().set(&key, &req.payment_id);
+                let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+                let ledgers_per_sec: u64 = 5;
+                let ttl_ledgers =
+                    ((payment_duration_secs / ledgers_per_sec) as u32).max(SHORT_LIVE_TTL);
+                Self::bump_ttl(&env, &key, ttl_ledgers);
+                let rev_token_id = Self::rev_key_for(&env, &req.payment_id);
+                let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
+                env.storage().persistent().set(&rev_key, token);
+                Self::bump_ttl(&env, &rev_key, ttl_ledgers);
+            }
+
+            payment_ids.push_back(req.payment_id.clone());
+        }
+
+        // Single PAYMENT/BATCH_CREATED event containing all IDs
+        env.events().publish(
+            (
+                Symbol::new(&env, "PAYMENT"),
+                Symbol::new(&env, "BATCH_CREATED"),
+            ),
+            payment_ids.clone(),
+        );
+
+        Ok(payment_ids)
+    }
+
+    /// Verifies and confirms a payment.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `oracle` (`Address`) - Oracle address authorizing or submitting this operation.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    /// - `transaction_hash` (`BytesN<32>`) - 32-byte hash identifying the payment transaction.
+    /// - `payer_address` (`Address`) - Address of the payer whose payment is being verified.
+    /// - `amount_received` (`i128`) - Amount reported as received for the payment, in payment-token units.
+    /// - `payer_muxed_id` (`Option<u64>`) - Optional muxed-account identifier to match against the payer.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    ///
+    /// - Propagates errors returned by `Self::confirm_payment`.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> --source <ORACLE_ACCOUNT> -- verify_payment --oracle <ORACLE_ADDRESS> --payment_id <PAYMENT_ID> --transaction_hash "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]" --payer_address <PAYER_ADDRESS> --amount_received 1000
+    /// ```
     #[allow(deprecated)]
     pub fn verify_payment(
         env: Env,
@@ -1858,26 +3188,100 @@ impl PaymentProcessor {
         amount_received: i128,
         payer_muxed_id: Option<u64>,
     ) -> Result<PaymentStatus, Error> {
+        Self::confirm_payment(
+            env,
+            oracle,
+            ConfirmPaymentArgs {
+                payment_id,
+                transaction_hash,
+                payer_address,
+                amount_received,
+                tip_amount: None,
+                payer_muxed_id,
+            },
+        )
+    }
+
+    /// Issue #844: Confirm a payment, optionally recording a tip when enabled.
+    ///
+    /// `tip_amount` is accepted only when the payment was created with
+    /// `tip_enabled = true`. The tip is stored separately from `amount` and
+    /// emits `PAYMENT/TIP_RECEIVED` when present.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `oracle` (`Address`) - Oracle address authorizing or submitting this operation.
+    /// - `args` (`ConfirmPaymentArgs`) - Structured arguments describing the requested operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::MuxedAccountMismatch`, `Error::PaymentAlreadyProcessed`, `Error::PaymentExpired`, `Error::StaleOracleRate`, `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::enforce_tier_volume_cap`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
+    /// - Propagates errors returned by `Self::require_not_paused`.
+    /// - Propagates errors returned by `payment_state_machine::transition_status`.
+    #[allow(deprecated)]
+    pub fn confirm_payment(
+        env: Env,
+        oracle: Address,
+        args: ConfirmPaymentArgs,
+    ) -> Result<PaymentStatus, Error> {
         Self::require_not_paused(&env)?;
         oracle.require_auth();
         Self::require_not_blacklisted(&env, &oracle)?;
-        Self::require_not_blacklisted(&env, &payer_address)?;
+        Self::require_not_blacklisted(&env, &args.payer_address)?;
 
         if !AccessControl::has_role(&env, &role_oracle(&env), &oracle) {
             return Err(Error::Unauthorized);
         }
 
+        let payment_id = args.payment_id.clone();
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
         Self::require_not_blacklisted(&env, &payment.merchant_id)?;
+
+        // Issue #844: tip only allowed when the merchant opted in at creation.
+        if let Some(tip) = args.tip_amount {
+            if !payment.tip_enabled {
+                return Err(Error::InvalidAmount);
+            }
+            if tip < 0 {
+                return Err(Error::InvalidAmount);
+            }
+            payment.tip_amount = Some(tip);
+            if tip > 0 {
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "PAYMENT"),
+                        Symbol::new(&env, "TIP_RECEIVED"),
+                    ),
+                    (payment_id.clone(), tip),
+                );
+            }
+        }
 
         // Issue #75: Enforce idempotent verify_payment - reject double verification
         // If payment is already Confirmed, return current status without error
         if payment.status == PaymentStatus::Confirmed {
+            // Persist tip if this is a tip-only update on an already-confirmed payment
+            if args.tip_amount.is_some() {
+                env.storage().persistent().set(
+                    &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+                    &payment,
+                );
+            }
             return Ok(payment.status);
         }
 
+        let allow_partial = payment.allow_partial.unwrap_or(false);
+        let transaction_hash = args.transaction_hash.clone();
+        let payer_address = args.payer_address.clone();
+        let amount_received = args.amount_received;
+        let payer_muxed_id = args.payer_muxed_id;
+
         // Reject if payment is in any other terminal state
-        if payment.status != PaymentStatus::Pending {
+        if payment.status != PaymentStatus::Pending
+            && (!allow_partial || payment.status != PaymentStatus::PartiallyPaid)
+        {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
@@ -1885,13 +3289,32 @@ impl PaymentProcessor {
             return Err(Error::PaymentExpired);
         }
 
+        // Issue #767: When allow_partial is true, accumulate received_amount across multiple calls
+        let total_received = if allow_partial {
+            let prior = payment.amount_received.unwrap_or(0);
+            prior.saturating_add(amount_received)
+        } else {
+            amount_received
+        };
+        // Issue #841: if a muxed payer was specified at create time, the incoming
+        // muxed sub-account ID must match. When no muxed payer was specified,
+        // any payer (G- or M-address) is accepted.
+        if let Some(expected_muxed_id) = payment.payer_muxed_id {
+            match payer_muxed_id {
+                Some(actual) if actual == expected_muxed_id => {}
+                _ => return Err(Error::MuxedAccountMismatch),
+            }
+        }
+
         // Record the actual amount received for reconciliation
-        payment.amount_received = Some(amount_received);
+        payment.amount_received = Some(total_received);
         payment.payer_address = Some(payer_address.clone());
         payment.transaction_hash = Some(transaction_hash);
-        payment.confirmed_at = Some(env.ledger().timestamp());
         // Issue #484: Store muxed ID if M-address was used
         payment.payer_muxed_id = payer_muxed_id;
+        payment.confirmed_at = Some(env.ledger().timestamp());
+        // Issue #484 / #841: Store muxed ID if M-address was used (or keep expected)
+        payment.payer_muxed_id = payer_muxed_id.or(payment.payer_muxed_id);
 
         // Get merchant-specific tolerance if available, otherwise use global default
         let merchant_tolerance = if let Some(registry_address) = env
@@ -1950,7 +3373,7 @@ impl PaymentProcessor {
         let max_tolerance = payment.amount / 100; // 1% of payment amount
         let tolerance = tolerance.min(max_tolerance);
 
-        let diff = amount_received - payment.amount;
+        let diff = total_received - payment.amount;
 
         let mut new_status = if (0..=tolerance).contains(&diff) {
             // Exact match or tiny overpay within tolerance → Confirmed
@@ -1966,10 +3389,20 @@ impl PaymentProcessor {
             PaymentStatus::PartiallyPaid
         };
 
+        if new_status == PaymentStatus::Confirmed || new_status == PaymentStatus::Overpaid {
+            payment.confirmed_at = Some(env.ledger().timestamp());
+        }
+
         payment.status = new_status.clone();
 
-        // Issue #304: snapshot the FX rate at verification time, if an oracle
-        // is configured for this contract.
+        // Issue #304 / #1033: snapshot the FX rate at verification time, if an
+        // oracle is configured for this contract, and reject when the rate is
+        // older than the PaymentProcessor's own staleness threshold
+        // (independent of the FX oracle contract's internal cap). Unlike the
+        // oracle's own `RateStale` guard (which defaults to a lenient 24h
+        // hard cap), this enforces `MAX_ORACLE_STALENESS_SECS` /
+        // `set_oracle_staleness_threshold` (5 minutes by default) so a
+        // merchant cannot be settled against a dangerously stale rate.
         if let Some(fx_oracle) = env
             .storage()
             .persistent()
@@ -1978,8 +3411,16 @@ impl PaymentProcessor {
             let oracle_client = FXOracleClient::new(&env, &fx_oracle);
             match oracle_client.try_get_rate(&payment.currency) {
                 Ok(Ok(rate_data)) => {
+                    let threshold = Self::get_oracle_staleness_threshold(env.clone());
+                    let age = env.ledger().timestamp().saturating_sub(rate_data.updated_at);
+                    if age > threshold {
+                        return Err(Error::OracleStale);
+                    }
                     payment.fx_rate = Some(rate_data.rate);
-                    payment.fx_rate_at = Some(env.ledger().timestamp());
+                    payment.fx_rate_at = Some(rate_data.updated_at);
+                }
+                Ok(Err(FXOracleError::RateStale)) => {
+                    return Err(Error::OracleStale);
                 }
                 _ => {
                     env.events().publish(
@@ -1993,10 +3434,11 @@ impl PaymentProcessor {
             }
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
 
         let _event_name = match &new_status {
             PaymentStatus::Confirmed => Symbol::new(&env, "VERIFIED"),
@@ -2005,20 +3447,32 @@ impl PaymentProcessor {
             _ => Symbol::new(&env, "FAILED"),
         };
         let overpaid_refund_amount = if new_status == PaymentStatus::Overpaid {
-            Some(amount_received.saturating_sub(payment.amount))
+            Some(total_received.saturating_sub(payment.amount))
         } else {
             None
         };
 
+        // Issue #767: Emit PAYMENT/PARTIAL_RECEIVED event with cumulative and remaining amounts when allow_partial is true
+        if allow_partial && new_status == PaymentStatus::PartiallyPaid {
+            let remaining = payment.amount.saturating_sub(total_received);
+            crate::events::emit_payment_partial_received(
+                &env,
+                &payment_id,
+                &payment.merchant_id,
+                total_received,
+                remaining,
+            );
+        }
+
         // Issue #471: Emit status-specific events for PartiallyPaid and Overpaid.
-        if new_status == PaymentStatus::PartiallyPaid {
+        if new_status == PaymentStatus::PartiallyPaid && !allow_partial {
             env.events().publish(
                 (
                     Symbol::new(&env, "PAYMENT"),
                     Symbol::new(&env, "PARTIALLY_PAID"),
                     payment.merchant_id.clone(),
                 ),
-                (payment_id.clone(), payment.amount, amount_received),
+                (payment_id.clone(), payment.amount, total_received),
             );
         }
         if new_status == PaymentStatus::Overpaid {
@@ -2028,12 +3482,12 @@ impl PaymentProcessor {
                     Symbol::new(&env, "OVERPAID"),
                     payment.merchant_id.clone(),
                 ),
-                (payment_id.clone(), payment.amount, amount_received),
+                (payment_id.clone(), payment.amount, total_received),
             );
         }
 
         // Issue #162: Merchant-configurable partial payment policy.
-        if new_status == PaymentStatus::PartiallyPaid {
+        if new_status == PaymentStatus::PartiallyPaid && !allow_partial {
             let partial_allowed = if let Some(registry_address) = env
                 .storage()
                 .persistent()
@@ -2057,38 +3511,41 @@ impl PaymentProcessor {
                         Symbol::new(&env, "AUTO_REQUIRED"),
                         payment.merchant_id.clone(),
                     ),
-                    (payment_id.clone(), amount_received),
+                    (payment_id.clone(), total_received),
                 );
             }
         }
 
         // Issue #63: Enforce tier-based monthly volume cap before confirming payment.
         if new_status == PaymentStatus::Confirmed || new_status == PaymentStatus::Overpaid {
-            Self::enforce_tier_volume_cap(&env, &payment.merchant_id, amount_received)?;
+            Self::enforce_tier_volume_cap(&env, &payment.merchant_id, total_received)?;
         }
 
-        // Issue #304: Check FX rate freshness when both registry and oracle address are configured
+        // Issue #304 / #1033: Check FX rate freshness against the oracle
+        // configured via `set_fx_oracle_address`. Previously this was only
+        // enforced when a merchant registry was *also* configured, which let
+        // verify_payment settle against a stale rate whenever no registry was
+        // set. The registry is unrelated to oracle freshness, so the gate is
+        // removed — this now runs whenever an oracle address is configured.
         if new_status == PaymentStatus::Confirmed || new_status == PaymentStatus::Overpaid {
-            if let Some(_registry_address) = env
+            if let Some(oracle_address) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+                .get::<DataKey, Address>(&DataKey::FXOracleAddress)
             {
-                if let Some(oracle_address) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, Address>(&DataKey::FXOracleAddress)
-                {
-                    let oracle_client =
-                        crate::fx_oracle::FXOracleClient::new(&env, &oracle_address);
-                    match oracle_client.try_get_rate(&payment.currency) {
-                        Ok(Ok(rate_data)) => {
-                            payment.fx_rate = Some(rate_data.rate);
-                            payment.fx_rate_at = Some(rate_data.updated_at);
+                let oracle_client = crate::fx_oracle::FXOracleClient::new(&env, &oracle_address);
+                match oracle_client.try_get_rate(&payment.currency) {
+                    Ok(Ok(rate_data)) => {
+                        let threshold = Self::get_oracle_staleness_threshold(env.clone());
+                        let age = env.ledger().timestamp().saturating_sub(rate_data.updated_at);
+                        if age > threshold {
+                            return Err(Error::OracleStale);
                         }
-                        _ => {
-                            return Err(Error::StaleOracleRate);
-                        }
+                        payment.fx_rate = Some(rate_data.rate);
+                        payment.fx_rate_at = Some(rate_data.updated_at);
+                    }
+                    _ => {
+                        return Err(Error::OracleStale);
                     }
                 }
             }
@@ -2177,10 +3634,11 @@ impl PaymentProcessor {
             Self::bump_ttl(&env, &customer_key, LONG_LIVE_TTL);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
 
         let event_name = match &new_status {
             PaymentStatus::Confirmed => Symbol::new(&env, "VERIFIED"),
@@ -2190,18 +3648,35 @@ impl PaymentProcessor {
         };
 
         // Issue #166: Optimize event topics for efficient indexing
+        // Issue #1035: include payer_muxed_id (None for non-muxed payers) so
+        // downstream consumers (indexer, webhooks) can route confirmation to
+        // the correct sub-account without a separate lookup.
         env.events().publish(
             (
                 Symbol::new(&env, "PAYMENT"),
                 event_name,
                 payment.merchant_id.clone(),
             ),
-            (payment_id.clone(), payment.amount, amount_received),
+            (
+                payment_id.clone(),
+                payment.amount,
+                amount_received,
+                payment.payer_muxed_id,
+            ),
         );
 
         Ok(new_status)
     }
 
+    /// Verifies Payment batch.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `operator` (`Address`) - Operator address authorizing or performing this operation.
+    /// - `verifications` (`Vec<VerifyPaymentArgs>`) - Payment verification requests to process as a batch.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::BatchTooLarge`.
     pub fn verify_payment_batch(
         env: Env,
         operator: Address,
@@ -2230,6 +3705,16 @@ impl PaymentProcessor {
     /// Issue #471: Allow a merchant to accept a PartiallyPaid payment at the received amount.
     /// Moves the payment from PartiallyPaid to Confirmed, using the received amount as the
     /// effective payment amount. No refund is created for the difference.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentAlreadyProcessed`, `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
     pub fn accept_partial_payment(
         env: Env,
         merchant_id: Address,
@@ -2251,9 +3736,10 @@ impl PaymentProcessor {
         let amount_received = payment.amount_received.unwrap_or(payment.amount);
         payment.amount = amount_received;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
 
         env.events().publish(
             (
@@ -2271,6 +3757,17 @@ impl PaymentProcessor {
     /// This is a declaration that the payer will send additional funds off-chain.
     /// The payment status is moved to Pending so a new verify_payment call can
     /// confirm it with the combined amount.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payer` (`Address`) - Payer address associated with the payment.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    /// - `top_up_amount` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::PaymentAlreadyProcessed`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
     pub fn complete_partial_payment(
         env: Env,
         payer: Address,
@@ -2293,9 +3790,10 @@ impl PaymentProcessor {
         Self::record_payment_status(&env, &payment);
         payment.amount = payment.amount.saturating_add(top_up_amount);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
 
         env.events().publish(
             (
@@ -2312,6 +3810,18 @@ impl PaymentProcessor {
     /// Issue #482: Create a retry payment for an expired or failed original payment.
     /// Returns the payment_id of the newly created payment, linked to the original.
     /// Maximum retry chain depth is 3.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `original_payment_id` (`String`) - Identifier used to select the target record.
+    /// - `new_expires_at` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidExpiry`, `Error::PaymentAlreadyProcessed`, `Error::RetryChainTooDeep`, `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `Self::require_creation_not_paused`.
+    /// - Propagates errors returned by `Self::require_not_blacklisted`.
     pub fn retry_payment(
         env: Env,
         merchant_id: Address,
@@ -2345,7 +3855,7 @@ impl PaymentProcessor {
             current_id = retry_of.clone();
             depth = depth.saturating_add(1);
             if depth > 3 {
-                return Err(Error::MaxRetriesExceeded);
+                return Err(Error::RetryChainTooDeep);
             }
         }
 
@@ -2385,13 +3895,17 @@ impl PaymentProcessor {
             retry_of_payment_id: Some(original_payment_id.clone()),
             payer_muxed_id: None,
             payment_link_id: original.payment_link_id.clone(),
+            allow_partial: original.allow_partial,
+            tip_enabled: original.tip_enabled,
+            tip_amount: None,
         };
 
         // Store new payment
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(new_payment_id.clone()), &new_payment);
-        Self::bump_payment_ttl(&env, &new_payment_id, &new_payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &new_payment_id)),
+            &new_payment,
+        );
+        Self::extend_payment_ttl(&env, &new_payment_id, &new_payment.status);
 
         // Track retry link
         let retries_key = DataKey::PaymentRetries(original_payment_id.clone());
@@ -2416,12 +3930,30 @@ impl PaymentProcessor {
         Ok(new_payment_id)
     }
 
+    /// Returns payment.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
     pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, Error> {
         let payment = Self::get_payment_internal(&env, &payment_id)?;
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
         Ok(payment)
     }
 
+    /// Returns payment status history.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
     pub fn get_payment_status_history(
         env: Env,
         payment_id: String,
@@ -2435,6 +3967,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #489: Reverse lookup payment by metadata_hash for order reconciliation.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `metadata_hash` (`BytesN<32>`) - Optional 32-byte hash identifying the associated metadata.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentNotFound`.
+    /// - Propagates errors returned by `Self::get_payment`.
     pub fn get_payment_by_metadata_hash(
         env: Env,
         metadata_hash: BytesN<32>,
@@ -2448,6 +3988,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #492: Get customer profile for merchant and customer pair.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `customer_id` (`Address`) - Identifier used to select the target record.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentNotFound`.
     pub fn get_customer(
         env: Env,
         merchant_id: Address,
@@ -2460,6 +4008,14 @@ impl PaymentProcessor {
     }
 
     /// Issue #492: Get top customers for a merchant sorted by total_spent (descending).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_top_customers(env: Env, merchant_id: Address, limit: u32) -> Vec<CustomerProfile> {
         let all_payments = Self::get_merchant_payments_internal(&env, &merchant_id);
         let mut customers: Map<Address, CustomerProfile> = map![&env];
@@ -2547,6 +4103,13 @@ impl PaymentProcessor {
     /// indexes plus the `TrackedMerchants` list — it never iterates payment
     /// records. `limit` is capped at [`TOP_MERCHANTS_MAX_LIMIT`] (100); a
     /// `limit` of 0 is treated as the cap.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_top_merchants(env: Env, limit: u32) -> Vec<MerchantRanking> {
         let capped_limit = if limit == 0 {
             TOP_MERCHANTS_MAX_LIMIT
@@ -2607,14 +4170,42 @@ impl PaymentProcessor {
         result
     }
 
-    /// Issue #488: Permissionless public entry point for TTL maintenance.
-    pub fn bump_payment_ttl_public(env: Env, payment_id: String) -> Result<(), Error> {
+    /// Issue #768: Permissionless function to allow anyone to extend a payment's TTL before it lapses.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    pub fn bump_payment_ttl(env: Env, payment_id: String) -> Result<(), Error> {
         let payment = Self::get_payment_internal(&env, &payment_id)?;
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
         Ok(())
     }
 
+    /// Issue #488: Permissionless public entry point for TTL maintenance.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::bump_payment_ttl`.
+    pub fn bump_payment_ttl_public(env: Env, payment_id: String) -> Result<(), Error> {
+        Self::bump_payment_ttl(env, payment_id)
+    }
+
     /// Issue #488: Bulk bump payment TTLs for efficient maintenance sweeps (max 50).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_ids` (`Vec<String>`) - Payment identifiers to process as a batch.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::BatchTooLarge`.
     pub fn bulk_bump_payment_ttls(env: Env, payment_ids: Vec<String>) -> Result<u32, Error> {
         if payment_ids.len() > 50 {
             return Err(Error::BatchTooLarge);
@@ -2623,17 +4214,93 @@ impl PaymentProcessor {
         let mut bumped = 0u32;
         for payment_id in payment_ids.iter() {
             if let Ok(payment) = Self::get_payment_internal(&env, &payment_id) {
-                Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+                Self::extend_payment_ttl(&env, &payment_id, &payment.status);
                 bumped += 1;
             }
         }
         Ok(bumped)
     }
 
+    /// Returns merchant payments.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_merchant_payments(env: Env, merchant_id: Address) -> Vec<String> {
         Self::get_merchant_payments_internal(&env, &merchant_id)
     }
 
+    /// Issue #1071: Return a paginated slice of payment IDs for a specific merchant.
+    ///
+    /// Payment IDs are returned oldest-first (insertion order). The `limit` is
+    /// capped at 100 per call to bound ledger read cost. Suspended merchants'
+    /// payment history is still readable.
+    ///
+    /// # Parameters
+    /// * `merchant_id` – Merchant whose payment history to read.
+    /// * `offset`      – Number of entries to skip (0 = start from oldest).
+    /// * `limit`       – Maximum entries to return; silently capped at 100.
+    ///
+    /// Complete signature parameters:
+    /// - `env` (`Env`) - Soroban execution context used for contract storage and ledger access.
+    /// - `merchant_id` (`Address`) - Merchant whose payment IDs are paginated.
+    /// - `offset` (`u32`) - Zero-based number of payment IDs to skip.
+    /// - `limit` (`u32`) - Maximum number of payment IDs to return; capped by the function.
+    ///
+    /// # Returns
+    /// A `Vec<String>` of payment IDs. Returns an empty vec when the merchant
+    /// has no payments or the offset is beyond the list length.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
+    pub fn get_merchant_payments_paged(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<String> {
+        // Enforce maximum page size to bound ledger read cost.
+        const MAX_PAGE_SIZE: u32 = 100;
+        let effective_limit = limit.min(MAX_PAGE_SIZE);
+
+        if effective_limit == 0 {
+            return vec![&env];
+        }
+
+        let all = Self::get_merchant_payments_internal(&env, &merchant_id);
+        let total = all.len();
+
+        if offset >= total {
+            return vec![&env];
+        }
+
+        let end = core::cmp::min(total, offset.saturating_add(effective_limit));
+        let mut page = vec![&env];
+        let mut i = offset;
+        while i < end {
+            if let Some(id) = all.get(i) {
+                page.push_back(id);
+            }
+            i += 1;
+        }
+        page
+    }
+
+    /// Returns merchant payments paginated.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `offset` (`u32`) - Zero-based position from which to return records.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    /// - `status_filter` (`Option<PaymentStatus>`) - Optional value used by this operation.
+    /// - `token_address` (`Option<Address>`) - Address of the token being checked or configured.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_merchant_payments_paginated(
         env: Env,
         merchant_id: Address,
@@ -2652,7 +4319,7 @@ impl PaymentProcessor {
             if let Some(payment) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, PaymentCharge>(&DataKey::Payment(id.clone()))
+                .get::<DataKey, PaymentCharge>(&DataKey::Payment(payment_id_to_key(&env, &id)))
             {
                 let status_match = match &status_filter {
                     Some(status) => payment.status == status.clone(),
@@ -2696,6 +4363,16 @@ impl PaymentProcessor {
     /// * `to_ts` - End timestamp (inclusive)
     /// * `offset` - Pagination offset (number of payments to skip)
     /// * `limit` - Maximum number of payments to include (max 100)
+    ///
+    /// Complete signature parameters:
+    /// - `env` (`Env`) - Soroban execution context used for contract storage and ledger access.
+    /// - `merchant_id` (`Address`) - Merchant whose activity is summarized.
+    /// - `from_ts` (`u64`) - Inclusive start timestamp of the report period.
+    /// - `to_ts` (`u64`) - Inclusive end timestamp of the report period.
+    /// - `offset` (`u32`) - Zero-based payment offset for paginating the report.
+    /// - `limit` (`u32`) - Maximum number of payments included in the report.
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidExpiry`.
     pub fn generate_reconciliation_report(
         env: Env,
         merchant_id: Address,
@@ -2783,9 +4460,11 @@ impl PaymentProcessor {
                         0
                     };
 
+                    let tip = payment.tip_amount.unwrap_or(0);
                     let summary = PaymentSummary {
                         payment_id: payment.payment_id.clone(),
                         amount: payment.amount,
+                        tip_amount: tip,
                         fee,
                         refund_amount,
                         status: payment.status.clone(),
@@ -2793,7 +4472,8 @@ impl PaymentProcessor {
                     };
 
                     payments_in_period.push_back(summary.clone());
-                    total_gross += payment.amount;
+                    // Tip is included in settlement gross but itemized separately above.
+                    total_gross += payment.amount.saturating_add(tip);
                     total_fees += fee;
                     total_refunds += refund_amount;
                 }
@@ -2827,6 +4507,19 @@ impl PaymentProcessor {
         })
     }
 
+    /// Reconciliation report page.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `from_ts` (`u64`) - Inclusive start timestamp for the requested period.
+    /// - `to_ts` (`u64`) - Inclusive end timestamp for the requested period.
+    /// - `offset` (`u32`) - Zero-based position from which to return records.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::generate_reconciliation_report`.
     pub fn reconciliation_report_page(
         env: Env,
         merchant_id: Address,
@@ -2858,6 +4551,18 @@ impl PaymentProcessor {
         })
     }
 
+    /// Cancels Payment.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `authority` (`Address`) - Value used by this operation.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentAlreadyProcessed`, `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `Self::require_not_paused`.
+    /// - Propagates errors returned by `payment_state_machine::transition_status`.
     #[allow(deprecated)]
     pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
@@ -2874,10 +4579,11 @@ impl PaymentProcessor {
                 payment_state_machine::transition_status(&payment.status, PaymentStatus::Expired)?;
             Self::record_payment_status(&env, &payment);
 
-            env.storage()
-                .persistent()
-                .set(&DataKey::Payment(payment_id.clone()), &payment);
-            Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+            env.storage().persistent().set(
+                &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+                &payment,
+            );
+            Self::extend_payment_ttl(&env, &payment_id, &payment.status);
             // Issue #399: free idempotency key so client_token can be reused.
             Self::remove_idempotency_key(&env, &payment_id);
 
@@ -2905,10 +4611,11 @@ impl PaymentProcessor {
             payment_state_machine::transition_status(&payment.status, PaymentStatus::Failed)?;
         Self::record_payment_status(&env, &payment);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
         // Issue #399: free idempotency key so client_token can be reused after cancellation.
         Self::remove_idempotency_key(&env, &payment_id);
         Self::remove_payment_from_expiry_bucket(&env, &payment_id, payment.expires_at);
@@ -2926,11 +4633,23 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Expire payment.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentAlreadyProcessed`, `Error::PaymentExpired`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `payment_state_machine::transition_status`.
     #[allow(deprecated)]
     pub fn expire_payment(env: Env, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
-        if payment.status != PaymentStatus::Pending {
+        if payment.status != PaymentStatus::Pending
+            && payment.status != PaymentStatus::PartiallyPaid
+        {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
@@ -2938,17 +4657,66 @@ impl PaymentProcessor {
             return Err(Error::PaymentExpired);
         }
 
+        let was_partially_paid = payment.status == PaymentStatus::PartiallyPaid;
+        let partial_amount = payment.amount_received.unwrap_or(0);
+
         payment.status =
             payment_state_machine::transition_status(&payment.status, PaymentStatus::Expired)?;
         Self::record_payment_status(&env, &payment);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
         // Issue #399: free idempotency key so client_token can be reused.
         Self::remove_idempotency_key(&env, &payment_id);
         Self::remove_payment_from_expiry_bucket(&env, &payment_id, payment.expires_at);
+
+        // Issue #767: If the payment expires before being fully funded, refund partial amount to payer
+        if was_partially_paid && partial_amount > 0 {
+            if let Some(ref payer) = payment.payer_address {
+                if let Some(registry_address) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+                {
+                    let registry_client = crate::merchant_registry::MerchantRegistryClient::new(
+                        &env,
+                        &registry_address,
+                    );
+                    if let Some(refund_manager_address) =
+                        registry_client.get_refund_manager_address()
+                    {
+                        let refund_client = RefundManagerClient::new(&env, &refund_manager_address);
+                        refund_client.register_payment(
+                            &payment_id,
+                            &payment.merchant_id,
+                            &payment.amount,
+                            &payment.currency,
+                        );
+                        let auto_reason =
+                            String::from_str(&env, "Automatic refund for expired partial payment");
+                        let _ = refund_client.try_queue_auto_refund(
+                            &env.current_contract_address(),
+                            &registry_address,
+                            &payment_id,
+                            &partial_amount,
+                            payer,
+                            &auto_reason,
+                        );
+                    }
+                }
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "REFUND"),
+                        Symbol::new(&env, "AUTO_REQUIRED"),
+                        payment.merchant_id.clone(),
+                    ),
+                    (payment_id.clone(), partial_amount),
+                );
+            }
+        }
 
         // Issue #166: Optimize event topics
         env.events().publish(
@@ -2963,6 +4731,15 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Batch expire payments.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_ids` (`Vec<String>`) - Payment identifiers to process as a batch.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::require_not_paused`.
     pub fn batch_expire_payments(env: Env, payment_ids: Vec<String>) -> Result<u32, Error> {
         Self::require_not_paused(&env)?;
 
@@ -3009,6 +4786,33 @@ impl PaymentProcessor {
         Ok(count)
     }
 
+    /// Settles a confirmed payment using the supplied splits.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `operator` (`Address`) - Operator address authorizing or performing this operation.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    /// - `splits` (`Vec<SettlementSplit>`) - Recipient and amount allocations for the settlement.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidSettlement`, `Error::PaymentAlreadyProcessed`, `Error::Reentrancy`, `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    /// - Propagates errors returned by `Self::require_not_paused`.
+    /// - Propagates errors returned by `payment_state_machine::transition_status`.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// stellar contract invoke --id <CONTRACT_ID> --network <NETWORK> --source <OPERATOR_ACCOUNT> -- settle_payment --operator <OPERATOR_ADDRESS> --payment_id <PAYMENT_ID> --splits '[{"recipient":"<RECIPIENT_ADDRESS>","amount":1000}]'
+    /// ```
+    ///
+    /// Refund requests are separate `RefundManager` contract calls, not
+    /// `PaymentProcessor` methods. Example invocations:
+    ///
+    /// ```bash
+    /// stellar contract invoke --id <REFUND_MANAGER_ID> --network <NETWORK> --source <REQUESTER_ACCOUNT> -- create_refund --payment_id <PAYMENT_ID> --refund_amount 500 --reason "<REASON>" --requester <REQUESTER_ADDRESS>
+    /// stellar contract invoke --id <REFUND_MANAGER_ID> --network <NETWORK> --source <OPERATOR_ACCOUNT> -- process_refund --operator <OPERATOR_ADDRESS> --refund_id <REFUND_ID>
+    /// ```
     #[allow(clippy::type_complexity)]
     pub fn settle_payment(
         env: Env,
@@ -3041,6 +4845,18 @@ impl PaymentProcessor {
 
         if payment.status != PaymentStatus::Confirmed {
             return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        // Issue #1209: Reject settlement before the payment's optional deferred
+        // `settle_at` timestamp, supporting escrow-like deferred release.
+        if let Some(settle_at) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::PaymentSettleAt(payment_id.clone()))
+        {
+            if env.ledger().timestamp() < settle_at {
+                return Err(Error::SettlementNotYetDue);
+            }
         }
 
         // Resolve the settlement token: use payment.token_address if set, else the configured USDC token
@@ -3177,14 +4993,19 @@ impl PaymentProcessor {
                 // get_platform_fee_report.
                 Self::record_fee_collection(&env, settlement_fee, treasury_total, dev_amount);
             } else {
-                // No FeeSplitConfig — accumulate entire fee in TreasuryBalance (legacy path).
-                let current_treasury: i128 = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, i128>(&DataKey::TreasuryBalance)
-                    .unwrap_or(0);
+                // No FeeSplitConfig — accumulate entire fee in TokenTreasuryBalance (legacy path).
+                let settlement_token_for_treasury = settlement_token.clone().unwrap_or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get(&DataKey::UsdcToken)
+                        .unwrap_or_else(|| env.current_contract_address())
+                });
+                let current_treasury: i128 = Self::get_token_treasury_balance(
+                    env.clone(),
+                    settlement_token_for_treasury.clone(),
+                );
                 env.storage().persistent().set(
-                    &DataKey::TreasuryBalance,
+                    &DataKey::TokenTreasuryBalance(settlement_token_for_treasury),
                     &current_treasury.saturating_add(settlement_fee),
                 );
 
@@ -3292,7 +5113,7 @@ impl PaymentProcessor {
                 }
 
                 // Platform fee: custom fee_recipient receives a transfer; otherwise
-                // credit DataKey::TreasuryBalance (unified treasury accounting).
+                // credit TokenTreasuryBalance (unified treasury accounting).
                 let fee_recipient: Address = if let Some(custom_recipient) =
                     &fee_config.fee_recipient
                 {
@@ -3306,13 +5127,18 @@ impl PaymentProcessor {
                     custom_recipient.clone()
                 } else {
                     if actual_fee > 0 {
-                        let current_treasury: i128 = env
-                            .storage()
-                            .persistent()
-                            .get::<DataKey, i128>(&DataKey::TreasuryBalance)
-                            .unwrap_or(0);
+                        let settlement_token_for_treasury = settlement_token.unwrap_or_else(|| {
+                            env.storage()
+                                .persistent()
+                                .get(&DataKey::UsdcToken)
+                                .unwrap_or_else(|| env.current_contract_address())
+                        });
+                        let current_treasury: i128 = Self::get_token_treasury_balance(
+                            env.clone(),
+                            settlement_token_for_treasury.clone(),
+                        );
                         env.storage().persistent().set(
-                            &DataKey::TreasuryBalance,
+                            &DataKey::TokenTreasuryBalance(settlement_token_for_treasury),
                             &current_treasury.saturating_add(actual_fee),
                         );
                     }
@@ -3352,10 +5178,11 @@ impl PaymentProcessor {
                     PaymentStatus::Settled,
                 )?;
                 Self::record_payment_status(&env, &payment);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Payment(payment_id.clone()), &payment);
-                Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+                env.storage().persistent().set(
+                    &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+                    &payment,
+                );
+                Self::extend_payment_ttl(&env, &payment_id, &payment.status);
 
                 // If merchant has AnchorConfig set, emit the
                 // SETTLEMENT_ANCHOR_WITHDRAW event so the off-chain
@@ -3447,17 +5274,22 @@ impl PaymentProcessor {
         }
 
         // Platform fee: when the registry returns the contract itself as recipient
-        // (no custom fee_recipient), credit TreasuryBalance. Otherwise transfer out.
+        // (no custom fee_recipient), credit TokenTreasuryBalance. Otherwise transfer out.
         if platform_fee > 0 {
             let contract_addr = env.current_contract_address();
             if fee_recipient == contract_addr {
-                let current_treasury: i128 = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, i128>(&DataKey::TreasuryBalance)
-                    .unwrap_or(0);
+                let settlement_token_for_treasury = settlement_token.unwrap_or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get(&DataKey::UsdcToken)
+                        .unwrap_or_else(|| env.current_contract_address())
+                });
+                let current_treasury: i128 = Self::get_token_treasury_balance(
+                    env.clone(),
+                    settlement_token_for_treasury.clone(),
+                );
                 env.storage().persistent().set(
-                    &DataKey::TreasuryBalance,
+                    &DataKey::TokenTreasuryBalance(settlement_token_for_treasury),
                     &current_treasury.saturating_add(platform_fee),
                 );
             } else if let Some(ref settlement_token) = settlement_token {
@@ -3500,10 +5332,11 @@ impl PaymentProcessor {
             }
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment_id.clone()), &payment);
-        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment_id)),
+            &payment,
+        );
+        Self::extend_payment_ttl(&env, &payment_id, &payment.status);
 
         // Issue #166: Optimize event topics
         env.events().publish(
@@ -3553,12 +5386,100 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Issue #1200: Maximum number of items accepted by a single
+    /// `batch_settle_payments` call. Kept well under `create_payments_batch`'s
+    /// cap of 50 since each settlement does materially more work per item
+    /// (fee-waiver lookups, merchant registry calls, token transfers, event
+    /// publishing) than a payment creation.
+    pub const MAX_BATCH_SETTLE_PAYMENTS: u32 = 20;
+
+    /// Issue #1200: Settle up to `MAX_BATCH_SETTLE_PAYMENTS` confirmed payments
+    /// in a single invocation.
+    ///
+    /// Unlike `create_payments_batch`, a failure on one payment does **not**
+    /// revert the whole call: each item is settled independently by calling
+    /// `settle_payment`, and its outcome — success, or the `Error` discriminant
+    /// `settle_payment` would have returned for that payment on its own — is
+    /// recorded in the corresponding `BatchSettleResult`. This lets an operator
+    /// submit a day's worth of confirmed payments in one transaction without a
+    /// single already-settled or invalid `payment_id` blocking the rest.
+    ///
+    /// Each settled item still emits its own `PAYMENT`/`SETTLED` event (and the
+    /// other per-settlement events `settle_payment` emits) exactly as if it had
+    /// been settled individually; this call additionally emits a single
+    /// `PAYMENT`/`BATCH_SETTLED` summary event once all items have been
+    /// processed.
+    pub fn batch_settle_payments(
+        env: Env,
+        operator: Address,
+        items: Vec<BatchSettlePaymentItem>,
+    ) -> Result<Vec<BatchSettleResult>, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator) {
+            return Err(Error::Unauthorized);
+        }
+
+        if items.len() > Self::MAX_BATCH_SETTLE_PAYMENTS {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut results: Vec<BatchSettleResult> = vec![&env];
+        let mut settled_count: u32 = 0;
+
+        for item in items.iter() {
+            let outcome = Self::settle_payment(
+                env.clone(),
+                operator.clone(),
+                item.payment_id.clone(),
+                item.splits.clone(),
+            );
+
+            match outcome {
+                Ok(()) => {
+                    settled_count += 1;
+                    results.push_back(BatchSettleResult {
+                        payment_id: item.payment_id.clone(),
+                        success: true,
+                        error_code: None,
+                    });
+                }
+                Err(e) => {
+                    results.push_back(BatchSettleResult {
+                        payment_id: item.payment_id.clone(),
+                        success: false,
+                        error_code: Some(e as u32),
+                    });
+                }
+            }
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PAYMENT"),
+                Symbol::new(&env, "BATCH_SETTLED"),
+                operator,
+            ),
+            (items.len() as u32, settled_count),
+        );
+
+        Ok(results)
+    }
+
     /// Issue #480: Trigger a settlement for a merchant's accumulated pending balance.
     ///
     /// Sweeps the merchant's pending settlement balance to their payout address.
     /// For `Daily` and `Weekly` schedules, enforces a minimum time since the
     /// last settlement. For `Manual`, settles immediately as long as the pending
     /// balance exceeds `SETTLEMENT_MIN_AMOUNT`.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `operator` (`Address`) - Operator address authorizing or performing this operation.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAddress`, `Error::InvalidAmount`, `Error::Unauthorized`.
     pub fn trigger_settlement(
         env: Env,
         operator: Address,
@@ -3627,7 +5548,11 @@ impl PaymentProcessor {
         registry_client.clear_pending_settlement(&merchant_id);
 
         // Update last_settlement_at on the merchant record.
-        registry_client.set_last_settlement_at(&merchant_id, &now);
+        registry_client.set_last_settlement_at(
+            &env.current_contract_address(),
+            &merchant_id,
+            &now,
+        );
 
         // Emit MERCHANT/SETTLEMENT_TRIGGERED event.
         env.events().publish(
@@ -3642,6 +5567,15 @@ impl PaymentProcessor {
         Ok(pending)
     }
 
+    /// Prune expired payments.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `operator` (`Address`) - Operator address authorizing or performing this operation.
+    /// - `payment_ids` (`Vec<String>`) - Payment identifiers to process as a batch.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn prune_expired_payments(
         env: Env,
         operator: Address,
@@ -3663,7 +5597,7 @@ impl PaymentProcessor {
                 {
                     env.storage()
                         .persistent()
-                        .remove(&DataKey::Payment(payment_id.clone()));
+                        .remove(&DataKey::Payment(payment_id_to_key(&env, &payment_id)));
                     pruned_count = pruned_count.saturating_add(1);
                 }
             }
@@ -3780,6 +5714,14 @@ impl PaymentProcessor {
     /// # Returns
     /// The created PaymentCharge on success
     /// Add a router address to the allowlist (issue #437).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `router` (`Address`) - Router address being configured or used for token conversion.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn add_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -3809,6 +5751,14 @@ impl PaymentProcessor {
     }
 
     /// Remove a router address from the allowlist (issue #437).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `router` (`Address`) - Router address being configured or used for token conversion.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn remove_router(env: Env, admin: Address, router: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -3842,6 +5792,13 @@ impl PaymentProcessor {
     }
 
     /// Check if a DEX router is allowed (issue #437).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `router` (`Address`) - Router address being configured or used for token conversion.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn is_router_allowed(env: Env, router: Address) -> bool {
         env.storage()
             .persistent()
@@ -3850,6 +5807,12 @@ impl PaymentProcessor {
     }
 
     /// Get all allowlisted DEX router addresses (issue #437).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_allowed_routers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -3858,6 +5821,14 @@ impl PaymentProcessor {
     }
 
     /// Set the Wrapped XLM (WXLM) token contract address (issue #434).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `wxlm` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_wrapped_xlm_contract(env: Env, admin: Address, wxlm: Address) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -3870,11 +5841,29 @@ impl PaymentProcessor {
     }
 
     /// Get the Wrapped XLM (WXLM) token contract address (issue #434).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
     pub fn get_wrapped_xlm_contract(env: Env) -> Option<Address> {
         env.storage().persistent().get(&DataKey::WrappedXlmContract)
     }
 
     /// Swaps tokens via a DEX router and executes a payment (issue #434, #437).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `args` (`SwapAndPayArgs`) - Structured arguments describing the requested operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::ArbitrageDetected`, `Error::InvalidAmount`, `Error::RouterNotAllowed`, `Error::SwapPathInvalid`.
+    /// - Propagates errors returned by `Self::create_payment`.
+    /// - Propagates errors returned by `Self::enforce_create_payment_rate_limit_for_payer`.
+    /// - Propagates errors returned by `Self::require_creation_not_paused`.
+    /// - Propagates errors returned by `Self::validate_oracle_swap_rate`.
+    /// - Propagates errors returned by `Self::validate_path_returns`.
     #[allow(clippy::too_many_arguments)]
     pub fn swap_and_pay(env: Env, args: SwapAndPayArgs) -> Result<PaymentCharge, Error> {
         args.payer.require_auth();
@@ -3983,6 +5972,10 @@ impl PaymentProcessor {
             fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
+            idempotency_key: None,
+            allow_partial: None,
+            tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -3990,9 +5983,10 @@ impl PaymentProcessor {
         payment.original_token = Some(args.token_in.clone());
         payment.swap_path = Some(args.path.clone());
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(payment.payment_id.clone()), &payment);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &payment.payment_id)),
+            &payment,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "SWAP"), Symbol::new(&env, "EXECUTED")),
@@ -4007,6 +6001,17 @@ impl PaymentProcessor {
     }
 
     /// Issue #436: Multi-DEX route splitting / aggregation.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `args` (`SwapAndPayArgs`) - Structured arguments describing the requested operation.
+    /// - `routes` (`Vec<SwapRoute>`) - Collection of values to return or process.
+    /// - `min_output_amount` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::RouteOutputInsufficient`, `Error::RouterNotAllowed`, `Error::SwapPathInvalid`.
+    /// - Propagates errors returned by `Self::create_payment`.
+    /// - Propagates errors returned by `Self::require_creation_not_paused`.
     pub fn swap_and_pay_multi_route(
         env: Env,
         args: SwapAndPayArgs,
@@ -4085,6 +6090,10 @@ impl PaymentProcessor {
             fee_waiver_code: None,
             retry_of_payment_id: None,
             payer_muxed_id: None,
+            idempotency_key: None,
+            allow_partial: None,
+            tip_enabled: false,
+            settle_at: None,
         };
 
         let mut payment = Self::create_payment(env.clone(), create_args)?;
@@ -4093,10 +6102,11 @@ impl PaymentProcessor {
         // refund can be routed back through the DEX to the payer's token.
         payment.original_token = Some(args.token_in.clone());
         payment.swap_path = Some(args.path.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(args.payment_id.clone()), &payment);
-        Self::bump_payment_ttl(&env, &args.payment_id, &payment.status);
+        env.storage().persistent().set(
+            &DataKey::Payment(payment_id_to_key(&env, &args.payment_id)),
+            &payment,
+        );
+        Self::extend_payment_ttl(&env, &args.payment_id, &payment.status);
 
         env.events().publish(
             (
@@ -4239,12 +6249,12 @@ impl PaymentProcessor {
     fn get_payment_internal(env: &Env, payment_id: &String) -> Result<PaymentCharge, Error> {
         env.storage()
             .persistent()
-            .get(&DataKey::Payment(payment_id.clone()))
+            .get(&DataKey::Payment(payment_id_to_key(env, payment_id)))
             .ok_or(Error::PaymentNotFound)
     }
 
     #[allow(dead_code)]
-    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
+    pub(crate) fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Refund(refund_id.clone()))
@@ -4252,13 +6262,21 @@ impl PaymentProcessor {
     }
 
     #[allow(dead_code)]
-    fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
+    pub(crate) fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentRefunds(payment_id.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
+    /// Returns merchant dispute count.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
         env.storage()
             .persistent()
@@ -4350,6 +6368,13 @@ impl PaymentProcessor {
     /// Issue #396: Returns the total number of payment IDs stored for a merchant.
     /// Used by pagination UIs alongside `get_merchant_payments_full`.
     /// Issue #396: Get merchant payment count for dashboard pagination (O(1) via counter).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_merchant_payment_count(env: Env, merchant_id: Address) -> u32 {
         let count: u64 = env
             .storage()
@@ -4359,6 +6384,14 @@ impl PaymentProcessor {
         count as u32
     }
 
+    /// Returns merchant payment count dash.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_merchant_payment_count_dash(env: Env, merchant_id: Address) -> u32 {
         let count: u64 = env
             .storage()
@@ -4372,6 +6405,16 @@ impl PaymentProcessor {
     /// `limit` is capped at 50 to avoid ledger compute limits.
     /// Returns an empty vec (not an error) when `offset` exceeds the total count.
     /// When `token_address` is provided, returns only payments matching that token.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `offset` (`u32`) - Zero-based position from which to return records.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    /// - `token_address` (`Option<Address>`) - Address of the token being checked or configured.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     #[allow(deprecated)]
     pub fn get_merchant_payments_full(
         env: Env,
@@ -4388,7 +6431,7 @@ impl PaymentProcessor {
             if let Some(payment) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, PaymentCharge>(&DataKey::Payment(id))
+                .get::<DataKey, PaymentCharge>(&DataKey::Payment(payment_id_to_key(&env, &id)))
             {
                 let token_match = match &token_address {
                     Some(token) => payment.token_address.as_ref() == Some(token),
@@ -4424,6 +6467,15 @@ impl PaymentProcessor {
     /// avg_payment_amount, dispute_count, refund_count, net_settled_volume.
     /// Issue #678: When from_ts/to_ts are provided, uses the DailyPaymentIndex
     /// to scan only the relevant day buckets (O(days) ledger reads).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `from_ts` (`u64`) - Inclusive start timestamp for the requested period.
+    /// - `to_ts` (`u64`) - Inclusive end timestamp for the requested period.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_merchant_analytics(
         env: Env,
         merchant_id: Address,
@@ -4520,11 +6572,11 @@ impl PaymentProcessor {
     /// client_token can be reused after expiry or cancellation.
     fn remove_idempotency_key(env: &Env, payment_id: &String) {
         let rev_token_id = Self::rev_key_for(env, payment_id);
-        let rev_key = DataKey::IdempotencyKey(rev_token_id);
+        let rev_key = DataKey::IdempotencyKey(idempotency_key_to_key(&env, &rev_token_id));
         if let Some(token) = env.storage().persistent().get::<DataKey, String>(&rev_key) {
             env.storage()
                 .persistent()
-                .remove(&DataKey::IdempotencyKey(token));
+                .remove(&DataKey::IdempotencyKey(idempotency_key_to_key(&env, &token)));
             env.storage().persistent().remove(&rev_key);
         }
     }
@@ -4570,13 +6622,20 @@ impl PaymentProcessor {
             | PaymentStatus::Expired
             | PaymentStatus::Failed
             | PaymentStatus::PartiallyPaid
-            | PaymentStatus::Overpaid => LONG_LIVE_TTL,
+            | PaymentStatus::Overpaid
+            | PaymentStatus::Disputed => MIN_PERSISTENT_TTL,
         }
     }
 
-    fn bump_payment_ttl(env: &Env, payment_id: &String, status: &PaymentStatus) {
-        let key = DataKey::Payment(payment_id.clone());
-        Self::bump_ttl(env, &key, Self::payment_ttl(status));
+    fn extend_payment_ttl(env: &Env, payment_id: &String, status: &PaymentStatus) {
+        let key = DataKey::Payment(payment_id_to_key(env, payment_id));
+        let ttl = Self::payment_ttl(status);
+        let threshold = if ttl >= MIN_PERSISTENT_TTL {
+            MIN_BUMP_TTL
+        } else {
+            core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR)
+        };
+        env.storage().persistent().extend_ttl(&key, threshold, ttl);
     }
 
     fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
@@ -4605,6 +6664,18 @@ impl PaymentProcessor {
 
     /// Customer grants a merchant permission to pull up to `limit_per_period`
     /// tokens per `period_secs`-second window.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `customer` (`Address`) - Value used by this operation.
+    /// - `merchant` (`Address`) - Value used by this operation.
+    /// - `token` (`Address`) - Token address or identifier used by this operation.
+    /// - `limit_per_period` (`i128`) - Value used by this operation.
+    /// - `period_secs` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `MerchantPreAuth::pre_authorize_merchant`.
     pub fn pre_authorize_merchant(
         env: Env,
         customer: Address,
@@ -4624,6 +6695,15 @@ impl PaymentProcessor {
     }
 
     /// Customer revokes a previously granted merchant authorization.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `customer` (`Address`) - Value used by this operation.
+    /// - `merchant` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `MerchantPreAuth::revoke_authorization`.
     pub fn revoke_merchant_authorization(
         env: Env,
         customer: Address,
@@ -4634,6 +6714,16 @@ impl PaymentProcessor {
 
     /// Merchant pulls `amount` tokens from the customer's account against
     /// an existing pre-authorization.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant` (`Address`) - Value used by this operation.
+    /// - `customer` (`Address`) - Value used by this operation.
+    /// - `amount` (`i128`) - Amount used by this operation, in the units expected by the contract.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `MerchantPreAuth::pull_payment`.
     pub fn pull_payment(
         env: Env,
         merchant: Address,
@@ -4644,6 +6734,15 @@ impl PaymentProcessor {
     }
 
     /// Return the stored authorization for a (customer, merchant) pair.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `customer` (`Address`) - Value used by this operation.
+    /// - `merchant` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `MerchantPreAuth::get_authorization`.
     pub fn get_merchant_authorization(
         env: Env,
         customer: Address,
@@ -4653,6 +6752,15 @@ impl PaymentProcessor {
     }
 
     /// Return the remaining pull budget for the current period.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `customer` (`Address`) - Value used by this operation.
+    /// - `merchant` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `MerchantPreAuth::remaining_limit`.
     pub fn merchant_authorization_remaining(
         env: Env,
         customer: Address,
@@ -4661,6 +6769,16 @@ impl PaymentProcessor {
         MerchantPreAuth::remaining_limit(env, customer, merchant)
     }
 
+    /// Cancels Stream.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::cancel_stream`.
     pub fn cancel_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         if Self::is_blacklisted_address(&env, &sender) {
             return Err(StreamError::Unauthorized);
@@ -4668,6 +6786,16 @@ impl PaymentProcessor {
         PaymentStreaming::cancel_stream(env, sender, stream_id)
     }
 
+    /// Pauses Stream.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::pause_stream`.
     pub fn pause_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         if Self::is_blacklisted_address(&env, &sender) {
             return Err(StreamError::Unauthorized);
@@ -4675,12 +6803,32 @@ impl PaymentProcessor {
         PaymentStreaming::pause_stream(env, sender, stream_id)
     }
 
+    /// Resumes Stream.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::resume_stream`.
     pub fn resume_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         if Self::is_blacklisted_address(&env, &sender) {
             return Err(StreamError::Unauthorized);
         }
         PaymentStreaming::resume_stream(env, sender, stream_id)
     }
+    /// Cancels Multiple streams.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_ids` (`Vec<String>`) - Identifiers of the records to process.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::cancel_multiple_streams`.
     pub fn cancel_multiple_streams(
         env: Env,
         sender: Address,
@@ -4692,6 +6840,16 @@ impl PaymentProcessor {
         PaymentStreaming::cancel_multiple_streams(env, sender, stream_ids)
     }
 
+    /// Batch cancel streams.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_ids` (`Vec<String>`) - Identifiers of the records to process.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::batch_cancel_streams`.
     pub fn batch_cancel_streams(
         env: Env,
         sender: Address,
@@ -4703,6 +6861,16 @@ impl PaymentProcessor {
         PaymentStreaming::batch_cancel_streams(env, sender, stream_ids)
     }
 
+    /// Batch withdraw to.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `recipient` (`Address`) - Address receiving the payment, transfer, or stream funds.
+    /// - `withdrawals` (`Vec<WithdrawalRecipient>`) - Collection of values to return or process.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::batch_withdraw_to`.
     pub fn batch_withdraw_to(
         env: Env,
         recipient: Address,
@@ -4714,6 +6882,16 @@ impl PaymentProcessor {
         PaymentStreaming::batch_withdraw_to(env, recipient, withdrawals)
     }
 
+    /// Withdraw all for recipient.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `recipient` (`Address`) - Address receiving the payment, transfer, or stream funds.
+    /// - `max_streams` (`u32`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::withdraw_all_for_recipient`.
     pub fn withdraw_all_for_recipient(
         env: Env,
         recipient: Address,
@@ -4725,6 +6903,15 @@ impl PaymentProcessor {
         PaymentStreaming::withdraw_all_for_recipient(env, recipient, max_streams)
     }
 
+    /// Trigger withdrawal.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::trigger_withdrawal`.
     pub fn trigger_withdrawal(env: Env, stream_id: String) -> Result<String, StreamError> {
         PaymentStreaming::trigger_withdrawal(env, stream_id)
     }
@@ -4733,10 +6920,29 @@ impl PaymentProcessor {
     /// (permissionless). Delegates to `PaymentStreaming::bulk_bump_stream_ttls`;
     /// non-existent stream IDs are silently skipped and the count of bumped
     /// streams is returned.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `stream_ids` (`Vec<String>`) - Identifiers of the records to process.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::bulk_bump_stream_ttls`.
     pub fn bulk_bump_stream_ttls(env: Env, stream_ids: Vec<String>) -> Result<u32, StreamError> {
         PaymentStreaming::bulk_bump_stream_ttls(env, stream_ids)
     }
 
+    /// Sets Stream destination.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `recipient` (`Address`) - Address receiving the payment, transfer, or stream funds.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    /// - `destination` (`Address`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::set_stream_destination`.
     pub fn set_stream_destination(
         env: Env,
         recipient: Address,
@@ -4752,6 +6958,15 @@ impl PaymentProcessor {
     }
 
     /// Sender approves milestones for a stream, unlocking withdrawals.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::approve_stream_milestone`.
     pub fn approve_stream_milestone(
         env: Env,
         sender: Address,
@@ -4761,6 +6976,15 @@ impl PaymentProcessor {
     }
 
     /// Sender revokes a previous milestone approval, re-locking withdrawals.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::revoke_stream_milestone`.
     pub fn revoke_stream_milestone(
         env: Env,
         sender: Address,
@@ -4770,6 +6994,16 @@ impl PaymentProcessor {
     }
 
     /// Sender sets a floor for `decrease_rate_per_second` on this stream.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    /// - `min_rate_per_second` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::set_stream_min_rate`.
     pub fn set_stream_min_rate(
         env: Env,
         sender: Address,
@@ -4780,6 +7014,16 @@ impl PaymentProcessor {
     }
 
     /// Reduce the flow rate of an active stream, refunding surplus deposit.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    /// - `new_rate` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::decrease_rate_per_second`.
     pub fn decrease_rate_per_second(
         env: Env,
         sender: Address,
@@ -4789,6 +7033,16 @@ impl PaymentProcessor {
         PaymentStreaming::decrease_rate_per_second(env, sender, stream_id, new_rate)
     }
 
+    /// Returns sender streams.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `page` (`u32`) - Zero-based page number to return.
+    /// - `page_size` (`u32`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_sender_streams(
         env: Env,
         sender: Address,
@@ -4798,11 +7052,33 @@ impl PaymentProcessor {
         PaymentStreaming::get_sender_streams(env, sender, page, page_size)
     }
 
+    /// Returns stream.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::get_stream`.
     pub fn get_stream(env: Env, stream_id: String) -> Result<PaymentStream, StreamError> {
         PaymentStreaming::get_stream(env, stream_id)
     }
 
     /// Create a new payment stream. Tokens are pulled from `sender` into the contract.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `receiver` (`Address`) - Value used by this operation.
+    /// - `token` (`Address`) - Token address or identifier used by this operation.
+    /// - `rate_per_second` (`i128`) - Value used by this operation.
+    /// - `deposit` (`i128`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::create_stream`.
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -4829,6 +7105,81 @@ impl PaymentProcessor {
         )
     }
 
+    /// Issue #831: Create a multi-payee stream. Shares must sum to 10_000 bps;
+    /// at most 10 payees. Existing single-payee `create_stream` is unchanged.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `token` (`Address`) - Token address or identifier used by this operation.
+    /// - `deposit` (`i128`) - Value used by this operation.
+    /// - `rate_per_second` (`i128`) - Value used by this operation.
+    /// - `payees` (`Vec<crate::PayeeAllocation>`) - Collection of values to return or process.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::create_multi_stream`.
+    pub fn create_multi_stream(
+        env: Env,
+        sender: Address,
+        token: Address,
+        deposit: i128,
+        rate_per_second: i128,
+        payees: Vec<crate::PayeeAllocation>,
+    ) -> Result<String, StreamError> {
+        if Self::is_blacklisted_address(&env, &sender) {
+            return Err(StreamError::Unauthorized);
+        }
+        for i in 0..payees.len() {
+            let payee = payees.get(i).unwrap();
+            if Self::is_blacklisted_address(&env, &payee.address) {
+                return Err(StreamError::Unauthorized);
+            }
+        }
+        PaymentStreaming::create_multi_stream(env, sender, token, deposit, rate_per_second, payees)
+    }
+
+    /// Issue #831: Withdraw accrued funds from a multi-payee stream and
+    /// distribute proportionally to all payees atomically.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::withdraw_multi_stream`.
+    pub fn withdraw_multi_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
+        PaymentStreaming::withdraw_multi_stream(env, stream_id)
+    }
+
+    /// Issue #831: Read a multi-payee stream by ID.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::get_multi_stream`.
+    pub fn get_multi_stream(
+        env: Env,
+        stream_id: String,
+    ) -> Result<crate::MultiPaymentStream, StreamError> {
+        PaymentStreaming::get_multi_stream(env, stream_id)
+    }
+
+    /// Top up stream.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `caller` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    /// - `amount` (`i128`) - Amount used by this operation, in the units expected by the contract.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `StreamError::Unauthorized`.
+    /// - Propagates errors returned by `PaymentStreaming::top_up_stream`.
     pub fn top_up_stream(
         env: Env,
         caller: Address,
@@ -4841,6 +7192,16 @@ impl PaymentProcessor {
         PaymentStreaming::top_up_stream(env, caller, stream_id, amount)
     }
 
+    /// Top up multiple streams.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `top_ups` (`Vec<(String, i128)>`) - Collection of values to return or process.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::top_up_multiple_streams`.
     pub fn top_up_multiple_streams(
         env: Env,
         sender: Address,
@@ -4850,6 +7211,16 @@ impl PaymentProcessor {
     }
 
     /// Update the flow rate of an active stream (increase or decrease).
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `sender` (`Address`) - Value used by this operation.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    /// - `new_rate` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::update_stream_rate`.
     pub fn update_stream_rate(
         env: Env,
         sender: Address,
@@ -4860,26 +7231,65 @@ impl PaymentProcessor {
     }
 
     /// Close a terminal (Exhausted/Cancelled) stream and remove its storage entry.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `stream_id` (`String`) - Unique identifier of the payment stream being queried or modified.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `PaymentStreaming::close_expired_stream`.
     pub fn close_expired_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
         PaymentStreaming::close_expired_stream(env, stream_id)
     }
 
     /// Set the platform fee in basis points applied to stream withdrawals.
     /// Only the admin may call this.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `fee_bps` (`i128`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`, `Error::InvalidAmount`.
     pub fn set_stream_fee_bps(env: Env, admin: Address, fee_bps: i128) -> Result<(), Error> {
         admin.require_auth();
         if AccessControl::get_admin(&env) != Some(admin) {
             return Err(Error::AccessControlError);
         }
+        if !(0..=10_000).contains(&fee_bps) {
+            return Err(Error::InvalidAmount);
+        }
         PaymentStreaming::set_stream_fee_bps(env, fee_bps);
         Ok(())
     }
 
+    /// Returns stream fee bps.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_stream_fee_bps(env: Env) -> i128 {
         PaymentStreaming::get_stream_fee_bps(env)
     }
 
-    pub fn set_stream_fee_recipient(env: Env, admin: Address, recipient: Address) -> Result<(), Error> {
+    /// Sets Stream fee recipient.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `recipient` (`Address`) - Address receiving the payment, transfer, or stream funds.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`.
+    pub fn set_stream_fee_recipient(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), Error> {
         admin.require_auth();
         if AccessControl::get_admin(&env) != Some(admin) {
             return Err(Error::AccessControlError);
@@ -4888,6 +7298,13 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Returns stream fee recipient.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
     pub fn get_stream_fee_recipient(env: Env) -> Option<Address> {
         PaymentStreaming::get_stream_fee_recipient(env)
     }
@@ -4896,6 +7313,15 @@ impl PaymentProcessor {
     ///
     /// Issue #624: The upgrade is now queued via the timelock instead of
     /// executing immediately.  Returns the action ID of the pending action.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `new_wasm_hash` (`BytesN<32>`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
+    /// - Propagates errors returned by `Self::enqueue_timelocked_action`.
     pub fn upgrade_contract(
         env: Env,
         admin: Address,
@@ -4914,11 +7340,144 @@ impl PaymentProcessor {
         )
     }
 
+    // ── Issue #846: Explicit propose / execute / cancel WASM upgrade path ─────
+
+    /// Propose a WASM upgrade. Stores `new_wasm_hash` and
+    /// `earliest_execute = current_ledger + UPGRADE_TIMELOCK_LEDGERS`.
+    /// Emits `UPGRADE/PROPOSED`.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `new_wasm_hash` (`BytesN<32>`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let earliest_execute = env
+            .ledger()
+            .sequence()
+            .saturating_add(UPGRADE_TIMELOCK_LEDGERS);
+        let proposal = WasmUpgradeProposal {
+            new_wasm_hash: new_wasm_hash.clone(),
+            earliest_execute,
+            proposed_by: admin,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingWasmUpgrade, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "UPGRADE"), Symbol::new(&env, "PROPOSED")),
+            (new_wasm_hash, earliest_execute),
+        );
+        Ok(())
+    }
+
+    /// Execute a pending upgrade after the timelock. Reverts with
+    /// `TimelockNotExpired` if called before `earliest_execute`. Verifies the
+    /// stored hash is applied via `update_current_contract_wasm`. Emits
+    /// `UPGRADE/EXECUTED`.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentNotFound`, `Error::TimelockNotExpired`, `Error::Unauthorized`.
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let proposal: WasmUpgradeProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWasmUpgrade)
+            .ok_or(Error::PaymentNotFound)?;
+
+        if env.ledger().sequence() < proposal.earliest_execute {
+            return Err(Error::TimelockNotExpired);
+        }
+
+        let stored_hash = proposal.new_wasm_hash.clone();
+        // Hash verification: apply exactly the hash stored at propose time.
+        let old_version = Self::version(env.clone());
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingWasmUpgrade);
+        Self::set_version(env.clone(), admin, new_version.clone())?;
+
+        env.events().publish(
+            (Symbol::new(&env, "UPGRADE"), Symbol::new(&env, "EXECUTED")),
+            (stored_hash.clone(), old_version, new_version),
+        );
+
+        env.deployer().update_current_contract_wasm(stored_hash);
+        Ok(())
+    }
+
+    /// Cancel a pending upgrade proposal before it is executed.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentNotFound`, `Error::Unauthorized`.
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if !env.storage().persistent().has(&DataKey::PendingWasmUpgrade) {
+            return Err(Error::PaymentNotFound);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingWasmUpgrade);
+        env.events().publish(
+            (Symbol::new(&env, "UPGRADE"), Symbol::new(&env, "CANCELLED")),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// Return the pending WASM upgrade proposal, if any.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
+    pub fn get_pending_upgrade(env: Env) -> Option<WasmUpgradeProposal> {
+        env.storage().persistent().get(&DataKey::PendingWasmUpgrade)
+    }
+
     // ── Issue #624: Timelock management functions ─────────────────────────────
 
     /// Set the timelock delay applied to critical admin operations.
     ///
     /// Default is 48 hours.  Only the admin may call this.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `secs` (`u64`) - Duration in seconds for the configured interval.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_timelock_delay(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
         admin.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
@@ -4931,6 +7490,12 @@ impl PaymentProcessor {
     }
 
     /// Return the current timelock delay in seconds.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_timelock_delay(env: Env) -> u64 {
         env.storage()
             .persistent()
@@ -4942,6 +7507,12 @@ impl PaymentProcessor {
     ///
     /// Any actor may call this to inspect queued operations and their
     /// `execute_after` timestamps.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_pending_admin_actions(env: Env) -> Vec<PendingTimelockAction> {
         let counter: u64 = env
             .storage()
@@ -4967,6 +7538,14 @@ impl PaymentProcessor {
     ///
     /// Reverts with `TimelockNotExpired` if called before `execute_after`.
     /// Only the admin may execute.  Removes the action from the queue on success.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `action_id` (`String`) - Identifier used to select the target record.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentNotFound`, `Error::TimelockNotExpired`, `Error::Unauthorized`.
     pub fn execute_timelocked_action(
         env: Env,
         admin: Address,
@@ -5013,9 +7592,7 @@ impl PaymentProcessor {
 
                 let new_version_str = bump_version_string(&env, &old_version);
                 env.deployer().update_current_contract_wasm(new_wasm_hash);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::ContractVersion, &new_version_str);
+                Self::set_version(env.clone(), admin.clone(), new_version_str.clone())?;
 
                 env.events().publish(
                     (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
@@ -5041,7 +7618,7 @@ impl PaymentProcessor {
     }
 
     /// Internal helper: assign an action ID, persist the pending action, and emit an event.
-    fn enqueue_timelocked_action(
+    pub(crate) fn enqueue_timelocked_action(
         env: &Env,
         proposed_by: Address,
         kind: TimelockActionKind,
@@ -5091,6 +7668,15 @@ impl PaymentProcessor {
 
     /// Configure the multi-sig threshold and signer set.
     /// Only the current admin may call this.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `threshold` (`u32`) - Value used by this operation.
+    /// - `signers` (`Vec<Address>`) - Collection of values to return or process.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`.
     pub fn set_multisig_config(
         env: Env,
         admin: Address,
@@ -5102,6 +7688,12 @@ impl PaymentProcessor {
     }
 
     /// Returns the current multi-sig (threshold, signers) configuration.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_multisig_config(env: Env) -> (u32, Vec<Address>) {
         AccessControl::get_multisig_config(&env)
     }
@@ -5109,6 +7701,14 @@ impl PaymentProcessor {
     /// Create a new admin proposal for a contract parameter change.
     /// The calling signer must be in the multisig signer set.
     /// Returns the proposal nonce.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `signer` (`Address`) - Value used by this operation.
+    /// - `action` (`AdminAction`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`.
     pub fn create_proposal(env: Env, signer: Address, action: AdminAction) -> Result<u64, Error> {
         AccessControl::create_proposal(&env, signer, action).map_err(|_| Error::AccessControlError)
     }
@@ -5116,6 +7716,14 @@ impl PaymentProcessor {
     /// Vote to approve an existing proposal.
     /// The calling signer must be in the multisig signer set and must not have
     /// already voted on this proposal.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `signer` (`Address`) - Value used by this operation.
+    /// - `nonce` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`.
     pub fn vote_proposal(env: Env, signer: Address, nonce: u64) -> Result<(), Error> {
         AccessControl::vote_proposal(&env, signer, nonce).map_err(|_| Error::AccessControlError)
     }
@@ -5126,6 +7734,15 @@ impl PaymentProcessor {
     /// * For parameter-change actions (`SetDisputeBond`, `SetVolumeCap`,
     ///   `SetRefundFeeBps`, `SetRateLimit`) the new value is written to
     ///   persistent storage and a `ADMIN/PROPOSAL_EXECUTED` event is emitted.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `executor` (`Address`) - Value used by this operation.
+    /// - `nonce` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::AccessControlError`, `Error::InvalidAmount`, `Error::Unauthorized`.
+    /// - Propagates errors from fallible operations marked with `?`.
     pub fn execute_proposal(env: Env, executor: Address, nonce: u64) -> Result<(), Error> {
         executor.require_auth();
         if !AccessControl::has_role(&env, &role_admin(&env), &executor) {
@@ -5208,12 +7825,25 @@ impl PaymentProcessor {
     }
 
     /// Retrieve a pending proposal by nonce.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `nonce` (`u64`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
     pub fn get_proposal(env: Env, nonce: u64) -> Option<AdminProposal> {
         AccessControl::get_proposal(&env, nonce)
     }
 
     /// Read the effective dispute bond amount (configurable via multi-sig proposal).
     /// Falls back to the compile-time constant if not set via proposal.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_dispute_bond_amount(env: Env) -> i128 {
         env.storage()
             .persistent()
@@ -5223,6 +7853,13 @@ impl PaymentProcessor {
 
     /// Read the effective monthly volume cap for a KYC tier.
     /// Falls back to compile-time constants if not overridden by a proposal.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `tier` (`KycTier`) - Merchant or policy tier whose configuration is selected.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_tier_volume_cap(env: Env, tier: KycTier) -> i128 {
         if let Some(cap) = env
             .storage()
@@ -5241,6 +7878,12 @@ impl PaymentProcessor {
 
     /// Read the effective refund fee in basis points from instance storage.
     /// Falls back to the compile-time default (100 bps) if not yet configured.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - No errors are returned.
     pub fn get_refund_fee_bps(env: Env) -> i128 {
         Self::get_refund_fee_bps_internal(&env)
     }
@@ -5254,6 +7897,14 @@ impl PaymentProcessor {
 
     /// Set the refund cooldown period in seconds (overrides REFUND_COOLDOWN_SECS constant).
     /// Admin-only operation.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `secs` (`u64`) - Duration in seconds for the configured interval.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn set_refund_cooldown(env: Env, admin: Address, secs: u64) -> Result<(), Error> {
         admin.require_auth();
 
@@ -5270,7 +7921,7 @@ impl PaymentProcessor {
     /// Read the effective refund cooldown period in seconds.
     /// Falls back to the compile-time constant if not overridden by admin.
     #[allow(dead_code)]
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+    pub(crate) fn get_refund_cooldown_secs(env: &Env) -> u64 {
         env.storage()
             .persistent()
             .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
@@ -5280,6 +7931,13 @@ impl PaymentProcessor {
     /// Migration function: recompute all merchant payment counts from payment vector.
     /// Scans all merchants and rebuilds the persistent payment count index.
     /// Admin-only operation. Use this after upgrading from older contract versions.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
     pub fn recompute_merchant_payment_count(env: Env, admin: Address) -> Result<u64, Error> {
         admin.require_auth();
 
@@ -5299,6 +7957,57 @@ impl PaymentProcessor {
         Ok(merchants_processed)
     }
 
+    /// Sets Payment link manager.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `plm_address` (`Address`) - Address used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
+    pub fn set_payment_link_manager(
+        env: Env,
+        admin: Address,
+        plm_address: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::PaymentLinkManagerAddress, &plm_address);
+        Ok(())
+    }
+
+    /// Returns payment link manager.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    ///
+    /// # Errors
+    /// - Returns `None` when the requested value is absent.
+    pub fn get_payment_link_manager(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PaymentLinkManagerAddress)
+    }
+
+    /// Creates Invoice.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `customer_email` (`String`) - Value used by this operation.
+    /// - `line_items` (`Vec<LineItem>`) - Collection of values to return or process.
+    /// - `total_amount` (`i128`) - Value used by this operation.
+    /// - `currency` (`Symbol`) - Currency symbol identifying the payment or settlement currency.
+    /// - `due_date` (`u64`) - Value used by this operation.
+    /// - `payment_link_id` (`Option<String>`) - Identifier used to select the target record.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::InvalidPaymentLink`.
     pub fn create_invoice(
         env: Env,
         merchant_id: Address,
@@ -5307,11 +8016,31 @@ impl PaymentProcessor {
         total_amount: i128,
         currency: Symbol,
         due_date: u64,
+        payment_link_id: Option<String>,
     ) -> Result<String, Error> {
         merchant_id.require_auth();
 
         if total_amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+
+        if let Some(ref link_id) = payment_link_id {
+            if let Some(plm_address) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::PaymentLinkManagerAddress)
+            {
+                let plm_client =
+                    crate::payment_link::PaymentLinkManagerClient::new(&env, &plm_address);
+                match plm_client.try_get_link(link_id) {
+                    Ok(Ok(link)) => {
+                        if link.merchant_id != merchant_id {
+                            return Err(Error::InvalidPaymentLink);
+                        }
+                    }
+                    _ => return Err(Error::InvalidPaymentLink),
+                }
+            }
         }
 
         let invoice_id = Self::get_next_invoice_id(&env);
@@ -5326,8 +8055,10 @@ impl PaymentProcessor {
             currency,
             due_date,
             status: InvoiceStatus::Created,
-            payment_link_id: None,
+            payment_link_id,
             created_at: now,
+            paid_at: None,
+            voided_at: None,
         };
 
         env.storage()
@@ -5357,6 +8088,20 @@ impl PaymentProcessor {
     /// call returns an error and the invoice is never persisted; if any later
     /// step fails the whole transaction reverts, so the two records are always
     /// created together or not at all.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `link_manager` (`Address`) - Value used by this operation.
+    /// - `customer_email` (`String`) - Value used by this operation.
+    /// - `line_items` (`Vec<LineItem>`) - Collection of values to return or process.
+    /// - `total_amount` (`i128`) - Value used by this operation.
+    /// - `currency` (`Symbol`) - Currency symbol identifying the payment or settlement currency.
+    /// - `due_date` (`u64`) - Value used by this operation.
+    /// - `link_args` (`CreateLinkArgs`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidAmount`, `Error::InvalidPaymentId`, `Error::PaymentNotFound`.
     pub fn create_payment_link_invoice(
         env: Env,
         merchant_id: Address,
@@ -5412,6 +8157,8 @@ impl PaymentProcessor {
             status: InvoiceStatus::Created,
             payment_link_id: Some(link_id.clone()),
             created_at: now,
+            paid_at: None,
+            voided_at: None,
         };
 
         env.storage()
@@ -5440,6 +8187,14 @@ impl PaymentProcessor {
         Ok((invoice, payment_link))
     }
 
+    /// Mark invoice paid.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `invoice_id` (`String`) - Unique identifier of the invoice being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`.
     pub fn mark_invoice_paid(env: Env, invoice_id: String) -> Result<(), Error> {
         let mut invoice: Invoice = env
             .storage()
@@ -5447,11 +8202,19 @@ impl PaymentProcessor {
             .get(&DataKey::Invoice(invoice_id.clone()))
             .ok_or(Error::PaymentNotFound)?;
 
-        if invoice.status != InvoiceStatus::Created {
+        // Idempotent: marking an already-paid invoice is a no-op (issue: invoice lifecycle tests).
+        if invoice.status == InvoiceStatus::Paid {
+            return Ok(());
+        }
+
+        // Accept both Created (Pending) and Overdue — late payment still accepted (#1067).
+        if matches!(invoice.status, InvoiceStatus::Voided) {
             return Err(Error::PaymentAlreadyProcessed);
         }
 
+        let now = env.ledger().timestamp();
         invoice.status = InvoiceStatus::Paid;
+        invoice.paid_at = Some(now);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
@@ -5464,6 +8227,14 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Returns invoice.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `invoice_id` (`String`) - Unique identifier of the invoice being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentNotFound`.
     pub fn get_invoice(env: Env, invoice_id: String) -> Result<Invoice, Error> {
         env.storage()
             .persistent()
@@ -5471,6 +8242,14 @@ impl PaymentProcessor {
             .ok_or(Error::PaymentNotFound)
     }
 
+    /// Returns merchant invoices.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
     pub fn get_merchant_invoices(env: Env, merchant_id: Address) -> Vec<String> {
         let internal = Self::get_merchant_invoices_internal(&env, &merchant_id);
         let mut result = vec![&env];
@@ -5499,6 +8278,413 @@ impl PaymentProcessor {
             .persistent()
             .get::<DataKey, Vec<String>>(&DataKey::MerchantInvoices(merchant_id.clone()))
             .unwrap_or_else(|| Vec::new(env))
+    }
+
+    // ------------------------------------------------------------------ #1067
+
+    /// Issue #1067: Void an invoice (merchant only). Transitions Pending
+    /// (`Created`) or Overdue to Voided. A Voided invoice is a soft-delete —
+    /// the row is kept but status changes to `InvoiceStatus::Voided` and
+    /// `voided_at` is stamped. This is the contract-side action that backs the
+    /// `DELETE /v1/invoices/{id}` REST endpoint.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `merchant_id` (`Address`) - Merchant address whose payment, configuration, or records are affected.
+    /// - `invoice_id` (`String`) - Unique identifier of the invoice being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`, `Error::Unauthorized`.
+    pub fn void_invoice(env: Env, merchant_id: Address, invoice_id: String) -> Result<(), Error> {
+        merchant_id.require_auth();
+
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id.clone()))
+            .ok_or(Error::PaymentNotFound)?;
+
+        if invoice.merchant_id != merchant_id {
+            return Err(Error::Unauthorized);
+        }
+
+        match invoice.status {
+            InvoiceStatus::Voided => return Ok(()), // idempotent
+            InvoiceStatus::Paid => return Err(Error::PaymentAlreadyProcessed),
+            _ => {}
+        }
+
+        let now = env.ledger().timestamp();
+        invoice.status = InvoiceStatus::Voided;
+        invoice.voided_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
+
+        env.events().publish(
+            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "VOIDED")),
+            (invoice_id, merchant_id, now),
+        );
+
+        Ok(())
+    }
+
+    /// Issue #1067: Mark an overdue invoice as Overdue. The daemon calls this
+    /// when `now > invoice.due_date` and status is still `Created` (Pending).
+    /// Anyone may call this; the contract enforces the time guard.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `invoice_id` (`String`) - Unique identifier of the invoice being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::InvalidExpiry`, `Error::PaymentNotFound`.
+    pub fn mark_invoice_overdue(env: Env, invoice_id: String) -> Result<(), Error> {
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id.clone()))
+            .ok_or(Error::PaymentNotFound)?;
+
+        // Only Created (Pending) invoices can become Overdue.
+        if invoice.status != InvoiceStatus::Created {
+            return Ok(()); // idempotent for Overdue; no-op for Paid/Voided
+        }
+
+        let now = env.ledger().timestamp();
+        if now <= invoice.due_date {
+            return Err(Error::InvalidExpiry);
+        }
+
+        invoice.status = InvoiceStatus::Overdue;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
+
+        env.events().publish(
+            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "OVERDUE")),
+            (invoice_id, invoice.merchant_id, now),
+        );
+
+        Ok(())
+    }
+
+    /// Issue #1067: Upgraded mark_invoice_paid that also stamps `paid_at` and
+    /// accepts both `Created` (Pending) and `Overdue` statuses (late payment).
+    /// Replaces the old `mark_invoice_paid` entry point; old callers continue
+    /// to work because the signature is unchanged.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `invoice_id` (`String`) - Unique identifier of the invoice being queried or modified.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::PaymentAlreadyProcessed`, `Error::PaymentNotFound`.
+    pub fn mark_invoice_paid_v2(env: Env, invoice_id: String) -> Result<(), Error> {
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id.clone()))
+            .ok_or(Error::PaymentNotFound)?;
+
+        if invoice.status == InvoiceStatus::Paid {
+            return Ok(()); // idempotent
+        }
+
+        if matches!(invoice.status, InvoiceStatus::Voided) {
+            return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        let now = env.ledger().timestamp();
+        invoice.status = InvoiceStatus::Paid;
+        invoice.paid_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id.clone()), &invoice);
+
+        env.events().publish(
+            (Symbol::new(&env, "INVOICE"), Symbol::new(&env, "PAID")),
+            (invoice_id, invoice.merchant_id, now),
+        );
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ #1065
+
+    /// Issue #1065: Verify that `preimage` hashes (SHA-256) to the
+    /// `metadata_hash` stored on the payment identified by `payment_id`.
+    ///
+    /// Returns `true`  when `sha256(preimage) == payment.metadata_hash`.
+    /// Returns `false` when the hashes do not match, or when the payment has
+    /// no `metadata_hash` stored (the merchant did not bind one at creation).
+    /// Returns `Error::PaymentNotFound` when the payment does not exist.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `payment_id` (`String`) - Unique identifier of the payment being created, queried, or modified.
+    /// - `preimage` (`soroban_sdk::Bytes`) - Value used by this operation.
+    ///
+    /// # Errors
+    /// - No error variants are constructed directly in this function.
+    /// - Propagates errors returned by `Self::get_payment_internal`.
+    pub fn verify_metadata_hash(
+        env: Env,
+        payment_id: String,
+        preimage: soroban_sdk::Bytes,
+    ) -> Result<bool, Error> {
+        let payment = Self::get_payment_internal(&env, &payment_id)?;
+
+        let stored_hash = match payment.metadata_hash {
+            Some(h) => h,
+            None => return Ok(false),
+        };
+
+        let computed: BytesN<32> = env.crypto().sha256(&preimage).to_bytes();
+        Ok(computed == stored_hash)
+    }
+
+    /// Issue #1065: Look up a payment ID by its `metadata_hash` (reverse index).
+    ///
+    /// Merchants store `sha256(order_id || customer_id)` at payment creation
+    /// time; this entry point lets them find the on-chain payment for a given
+    /// off-chain order without scanning all payment records.
+    ///
+    /// Returns `Some(payment_id)` if the hash is indexed, `None` otherwise.
+    /// NOTE: use the existing `get_payment_by_metadata_hash` entry point.
+
+    // ------------------------------------------------------------------ #1066
+
+    /// Issue #1066: Append a `FeeRecord` to `DataKey::FeeCollectionHistory`
+    /// (ring buffer, newest first, capped at `FEE_COLLECTION_HISTORY_CAP`).
+    ///
+    /// Called from `settle_payment` and `process_refund` whenever a non-zero
+    /// fee is collected. The ring-buffer drop ensures storage stays bounded.
+    pub(crate) fn append_fee_record(
+        env: &Env,
+        payment_id: &String,
+        fee_amount: i128,
+        token: Address,
+    ) {
+        if fee_amount <= 0 {
+            return;
+        }
+        let now = env.ledger().timestamp();
+        let record = FeeRecord {
+            payment_id: payment_id.clone(),
+            fee_amount,
+            token,
+            collected_at: now,
+        };
+
+        let mut history: Vec<FeeRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeCollectionHistory)
+            .unwrap_or_else(|| vec![env]);
+
+        // Prepend newest entry.
+        let mut updated: Vec<FeeRecord> = vec![env];
+        updated.push_back(record);
+        for r in history.iter() {
+            updated.push_back(r);
+        }
+
+        // Ring-buffer: drop oldest entries beyond cap.
+        while updated.len() > FEE_COLLECTION_HISTORY_CAP {
+            updated.pop_back();
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeCollectionHistory, &updated);
+        Self::bump_ttl(env, &DataKey::FeeCollectionHistory, LONG_LIVE_TTL);
+    }
+
+    /// Issue #1066: Return a paginated slice of the fee collection history
+    /// (newest first), capped at `FEE_COLLECTION_HISTORY_CAP` total entries.
+    ///
+    /// `offset` skips the first N records; `limit` is silently capped at 200
+    /// per call to bound ledger read cost.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `offset` (`u32`) - Zero-based position from which to return records.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
+    pub fn get_fee_collection_history(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<FeeRecord> {
+        const MAX_PAGE: u32 = 200;
+        let effective_limit = limit.min(MAX_PAGE);
+
+        let history: Vec<FeeRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeCollectionHistory)
+            .unwrap_or_else(|| vec![&env]);
+
+        let total = history.len();
+        if offset >= total || effective_limit == 0 {
+            return vec![&env];
+        }
+
+        let end = (offset + effective_limit).min(total);
+        let mut page: Vec<FeeRecord> = vec![&env];
+        let mut idx = offset;
+        while idx < end {
+            if let Some(r) = history.get(idx) {
+                page.push_back(r);
+            }
+            idx += 1;
+        }
+        page
+    }
+
+    /// Issue #1066: Admin-only endpoint that returns the lifetime total fees
+    /// collected in a given `token`. Iterates the full history, so it is
+    /// intended for infrequent reporting calls, not hot-path usage.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `admin` (`Address`) - Administrator address authorizing or configuring this operation.
+    /// - `token` (`Address`) - Token address or identifier used by this operation.
+    ///
+    /// # Errors
+    /// - Returns these variants directly: `Error::Unauthorized`.
+    pub fn get_total_fees_collected(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<i128, Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let history: Vec<FeeRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeCollectionHistory)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut total: i128 = 0;
+        for record in history.iter() {
+            if record.token == token {
+                total = total.saturating_add(record.fee_amount);
+            }
+        }
+        Ok(total)
+    }
+
+    // ------------------------------------------------------------------ #1064
+
+    /// Issue #1064: Return the top merchants sorted by composite score
+    /// (cumulative gross volume) descending, enriched with KYC tier and
+    /// confirmed-payment count. Suspended merchants are excluded.
+    ///
+    /// `limit` is silently capped at `TOP_MERCHANTS_MAX_LIMIT` (100); a
+    /// value of 0 is treated as the cap.
+    ///
+    /// # Parameters
+    /// - `env` (`Env`) - Soroban execution context used for contract storage, ledger, and address operations.
+    /// - `limit` (`u32`) - Maximum number of records or items to return or process.
+    ///
+    /// # Errors
+    /// - Returns an empty collection when there are no matching entries.
+    pub fn get_top_merchants_v2(env: Env, limit: u32) -> Vec<MerchantRankEntry> {
+        use crate::merchant_registry::{KycTier, MerchantRegistryClient};
+
+        let capped_limit = if limit == 0 {
+            TOP_MERCHANTS_MAX_LIMIT
+        } else {
+            limit.min(TOP_MERCHANTS_MAX_LIMIT)
+        };
+
+        let merchant_registry_addr: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantRegistryAddress);
+
+        let tracked: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrackedMerchants)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut entries: Vec<MerchantRankEntry> = vec![&env];
+
+        for merchant_id in tracked.iter() {
+            let volume: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::MerchantGrossVolume(merchant_id.clone()))
+                .unwrap_or(0i128);
+
+            let payment_count: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::MerchantPaymentCount(merchant_id.clone()))
+                .unwrap_or(0u64);
+
+            // Fetch KYC tier from MerchantRegistry if available; default to Unverified.
+            let kyc_tier = if let Some(ref reg_addr) = merchant_registry_addr {
+                let reg = MerchantRegistryClient::new(&env, reg_addr);
+                match reg.try_get_merchant(&merchant_id) {
+                    Ok(Ok(m)) => {
+                        // Skip suspended merchants.
+                        if !m.active {
+                            continue;
+                        }
+                        m.kyc_tier
+                    }
+                    _ => KycTier::Unverified,
+                }
+            } else {
+                KycTier::Unverified
+            };
+
+            entries.push_back(MerchantRankEntry {
+                merchant_id,
+                score: volume,
+                kyc_tier,
+                confirmed_payment_count: payment_count,
+                cumulative_volume: volume,
+            });
+        }
+
+        // Selection sort by score descending.
+        let mut i = 0u32;
+        while i < entries.len() {
+            let mut j = i + 1;
+            while j < entries.len() {
+                if let (Some(a), Some(b)) = (entries.get(i), entries.get(j)) {
+                    if b.score > a.score {
+                        entries.set(i, b.clone());
+                        entries.set(j, a.clone());
+                    }
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+
+        let end = capped_limit.min(entries.len());
+        let mut result: Vec<MerchantRankEntry> = vec![&env];
+        let mut idx = 0u32;
+        while idx < end {
+            if let Some(entry) = entries.get(idx) {
+                result.push_back(entry);
+            }
+            idx += 1;
+        }
+        result
     }
 }
 

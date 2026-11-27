@@ -95,6 +95,43 @@ field. Update TypeScript types that narrow `PaymentCharge` with an object
 literal type (rather than importing the SDK's `PaymentCharge` interface) to
 include `payment_link_id?: string`.
 
+### `FluxapayClient` gained automatic SEP-10 JWT refresh
+
+`FluxapayClient` now accepts an optional `refreshCredentials` callback and
+will transparently renew an expiring SEP-10 JWT before it is used, instead
+of failing with `401 Unauthorized` once the token expires (issue #793).
+
+**Before (v0.x):** long-running processes had to re-authenticate manually
+whenever the SEP-10 JWT expired (typically after 24 h):
+
+```typescript
+// Token expired → every call throws 401 and you must re-run SEP-10.
+const client = new FluxapayClient({ token: sep10Jwt });
+```
+
+**After (v1.0):** pass a `refreshCredentials` callback that returns a fresh
+JWT. The SDK calls it automatically when the current token is within
+`refreshThresholdMs` (default 5 minutes) of expiry, and queues concurrent
+requests so only one refresh runs at a time:
+
+```typescript
+const client = new FluxapayClient({
+  token: sep10Jwt,
+  // Called automatically when the token is close to expiring.
+  refreshCredentials: async () => {
+    const { token } = await sep10.authenticate(account);
+    return token;
+  },
+  // Optional: override the default 5-minute refresh window.
+  refreshThresholdMs: 5 * 60 * 1000,
+});
+```
+
+This is additive: omit `refreshCredentials` and behavior is identical to
+v0.x (the SDK will not attempt to refresh, and an expired token still
+surfaces as `401`). If `refreshCredentials` throws, the original `401` is
+surfaced to the caller.
+
 ## v1.x → v2.0 (planned)
 
 > These changes are not yet released. This section documents the intended
@@ -174,6 +211,7 @@ Before deploying a version bump, re-run this matrix against testnet:
 | --- | --- |
 | Payment creation | `createPayment` with and without the new optional fields (`metadata`, `feeWaiverCode`) |
 | Payment link payments | `useLink` → `getPayment` round-trip; assert `payment_link_id` matches the link used, and is `undefined` for a payment created via `createPayment` |
+| SEP-10 token refresh | Construct a client with `refreshCredentials` and a token near expiry; assert the callback fires once and concurrent calls share a single refresh |
 | Error handling | Trigger at least one known contract error (e.g. duplicate `paymentId`) and assert it surfaces as `FluxapayError` with the expected `contractErrorName` |
 | Fee configuration | Read back `FeeConfig` / `MaybeFeeConfig` for a merchant and assert your code handles both `None` and `Some` variants |
 | Type-level check | `tsc --noEmit` against your integration code with the new SDK version installed, to catch any narrowed/duplicated local type definitions that fell out of sync |

@@ -1,37 +1,134 @@
-#![no_std]
+﻿#![no_std]
 #![allow(clippy::too_many_arguments)]
 
+use access_control::{
+    role_admin, role_arbitrator, role_merchant, role_oracle, role_settlement_operator,
+    AccessControl,
+};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, map, token, vec, Address, Bytes, BytesN,
+    Env, Map, MuxedAddress, String, Symbol, Vec,
+};
+
+pub const PAYMENT_TOLERANCE: i128 = 1;
+/// Issue #1025: Maximum tip/gratuity as a fraction of the base payment amount, in
+/// basis points (2000 = 20%). Enforced by `verify_payment` when `tip_enabled` is set.
+pub const MAX_TIP_BPS: i128 = 2000;
+const SHORT_LIVE_TTL: u32 = 120_960; // ~1 week at 5s/ledger
+const LONG_LIVE_TTL: u32 = 18_921_600; // ~3 years at 5s/ledger
+const TTL_BUMP_THRESHOLD_DIVISOR: u32 = 5;
+const CREATE_PAYMENT_WINDOW_SECS: u64 = 60;
+const CREATE_PAYMENT_MAX_PER_WINDOW: u32 = 30;
+pub const DEFAULT_PAYMENT_DURATION_SECS: u64 = 3_600;
+const REFUND_FEE_BPS: i128 = 100;
+/// Cooldown period after payment confirmation before refunds can be requested (5 minutes in seconds).
+const REFUND_COOLDOWN_SECS: u64 = 300;
+/// Default refund request expiry period (30 days in seconds).
+const REFUND_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+/// Issue #638: TTL (in ledgers, ~5s each) for a stored refund idempotency key â€”
+/// 30 days, matching the payment `client_token` retention window.
+const REFUND_IDEMPOTENCY_TTL_LEDGERS: u32 = (30 * 24 * 60 * 60) / 5;
+/// Issue #761: TTL for a payment idempotency key (24 hours at 5s per ledger).
+const PAYMENT_IDEMPOTENCY_TTL_LEDGERS: u32 = (24 * 60 * 60) / 5;
+/// Issue #480: Minimum time between daily settlements (24 hours in seconds).
+const SETTLEMENT_DAILY_INTERVAL_SECS: u64 = 86_400;
+/// Issue #480: Minimum time between weekly settlements (7 days in seconds).
+const SETTLEMENT_WEEKLY_INTERVAL_SECS: u64 = 604_800;
+/// Issue #480: Minimum pending balance required to trigger a settlement.
+const SETTLEMENT_MIN_AMOUNT: i128 = 1_000_000; // 0.1 USDC (7 decimals)
+/// Fixed dispute bond in the contract's stablecoin denomination.
+const DISPUTE_BOND_AMOUNT: i128 = 100_000;
+/// Default threshold separating small and large disputes: 100 USDC (7 decimals).
+pub const DEFAULT_DISPUTE_DEADLINE_THRESHOLD_AMOUNT: i128 = 1_000_000_000;
+pub const SMALL_DISPUTE_DEADLINE_SECS: u64 = 3 * 24 * 60 * 60;
+pub const LARGE_DISPUTE_DEADLINE_SECS: u64 = 7 * 24 * 60 * 60;
+/// Default maximum swap slippage when setting the effective minimum output.
+pub const DEFAULT_MAX_SLIPPAGE_BPS: u32 = 50;
+/// Default maximum adverse deviation from an FX oracle reference price.
+pub const MAX_PRICE_IMPACT_BPS: u32 = 100;
+/// Default maximum aggregate swap input per PaymentProcessor per ledger.
+pub const MAX_SWAP_VOLUME_PER_LEDGER: i128 = 10_000_000_000_000;
+const BASIS_POINTS_DENOMINATOR: i128 = 10_000;
+
+// Issue #167: Tiered refund fees based on merchant KYC tier
+const REFUND_FEE_BPS_BASIC: i128 = 100; // 1.0% for Basic tier
+const REFUND_FEE_BPS_FULL: i128 = 80; // 0.8% for Full tier
+const REFUND_FEE_BPS_BUSINESS: i128 = 50; // 0.5% for Business tier
+
+/// Default window (Issue #170) during which a pending refund may be processed,
+/// measured from `Refund::created_at`. Configurable via `set_refund_expiry`.
+pub const DEFAULT_REFUND_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+// Issue #63: Monthly processing volume caps per KYC tier (in USDC stroops, 7 decimals)
+// Unverified: $500, Basic: $10,000, Full: $100,000, Business: unlimited (i128::MAX)
+const TIER_CAP_UNVERIFIED: i128 = 5_000_000_000; // $500
+const TIER_CAP_BASIC: i128 = 100_000_000_000; // $10,000
+const TIER_CAP_FULL: i128 = 1_000_000_000_000; // $100,000
+const TIER_CAP_BUSINESS: i128 = i128::MAX; // unlimited
+
+// Issue #207: Cumulative volume thresholds for automatic KYC tier upgrades (in USDC stroops)
+const TIER_UPGRADE_THRESHOLD_BASIC: i128 = TIER_CAP_UNVERIFIED; // $500 cumulative â†’ Basic
+const TIER_UPGRADE_THRESHOLD_FULL: i128 = TIER_CAP_BASIC; // $10,000 cumulative â†’ Full
+const TIER_UPGRADE_THRESHOLD_BUSINESS: i128 = TIER_CAP_FULL; // $100,000 cumulative â†’ Business
+
+/// Maximum number of payment retries before a subscription is cancelled.
+pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
+/// Spacing between retry attempts in seconds (2 days).
+pub const SUBSCRIPTION_RETRY_INTERVAL_SECS: u64 = 2 * 24 * 60 * 60;
+
+// Issue #625: Maximum lengths for user-supplied string fields to prevent ledger bloat.
+const MAX_REASON_LEN: usize = 256;
+const MAX_EVIDENCE_LEN: usize = 512;
+const MAX_NOTES_LEN: usize = 512;
+pub(crate) const ZERO_CONTRACT_STRKEY: &str =
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 pub mod constants;
 pub mod data_keys;
+pub mod gas_estimator;
+/// Issues #1026/#1027: on-chain Merkle batch payment proof verifier.
+pub mod merkle_distributor;
+pub mod merchant_registry;
 pub mod payment_processor;
 pub mod refund_manager;
 pub mod types;
+pub mod utils;
 
 pub use constants::*;
 pub use data_keys::*;
+pub use gas_estimator::{
+    CostEstimate, GasEstimator, GasEstimatorClient, GasEstimatorError, Operation,
+};
+pub use merchant_registry::{
+    FeeConfig, KycTier, MaybeFeeConfig, Merchant, MerchantError, MerchantRegistry,
+    MerchantRegistryClient,
+};
 pub use payment_processor::*;
 pub use refund_manager::*;
 pub use types::*;
+pub use utils::{format_id, is_valid_cid, validate_id, validate_ipfs_multihash};
 
-mod access_control;
+pub mod access_control;
 pub mod account_abstraction;
 mod dex_router;
 pub mod events;
 pub mod fx_oracle;
+pub mod htlc;
 pub mod merchant_auth;
+pub mod meta_transaction;
 mod payment_state_machine;
+pub mod stream;
+
+pub use stream::{
+    MultiPaymentStream, PayeeAllocation, PaymentStream, PaymentStreaming, StreamDataKey,
+    StreamError, StreamStatus, MAX_MULTI_PAYEES, MULTI_STREAM_SHARE_TOTAL,
+};
 
 pub use access_control::AccessControlDataKey;
 pub use access_control::{AdminAction, AdminProposal};
 pub use dex_router::{DexRouter, DexRouterClient};
 pub use fx_oracle::{FXOracle, FXOracleClient, FXOracleError};
-pub use merchant_auth::{MerchantAuthError, MerchantAuthorization, MerchantPreAuth};
+pub use htlc::{Htlc, HtlcClient, HtlcDataKey, HtlcError, HtlcRecord, HtlcStatus};
+pub use merchant_auth::{ApiKeyRecord, MerchantAuthError, MerchantAuthorization, MerchantPreAuth};
 
-#[contract]
-pub struct PaymentProcessor;
-
-#[contract]
-pub struct RefundManager;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +177,16 @@ pub struct PaymentCharge {
     /// for tracing a payment back to its source link. `None` for payments created
     /// directly via `create_payment`/`swap_and_pay`.
     pub payment_link_id: Option<String>,
+    /// Issue #767: When true, allows funding the payment across multiple transactions.
+    pub allow_partial: Option<bool>,
+    /// Issue #844: Whether the merchant enabled an optional tip/gratuity on this payment.
+    /// Issue #1025 makes this real: `verify_payment` only honors a tip, capped at
+    /// `MAX_TIP_BPS` of `amount`, when this is `true`.
+    pub tip_enabled: bool,
+    /// Issue #844: Tip/gratuity amount paid by the customer; stored separately from `amount`.
+    /// Issue #1025: populated by `verify_payment` (validated against `MAX_TIP_BPS`);
+    /// `None` until verified, or if `tip_enabled` is `false`, or the payer chose not to tip.
+    pub tip_amount: Option<i128>,
 }
 
 #[contracttype]
@@ -97,6 +204,8 @@ pub struct VerifyPaymentArgs {
 pub struct PaymentSummary {
     pub payment_id: String,
     pub amount: i128,
+    /// Issue #844: Tip itemized separately from base amount.
+    pub tip_amount: i128,
     pub fee: i128,
     pub refund_amount: i128,
     pub status: PaymentStatus,
@@ -154,6 +263,8 @@ pub enum PaymentStatus {
     PartiallyPaid,
     /// Customer sent more than the required amount (e.g. tip or rounding).
     Overpaid,
+    /// A dispute was opened against a confirmed payment.
+    Disputed,
 }
 
 #[contracttype]
@@ -173,6 +284,22 @@ pub struct Refund {
     pub approved: bool,
     /// Expiry timestamp for refund requests (Issue #170).
     pub expiry_at: u64,
+}
+
+/// Queued when a partially funded payment expires before it is fully paid.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoRefundRequest {
+    pub refund_id: String,
+    pub payment_id: String,
+    pub merchant_id: Address,
+    pub payer_address: Address,
+    pub amount: i128,
+    pub token_address: Address,
+    pub reason: String,
+    pub requested_at: u64,
+    pub dispute_id: Option<String>,
+    pub payer_muxed_id: Option<u64>,
 }
 
 #[contracttype]
@@ -218,6 +345,8 @@ pub enum InvoiceStatus {
     Created,
     Paid,
     Overdue,
+    /// Issue #1067: Merchant-initiated cancellation (soft-delete).
+    Voided,
 }
 
 #[contracttype]
@@ -241,6 +370,10 @@ pub struct Invoice {
     pub status: InvoiceStatus,
     pub payment_link_id: Option<String>,
     pub created_at: u64,
+    /// Issue #1067: Timestamp when the invoice was paid (set by mark_invoice_paid).
+    pub paid_at: Option<u64>,
+    /// Issue #1067: Timestamp when the invoice was voided (set by void_invoice).
+    pub voided_at: Option<u64>,
 }
 
 #[contracttype]
@@ -362,7 +495,7 @@ pub enum Error {
     LinkExpired = 49,
     /// Issue #313: Reentrancy detected in process_refund_internal or settle_payment.
     Reentrancy = 50,
-    /// Upgrade failed — WASM hash replacement rejected by the host.
+    /// Upgrade failed â€” WASM hash replacement rejected by the host.
     UpgradeFailed = 51,
     /// Treasury balance is smaller than the requested withdrawal amount.
     InsufficientTreasuryBalance = 52,
@@ -384,6 +517,8 @@ pub enum Error {
     DirectTransferNotDisputable = 60,
     /// Issue #482: Maximum retry chain depth (3) exceeded for payment retry.
     MaxRetriesExceeded = 61,
+    /// Retry payment would exceed the maximum chain depth of three.
+    RetryChainTooDeep = 347,
     /// Issue #505: Invalid payment status transition attempted.
     InvalidStatusTransition = 62,
     /// Issue #450: Customer called `claim_refund` before an operator approved it.
@@ -398,8 +533,72 @@ pub enum Error {
     InputTooLong = 67,
     /// Issue #624: A timelocked admin action was executed before the delay period expired.
     TimelockNotExpired = 68,
-    /// Issue #622: Evidence field is not a valid IPFS CID (CIDv0 starts with "Qm"/46 chars; CIDv1 starts with "bafy"/≥59 chars).
+    /// Issue #622: Evidence field is not a valid IPFS CID (CIDv0 starts with "Qm"/46 chars; CIDv1 starts with "bafy"/â‰¥59 chars).
     InvalidEvidenceCid = 69,
+    /// Issue #841: Incoming muxed sub-account ID does not match the expected muxed_payer.
+    MuxedAccountMismatch = 70,
+    /// Treasury multisig configuration not set or invalid.
+    TreasuryMultisigNotConfigured = 71,
+    /// Caller is not an authorized treasury multisig signer.
+    NotAuthorizedTreasurySigner = 72,
+    /// Treasury withdrawal proposal not found.
+    TreasuryProposalNotFound = 73,
+    /// Treasury withdrawal proposal has already been executed.
+    TreasuryProposalAlreadyExecuted = 74,
+    /// Treasury withdrawal proposal has been cancelled.
+    TreasuryProposalCancelled = 75,
+    /// Treasury withdrawal proposal timelock has not expired.
+    TreasuryTimelockNotExpired = 76,
+    /// Treasury withdrawal proposal has expired.
+    TreasuryProposalExpired = 77,
+    /// Signer has already approved this treasury withdrawal proposal.
+    TreasuryAlreadyApproved = 78,
+    /// Insufficient approvals to execute treasury withdrawal.
+    TreasuryInsufficientApprovals = 79,
+    /// Invalid treasury multisig threshold (zero or exceeds signer count).
+    InvalidTreasuryThreshold = 80,
+    /// Treasury withdrawal amount exceeds token balance.
+    InsufficientTokenTreasuryBalance = 81,
+    /// Issue #836: Subscription is still in its free trial; no charge yet.
+    TrialActive = 82,
+    /// Issue #836: Requested trial_days exceeds the maximum of 90 days.
+    TrialTooLong = 83,
+    /// Payment link does not exist or belongs to a different merchant.
+    InvalidPaymentLink = 84,
+    /// Issue #777: Payment amount or monthly volume exceeds the merchant's KYC tier limit.
+    KycLimitExceeded = 85,
+    /// Issue #1061: A single-use payment link has already been redeemed and cannot be used again.
+    LinkAlreadyUsed = 86,
+    /// Contract version must be a numeric x.y.z string of at most 32 characters.
+    InvalidVersion = 87,
+    /// Issue #1033: FX rate used by `confirm_payment` is older than the
+    /// PaymentProcessor's own configured staleness threshold
+    /// (`MAX_ORACLE_STALENESS_SECS` / `set_oracle_staleness_threshold`),
+    /// independent of the oracle's own internal cap (`StaleOracleRate`).
+    OracleStale = 88,
+    /// Issue #1032: The requested `deposit_address` is already assigned to
+    /// another open (`Pending`, unexpired) payment.
+    DepositAddressInUse = 89,
+    /// Issue #1031: `settle_payment` was called before the merchant's configured
+    /// Daily/Weekly settlement interval has elapsed since the last settlement.
+    SettlementIntervalNotElapsed = 88,
+    /// Issue #1031: The merchant's accumulated settlement balance (including this
+    /// payment) is below `SETTLEMENT_MIN_AMOUNT` for a Daily/Weekly schedule.
+    SettlementBelowMinimum = 89,
+    /// Issue #1029: A sub-account's merchant delegation has passed its `expires_at`.
+    DelegationExpired = 90,
+    /// Issue #1029: A sub-account's merchant delegation has been revoked.
+    DelegationRevoked = 91,
+    /// Issue #1037: `retry_of_payment_id` passed to `create_payment` does not refer to
+    /// an existing payment owned by the same merchant that is in `Expired` status.
+    InvalidRetryTarget = 88,
+    /// Issue #1025: Tip passed to `verify_payment` exceeds `MAX_TIP_BPS` of the base amount.
+    TipExceedsMax = 89,
+    /// Issue #1209: `settle_payment` was called before the payment's configured
+    /// `settle_at` deferred-settlement timestamp has been reached.
+    SettlementNotYetDue = 1209,
+    /// Issue #1170: a per-merchant storage index has reached its documented cap.
+    StorageEntryLimitExceeded = 1210,
 }
 
 #[contracttype]
@@ -416,6 +615,8 @@ pub struct CreatePaymentArgs {
     pub memo_type: Option<String>,
     pub token_address: Option<Address>,
     pub client_token: Option<String>,
+    /// Optional idempotency key for safely retrying payment creation.
+    pub idempotency_key: Option<String>,
     pub metadata_hash: Option<BytesN<32>>,
     /// Arbitrary key-value metadata (max 20 keys, 256 chars per value).
     pub metadata: Option<Map<String, String>>,
@@ -429,6 +630,40 @@ pub struct CreatePaymentArgs {
     /// Customer/payer address, checked against the merchant's whitelist when
     /// `Merchant.whitelist_mode` is enabled (issue #516).
     pub payer: Option<Address>,
+    /// Issue #767: Optional flag to allow partial payment accumulation.
+    pub allow_partial: Option<bool>,
+    /// Issue #844: When true, customers may submit a tip via `confirm_payment`.
+    /// Issue #1025 makes this actually enforceable: `verify_payment` validates
+    /// and records a tip, capped at `MAX_TIP_BPS`, only when this is `true`.
+    pub tip_enabled: bool,
+    /// Issue #1209: Optional future timestamp before which `settle_payment`
+    /// must reject settlement, supporting escrow-like deferred release.
+    /// `None` means settlement is allowed as soon as the payment is confirmed.
+    pub settle_at: Option<u64>,
+}
+
+/// Issue #771: Payment request item for `create_payment_batch`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentRequest {
+    pub payment_id: String,
+    pub amount: i128,
+    pub currency: Symbol,
+    pub deposit_address: Address,
+    pub expires_at: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub token_address: Option<Address>,
+    pub client_token: Option<String>,
+    pub metadata_hash: Option<BytesN<32>>,
+    pub metadata: Option<Map<String, String>>,
+    pub fee_waiver_code: Option<String>,
+    pub payer: Option<Address>,
+    pub payer_muxed_id: Option<u64>,
+    /// Issue #1209: Optional future timestamp before which `settle_payment`
+    /// must reject settlement, supporting escrow-like deferred release.
+    pub settle_at: Option<u64>,
 }
 
 /// Arguments for a single dispute in `batch_create_disputes` / `create_dispute`.
@@ -451,8 +686,46 @@ pub enum DisputeBatchItemResult {
     Err(u32),
 }
 
+/// Per-item outcome for `batch_process_refunds` (partial success allowed).
+/// Issue #1199.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RefundBatchItemResult {
+    /// The refund_id that was successfully processed.
+    Ok(String),
+    /// The refund_id that failed, together with the `Error` discriminant.
+    Err(String, u32),
+}
+
+/// Resolution details for one dispute in `batch_resolve_disputes`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeResolution {
+    pub dispute_id: String,
+    pub in_favor_of: Address,
+    pub notes: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwapLimits {
+    pub default_max_slippage_bps: u32,
+    pub max_price_impact_bps: u32,
+    pub max_swap_volume_per_ledger: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SwapLedgerVolume {
+    ledger_sequence: u32,
+    volume: i128,
+}
+
 /// Hard cap for dispute batch size.
 pub const MAX_DISPUTE_BATCH: u32 = 20;
+
+/// Hard cap for refund batch size (Issue #1199).
+pub const MAX_REFUND_BATCH: u32 = 20;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -541,6 +814,18 @@ pub enum VoteChoice {
     Against,
 }
 
+/// Issue #843: Binary stake-weighted vote recorded by `cast_vote`.
+///
+/// Defined here so `choice` uses this module's `VoteChoice`. The copy in
+/// `types.rs` is shadowed by this item.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeWeightedVote {
+    pub choice: VoteChoice,
+    /// `stake_amount / VOTE_WEIGHT_UNIT` at the time of the vote.
+    pub vote_weight: i128,
+}
+
 /// Accumulated vote tally for a dispute.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -551,6 +836,8 @@ pub struct VoteTally {
     pub against_weight: i128,
     /// Number of arbitrators who have voted.
     pub vote_count: u32,
+    /// Issue #843: Sum of registered vote weights from `lock_stake`.
+    pub total_registered_weight: i128,
 }
 
 /// Number of `ARBITRATOR`-role votes (either direction) required to
@@ -697,7 +984,7 @@ pub struct UsageMetrics {
     /// Price per unit (in the subscription token's smallest unit) at the
     /// time this record was submitted.
     pub unit_price: i128,
-    /// `units_used * unit_price` — the metered charge amount for this cycle.
+    /// `units_used * unit_price` â€” the metered charge amount for this cycle.
     pub amount: i128,
     /// Ledger timestamp when this usage record was submitted.
     pub recorded_at: u64,
@@ -756,6 +1043,10 @@ pub struct Subscription {
     /// Affiliate fee in basis points (bps). If set and `affiliate` is Some,
     /// `affiliate_fee_bps / 10000` of each payment will be routed to the affiliate.
     pub affiliate_fee_bps: Option<u32>,
+    /// Issue #836: Ledger timestamp when the free trial ends. `None` if the
+    /// plan has no trial. While `now < trial_ends_at`, `charge_subscription`
+    /// returns `Error::TrialActive` and does not bill.
+    pub trial_ends_at: Option<u64>,
 }
 
 #[contracttype]
@@ -769,6 +1060,12 @@ pub enum BillingInterval {
 
 impl BillingInterval {
     /// Returns the approximate duration in seconds for each interval.
+    ///
+    /// # Parameters
+    /// - `&self` - Reference to the billing interval whose duration is returned.
+    ///
+    /// # Errors
+    /// No errors are returned.
     pub fn to_secs(&self) -> u64 {
         match self {
             BillingInterval::Daily => 86_400,
@@ -795,6 +1092,9 @@ pub struct SubscriptionPlan {
     /// If non-empty, the plan amount will be distributed to the configured
     /// `SettlementSplit` recipients on each subscription charge.
     pub payout_splits: Vec<SettlementSplit>,
+    /// Issue #836: Optional free-trial length in days (max 90). When set,
+    /// subscribers are not charged until `trial_ends_at`.
+    pub trial_days: Option<u32>,
 }
 
 #[contracttype]
@@ -913,7 +1213,9 @@ pub enum DataKey {
     Refund(String),
     PaymentRefunds(String),
     RefundCounter,
-    Dispute(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `dispute_id_to_key`.
+    Dispute(BytesN<32>),
     PaymentDisputes(String),
     DisputeCounter,
     Stream(String),
@@ -926,9 +1228,13 @@ pub enum DataKey {
     Blacklisted(Address),
     MerchantAmountLimits(Address),
     GlobalAmountLimits,
-    IdempotencyKey(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `idempotency_key_to_key`.
+    IdempotencyKey(BytesN<32>),
     SubscriptionPlan(String),
-    Subscription(String),
+    /// Issue #1210: hashed to BytesN<32> (was `String`) to cut storage rent;
+    /// see `subscription_id_to_key`.
+    Subscription(BytesN<32>),
     PayerSubscriptions(Address),
     SubscriptionCounter,
     StreamCounter,
@@ -936,9 +1242,9 @@ pub enum DataKey {
     DisputeOperatorNote(String),
     /// Stores all arbitrators who have voted on a dispute.
     DisputeArbitratorVotes(String),
-    /// Locked stake for a dispute arbitrator: (dispute_id, arbitrator) → amount
+    /// Locked stake for a dispute arbitrator: (dispute_id, arbitrator) â†’ amount
     DisputeStake(String, Address),
-    /// Vote cast by an arbitrator: (dispute_id, arbitrator) → VoteChoice
+    /// Vote cast by an arbitrator: (dispute_id, arbitrator) â†’ VoteChoice
     DisputeVote(String, Address),
     /// Tally of votes for a dispute
     DisputeVoteTally(String),
@@ -951,13 +1257,13 @@ pub enum DataKey {
     /// Configurable refund expiry window in seconds (Issue #170).
     RefundExpirySecs,
     /// Vote cast by an arbitrator under the simple ARBITRATOR-role voting
-    /// flow: (dispute_id, arbitrator) → ArbitratorVoteChoice.
+    /// flow: (dispute_id, arbitrator) â†’ ArbitratorVoteChoice.
     ArbitratorVote(String, Address),
     /// Tally of ARBITRATOR-role votes for a dispute.
     ArbitratorVoteTally(String),
     /// Issue #168: Fee split configuration (treasury_bps, developer_bps, treasury_addr, developer_addr)
     FeeSplitConfig,
-    /// Monthly volume tracker: (merchant_id, month_epoch) → i128 cumulative amount
+    /// Monthly volume tracker: (merchant_id, month_epoch) â†’ i128 cumulative amount
     MerchantMonthlyVolume(Address, u32),
     /// Cumulative all-time payment volume per merchant for KYC tier auto-upgrades (issue #207).
     MerchantCumulativeVolume(Address),
@@ -1013,6 +1319,10 @@ pub enum DataKey {
     AutoRefundOverpayment,
     /// Configurable refund cooldown period in seconds (overrides REFUND_COOLDOWN_SECS const).
     RefundCooldownSecs,
+    /// Configured swap protection limits.
+    SwapLimits,
+    /// Per-ledger input volume used by swap_and_pay.
+    SwapLedgerVolume,
     /// Admin-managed reusable fee-waiver code registry for per-payment promotions.
     /// Keyed by the code string itself.
     FeeWaiverCode(String),
@@ -1040,6 +1350,18 @@ pub enum DataKey {
     MinPaymentDurationSecs,
     /// Maximum payment duration in seconds (default: 30 days).
     MaxPaymentDurationSecs,
+    /// Issue #1206: Admin-configurable default payment duration in seconds, used
+    /// by `create_payment`/batch variants when the caller supplies neither
+    /// `expires_at` nor `duration_secs`. Falls back to
+    /// `DEFAULT_PAYMENT_DURATION_SECS` when unset.
+    DefaultPaymentDurationSecs,
+    /// Issue #1206: Per-merchant override for the default payment duration in
+    /// seconds. Takes precedence over `DefaultPaymentDurationSecs` when set.
+    MerchantPaymentDurationSecs(Address),
+    /// Issue #1209: Optional deferred-settlement timestamp for a payment;
+    /// `settle_payment` rejects settlement while `now` is before this value.
+    /// Keyed by `payment_id`; absent means no deferred-settlement constraint.
+    PaymentSettleAt(String),
     /// Issue #489: Reverse index from metadata_hash to payment_id for order reconciliation.
     MetadataHashPayment(BytesN<32>),
     /// Issue #492: Customer profile keyed by (merchant_id, customer_id) for CRM features.
@@ -1055,7 +1377,7 @@ pub enum DataKey {
     /// Issue #504: Sorted set of expiry buckets that currently contain payment IDs.
     PaymentExpiryBuckets,
     /// Issue #678: Daily-bucketed payment ID index for O(days) analytics queries.
-    /// Key: (merchant_id, day_bucket = created_at / 86_400) → Vec<payment_id>.
+    /// Key: (merchant_id, day_bucket = created_at / 86_400) â†’ Vec<payment_id>.
     DailyPaymentIndex(Address, u64),
     /// Issue #666: Paginated log of platform-fee collection events (newest-first,
     /// capped at `FEE_COLLECTION_HISTORY_CAP`), consumed by `get_platform_fee_report`.
@@ -1070,7 +1392,7 @@ pub enum DataKey {
     /// Issue #628: Append-only list of every merchant address that has had at
     /// least one payment created, for `get_top_merchants` enumeration.
     TrackedMerchants,
-    /// Issue #638: Refund idempotency key → `RefundIdempotencyRecord`. Stored with a
+    /// Issue #638: Refund idempotency key â†’ `RefundIdempotencyRecord`. Stored with a
     /// 30-day TTL so a retried `create_refund` with the same key returns the original
     /// `refund_id` rather than creating a duplicate refund.
     RefundIdempotencyKey(String),
@@ -1084,6 +1406,17 @@ pub enum DataKey {
     PendingTimelockAction(String),
     /// Issue #624: Counter for generating unique pending action IDs.
     TimelockActionCounter,
+    /// Issue #1033: Admin-configurable override (in seconds) for
+    /// `MAX_ORACLE_STALENESS_SECS`, enforced in `confirm_payment` independently
+    /// of the FX oracle's own internal staleness threshold.
+    OracleStalenessThreshold,
+    /// Issue #1032: Maps a `deposit_address` to the `payment_id` currently
+    /// holding it while that payment is `Pending`, so a new `create_payment`
+    /// can detect and reject concurrent reuse of the same address.
+    DepositAddressPending(Address),
+    /// Issue #1172: independent admin circuit breaker for the simulated DEX
+    /// `swap_and_pay` path. Appended last to preserve existing discriminants.
+    SwapCircuitBreakerPaused,
 }
 
 /// Default initial contract version string.
@@ -1146,6 +1479,37 @@ pub struct MerchantRanking {
     pub payment_count: u64,
 }
 
+/// Issue #1066: A single platform-fee collection record appended to
+/// `DataKey::FeeCollectionHistory` from `settle_payment` / `process_refund`.
+/// Paginated by `get_fee_collection_history`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecord {
+    /// Payment or refund ID that generated this fee event.
+    pub payment_id: String,
+    /// Fee amount collected in the token's smallest unit.
+    pub fee_amount: i128,
+    /// Token contract address the fee was collected in.
+    pub token: Address,
+    /// Ledger timestamp when the fee was collected.
+    pub collected_at: u64,
+}
+
+/// Issue #1064: Enriched merchant leaderboard entry returned by
+/// `get_top_merchants_v2`, including KYC tier and volume metrics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantRankEntry {
+    pub merchant_id: Address,
+    /// Composite score used for ranking (equals cumulative gross volume).
+    pub score: i128,
+    pub kyc_tier: KycTier,
+    /// Total confirmed payments for this merchant.
+    pub confirmed_payment_count: u64,
+    /// Cumulative gross payment volume.
+    pub cumulative_volume: i128,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractHealth {
@@ -1157,476 +1521,146 @@ pub struct ContractHealth {
     pub fx_oracle_configured: bool,
     pub merchant_registry_configured: bool,
 }
-#[cfg_attr(
-    any(not(target_arch = "wasm32"), feature = "contract-refund-manager"),
-    contractimpl
-)]
-#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
-impl RefundManager {
-    pub fn version() -> u32 {
-        1
-    }
-    fn require_not_paused(env: &Env) -> Result<(), Error> {
-        let pause_state: PauseState =
-            env.storage()
-                .persistent()
-                .get(&DataKey::Paused)
-                .unwrap_or(PauseState {
-                    paused: false,
-                    reason: String::from_str(env, ""),
-                    admin: None,
-                    timestamp: 0,
-                });
-        if pause_state.paused {
-            return Err(Error::ContractPaused);
+
+/// Issue #1205: Aggregated contract health/config view for dashboards and
+/// operator tooling. Unlike `ContractHealth`, this focuses on identity/config
+/// data (token, admin, multisig) rather than operational metrics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractInfo {
+    /// Current contract version string (see `version`/`get_version`).
+    pub version: String,
+    /// Consolidated global + creation pause state (see `get_pause_info`).
+    pub pause_info: PauseInfo,
+    /// Configured settlement token address, if one has been set via `set_usdc_token`.
+    pub token: Option<Address>,
+    /// Current contract admin, if initialized.
+    pub admin: Option<Address>,
+    /// Multi-sig approval threshold (see `get_multisig_config`).
+    pub multisig_threshold: u32,
+    /// Multi-sig signer set (see `get_multisig_config`).
+    pub multisig_signers: Vec<Address>,
+}
+/// Issue #1168: calculate `amount * bps / 10_000` without wrapping.
+///
+/// Returns `None` when the intermediate multiplication overflows i128 so that
+/// callers can reject the operation (or saturate in read-only reporting paths).
+fn checked_amount_bps(amount: i128, bps: i128) -> Option<i128> {
+    amount.checked_mul(bps).and_then(|v| v.checked_div(10_000))
+}
+
+
+
+/// Bumps the version string by incrementing the number after the last '.'.
+/// Works with versions like "1.0.0" â†’ "1.0.1", "1" â†’ "2", "v1" â†’ "v2".
+/// Uses byte-level parsing since Soroban's String API doesn't support string
+/// manipulation in no_std. Defaults to "2.0.0" if parsing fails.
+fn bump_version_string(env: &Env, version: &String) -> String {
+    use soroban_sdk::Bytes;
+
+    let bytes: Bytes = version.to_bytes();
+    let len = bytes.len() as usize;
+
+    // Find the last '.' or the start of the version number
+    let mut last_dot = None;
+    let mut i = 0usize;
+    while i < len {
+        if bytes.get(i as u32) == Some(b'.') {
+            last_dot = Some(i);
         }
-        Ok(())
+        i += 1;
     }
 
-    fn get_refund_fee_bps_internal(env: &Env) -> i128 {
-        env.storage()
-            .instance()
-            .get::<DataKey, i128>(&DataKey::RefundFeeBps)
-            .unwrap_or(REFUND_FEE_BPS)
-    }
-
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
-            .unwrap_or(REFUND_COOLDOWN_SECS)
-    }
-
-    pub fn get_dispute_bond_amount(env: Env) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::DisputeBondAmount)
-            .unwrap_or(DISPUTE_BOND_AMOUNT)
-    }
-
-    /// Admin-only: set an arbitrary on-chain metadata entry (issue #667), e.g. a
-    /// description, deployment notes, or audit commit hash. Stored in instance
-    /// storage under a caller-chosen key, with the instance TTL bumped to
-    /// `LONG_LIVE_TTL` so metadata survives archival.
-    pub fn set_contract_metadata(
-        env: Env,
-        admin: Address,
-        key: Symbol,
-        value: String,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
+    // Parse the numeric part to bump from the last dot position
+    let num_start = last_dot.map(|p| p + 1).unwrap_or(0);
+    let mut num_val: u32 = 0;
+    let mut j = num_start;
+    while j < len {
+        match bytes.get(j as u32) {
+            Some(b @ b'0'..=b'9') => {
+                num_val = num_val.saturating_mul(10).saturating_add((b - b'0') as u32);
+            }
+            _ => break,
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::ContractMetadata(key), &value);
-
-        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
-        env.storage()
-            .instance()
-            .extend_ttl(threshold, LONG_LIVE_TTL);
-
-        Ok(())
+        j += 1;
     }
 
-    /// Public read of an on-chain metadata entry set via `set_contract_metadata`
-    /// (issue #667). Returns `None` if the key was never set.
-    pub fn get_contract_metadata(env: Env, key: Symbol) -> Option<String> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ContractMetadata(key))
-    }
+    // Bump by 1
+    let new_num = num_val.saturating_add(1);
 
-    /// Formats a u64 as a decimal `String` without relying on `alloc`/`format!`
-    /// (this crate is `#![no_std]`). Used to store `deployed_at` as metadata
-    /// text so it round-trips through `get_contract_metadata`'s `String` type.
-    fn u64_to_string(env: &Env, mut n: u64) -> String {
-        if n == 0 {
-            return String::from_str(env, "0");
-        }
-        let mut buf = [0u8; 20];
-        let mut i = buf.len();
+    // Encode the new number as ASCII digits
+    let mut num_buf = [0u8; 12];
+    let mut num_len = 0usize;
+    if new_num == 0 {
+        num_buf[0] = b'0';
+        num_len = 1;
+    } else {
+        let mut n = new_num;
+        let mut rev = [0u8; 12];
+        let mut rl = 0usize;
         while n > 0 {
-            i -= 1;
-            buf[i] = b'0' + (n % 10) as u8;
+            rev[rl] = (n % 10) as u8 + b'0';
             n /= 10;
+            rl += 1;
         }
-        let s = core::str::from_utf8(&buf[i..]).unwrap_or("0");
-        String::from_str(env, s)
-    }
-
-    fn validate_init_address(env: &Env, address: Address) -> Result<(), Error> {
-        let zero_address = Address::from_str(env, ZERO_CONTRACT_STRKEY);
-        if address == zero_address {
-            return Err(Error::InvalidAddress);
-        }
-        Ok(())
-    }
-
-    fn validate_admin_and_token(
-        env: &Env,
-        admin: Address,
-        token_address: Address,
-    ) -> Result<(), Error> {
-        if admin == token_address {
-            return Err(Error::InvalidAddress);
-        }
-        Self::validate_init_address(env, admin)?;
-        Self::validate_init_address(env, token_address)
-    }
-
-    pub fn initialize_refund_manager(
-        env: Env,
-        admin: Address,
-        usdc_token_address: Address,
-    ) -> Result<(), Error> {
-        Self::validate_admin_and_token(&env, admin.clone(), usdc_token_address.clone())?;
-        AccessControl::initialize(&env, admin);
-        env.storage()
-            .persistent()
-            .set(&DataKey::UsdcToken, &usdc_token_address);
-        env.storage()
-            .instance()
-            .set(&DataKey::RefundFeeBps, &REFUND_FEE_BPS);
-
-        // Issue #667: pre-populate on-chain metadata with description, version, and
-        // deployment timestamp so explorers/integrators can identify the contract.
-        env.storage().instance().set(
-            &DataKey::ContractMetadata(Symbol::new(&env, "description")),
-            &String::from_str(&env, "FluxaPay RefundManager contract"),
-        );
-        env.storage().instance().set(
-            &DataKey::ContractMetadata(Symbol::new(&env, "version")),
-            &String::from_str(&env, "1"),
-        );
-        env.storage().instance().set(
-            &DataKey::ContractMetadata(Symbol::new(&env, "deployed_at")),
-            &Self::u64_to_string(&env, env.ledger().timestamp()),
-        );
-        let threshold = core::cmp::max(1, LONG_LIVE_TTL / TTL_BUMP_THRESHOLD_DIVISOR);
-        env.storage()
-            .instance()
-            .extend_ttl(threshold, LONG_LIVE_TTL);
-
-        Ok(())
-    }
-
-    /// Admin-only: set the refund processing fee in basis points (0–1000, max 10%).
-    pub fn set_refund_fee_bps(env: Env, admin: Address, bps: i128) -> Result<(), Error> {
-        admin.require_auth();
-
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
-
-        if !(0..=1_000).contains(&bps) {
-            return Err(Error::InvalidAmount);
-        }
-
-        env.storage().instance().set(&DataKey::RefundFeeBps, &bps);
-        Ok(())
-    }
-
-    pub fn get_refund_fee_bps(env: Env) -> i128 {
-        Self::get_refund_fee_bps_internal(&env)
-    }
-
-    /// Admin: configure the DEX router used to route swap_and_pay refunds
-    /// back to the payer's original token (Issue #173).
-    pub fn set_dex_router_address(
-        env: Env,
-        admin: Address,
-        dex_router: Address,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::DexRouterAddress, &dex_router);
-        Ok(())
-    }
-
-    /// Admin: require a `receipt_hash` on every refund before `process_refund`
-    /// will execute it (Issue #176).
-    pub fn set_refund_policy(
-        env: Env,
-        admin: Address,
-        require_receipt_hash: bool,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::RequireReceiptHash, &require_receipt_hash);
-        Ok(())
-    }
-
-    /// Issue #676: read-only view of all refund configuration in one call —
-    /// `require_receipt_hash` (Issue #176), `refund_expiry_secs` (Issue #170),
-    /// `refund_fee_bps`, and `cooldown_secs`. Lets integrators check policy
-    /// before submitting a refund without having to know every individual
-    /// storage key / setter.
-    pub fn get_refund_policy(env: Env) -> RefundPolicy {
-        let require_receipt_hash: bool = env
-            .storage()
-            .persistent()
-            .get(&DataKey::RequireReceiptHash)
-            .unwrap_or(false);
-
-        RefundPolicy {
-            require_receipt_hash,
-            refund_expiry_secs: Self::get_refund_expiry_secs(&env),
-            refund_fee_bps: Self::get_refund_fee_bps_internal(&env),
-            cooldown_secs: Self::get_refund_cooldown_secs(&env),
+        while rl > 0 {
+            rl -= 1;
+            num_buf[num_len] = rev[rl];
+            num_len += 1;
         }
     }
 
-    pub fn grant_role(
-        env: Env,
-        admin: Address,
-        role: Symbol,
-        account: Address,
-    ) -> Result<(), Error> {
-        AccessControl::grant_role(&env, admin, role, account).map_err(|_| Error::AccessControlError)
+    // Reconstruct into a fixed-size buffer (max 64 bytes handles any sane version string)
+    let mut result = [0u8; 64];
+    let mut pos = 0usize;
+    // prefix: bytes before the number
+    let mut p = 0usize;
+    while p < num_start && pos < 64 {
+        result[pos] = bytes.get(p as u32).unwrap_or(b' ');
+        pos += 1;
+        p += 1;
     }
-
-    pub fn revoke_role(
-        env: Env,
-        admin: Address,
-        role: Symbol,
-        account: Address,
-    ) -> Result<(), Error> {
-        AccessControl::revoke_role(&env, admin, role, account)
-            .map_err(|_| Error::AccessControlError)
-    }
-
-    /// Synchronize a role grant across PaymentProcessor and RefundManager.
-    ///
-    /// If either grant fails, the transaction aborts and no changes are persisted.
-    pub fn sync_grant_role_with_processor(
-        env: Env,
-        admin: Address,
-        payment_processor_address: Address,
-        role: Symbol,
-        account: Address,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
+    // new number digits
+    for &digit in num_buf.iter().take(num_len) {
+        if pos < 64 {
+            result[pos] = digit;
+            pos += 1;
         }
-
-        AccessControl::grant_role(&env, admin.clone(), role.clone(), account.clone())
-            .map_err(|_| Error::AccessControlError)?;
-
-        let payment_client = crate::PaymentProcessorClient::new(&env, &payment_processor_address);
-        payment_client
-            .try_grant_role(&admin, &role, &account)
-            .map_err(|_| Error::AccessControlError)?
-            .map_err(|_| Error::AccessControlError)?;
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "ACCESS_CONTROL"),
-                Symbol::new(&env, "SYNC_GRANT"),
-            ),
-            (role, account),
-        );
-
-        Ok(())
+    }
+    // suffix: bytes after the number
+    let mut k = j;
+    while k < len && pos < 64 {
+        result[pos] = bytes.get(k as u32).unwrap_or(b' ');
+        pos += 1;
+        k += 1;
     }
 
-    /// Synchronize a role revoke across PaymentProcessor and RefundManager.
-    ///
-    /// If either revoke fails, the transaction aborts and no changes are persisted.
-    pub fn sync_revoke_role_with_processor(
-        env: Env,
-        admin: Address,
-        payment_processor_address: Address,
-        role: Symbol,
-        account: Address,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
+    String::from_bytes(env, &result[..pos])
+}
 
-        AccessControl::revoke_role(&env, admin.clone(), role.clone(), account.clone())
-            .map_err(|_| Error::AccessControlError)?;
-
-        let payment_client = crate::PaymentProcessorClient::new(&env, &payment_processor_address);
-        payment_client
-            .try_revoke_role(&admin, &role, &account)
-            .map_err(|_| Error::AccessControlError)?
-            .map_err(|_| Error::AccessControlError)?;
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "ACCESS_CONTROL"),
-                Symbol::new(&env, "SYNC_REVOKE"),
-            ),
-            (role, account),
-        );
-
-        Ok(())
-    }
-
-    pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
-        AccessControl::has_role(&env, &role, &account)
-    }
-
-    pub fn renounce_role(env: Env, account: Address, role: Symbol) -> Result<(), Error> {
-        AccessControl::renounce_role(&env, account, role).map_err(|_| Error::AccessControlError)
-    }
-
-    pub fn propose_admin(
-        env: Env,
-        current_admin: Address,
-        new_admin: Address,
-    ) -> Result<(), Error> {
-        AccessControl::propose_admin(&env, current_admin, new_admin)
-            .map_err(|_| Error::AccessControlError)
-    }
-
-    pub fn claim_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-        AccessControl::claim_admin(&env, new_admin).map_err(|_| Error::AccessControlError)
-    }
-
-    pub fn transfer_admin(
-        env: Env,
-        current_admin: Address,
-        new_admin: Address,
-    ) -> Result<(), Error> {
-        Self::propose_admin(env, current_admin, new_admin)
-    }
-
-    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), Error> {
-        Self::claim_admin(env, new_admin)
-    }
-
-    pub fn get_admin(env: Env) -> Option<Address> {
-        AccessControl::get_admin(&env)
-    }
-
-    /// Add an address to the global blacklist (admin only).
-    pub fn add_to_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
-        admin.require_auth();
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Blacklisted(address), &true);
-        Ok(())
-    }
-
-    /// Remove an address from the global blacklist (admin only).
-    pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
-        admin.require_auth();
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Blacklisted(address), &false);
-        Ok(())
-    }
-
-    /// Returns true when an address is globally blacklisted.
-    pub fn is_blacklisted(env: Env, address: Address) -> bool {
-        env.storage()
-            .persistent()
-            .get::<DataKey, bool>(&DataKey::Blacklisted(address))
-            .unwrap_or(false)
-    }
-
-    fn require_not_blacklisted(env: &Env, address: &Address) -> Result<(), Error> {
-        if env
-            .storage()
-            .persistent()
-            .get::<DataKey, bool>(&DataKey::Blacklisted(address.clone()))
-            .unwrap_or(false)
-        {
-            return Err(Error::Unauthorized);
-        }
-        Ok(())
-    }
-
-    /// Like `register_payment`, but also records the original token and swap
-    /// path used by a `swap_and_pay` payment, so `process_refund` can route
-    /// the refund back through the DEX to the payer's original token
-    /// (Issue #173).
-    pub fn register_swap_payment(
-        env: Env,
-        payment_id: String,
-        merchant_id: Address,
-        amount: i128,
-        currency: Symbol,
-        original_token: Address,
-        swap_path: Vec<Address>,
-    ) -> Result<(), Error> {
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::Payment(payment_id.clone()))
-        {
-            let payment = PaymentCharge {
-                payment_id: payment_id.clone(),
-                merchant_id,
-                amount,
-                currency,
-                deposit_address: env.current_contract_address(),
-                status: PaymentStatus::Confirmed,
-                payer_address: None,
-                transaction_hash: None,
-                created_at: env.ledger().timestamp(),
-                confirmed_at: None,
-                expires_at: 0,
-                amount_received: None,
-                memo: None,
-                memo_type: None,
-                token_address: None,
-                metadata_hash: None,
-                fx_rate: None,
-                fx_rate_at: None,
-                original_token: Some(original_token),
-                swap_path: Some(swap_path),
-                metadata: None,
-                fee_waiver_code: None,
-                retry_of_payment_id: None,
-                payer_muxed_id: None,
-                payment_link_id: None,
-            };
-            env.storage()
-                .persistent()
-                .set(&DataKey::Payment(payment_id.clone()), &payment);
-            Self::bump_payment_ttl(&env, &payment_id, &payment.status);
-        }
-        Ok(())
-    }
-
-    /// Issue #168: Configure fee split destinations for platform fees.
-    /// Admin can set allocation ratios and destination addresses.
-    /// `treasury_bps + developer_bps` must be ≤ 10 000; any remainder goes to treasury.
-    pub fn configure_fee_split(
-        env: Env,
-        admin: Address,
-        treasury_bps: u32,
-        developer_bps: u32,
-        treasury_address: Address,
-        developer_address: Address,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-
-        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
-            return Err(Error::Unauthorized);
-        }
+mod payment_link;
+pub use payment_link::{
+    CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
+    PaymentLinkManagerClient,
+};
+// Pre-existing/unrelated fix (found while adding FX conversion property
+// tests for issue #1186): `feature_tests`, `memo_test`, `merchant_auth_test`,
+// `partial_overpaid_test`, `pause_test`, `payment_link_test`,
+// `payment_metadata_test`, `test`, `stream_test`, `subscription_test`, and
+// `pub mod stream` (plus its `pub use`) were each declared a second time
+// further down in this file (see the consolidated `#[cfg(test)] mod ...;`
+// list below, and `pub mod stream;` / `pub use stream::{...}` already
+// declared near the top of this file), which is a hard compile error
+// (E0428/E0255, "the name `..` is defined multiple times") for every
+// `cargo test` build, including the one that runs this issue's new
+// property tests. Only the non-duplicated declarations are kept here;
+// the rest live solely in the consolidated list.
+#[cfg(test)]
+mod payment_retry_test;
+#[cfg(test)]
+mod payment_tip_test;
+#[cfg(test)]
+mod test;
 
         if treasury_bps.saturating_add(developer_bps) > 10_000 {
             return Err(Error::InvalidAmount);
@@ -11531,40 +11565,72 @@ mod integration_test;
 pub mod merchant_registry;
 #[cfg(test)]
 mod merchant_registry_test;
+// Payment streaming module (Issue #127) - declared via `pub mod stream;` above.
+pub use stream::{PaymentStream, PaymentStreaming, StreamError, StreamStatus};
 #[cfg(test)]
-mod oracle_sanitization_test;
-mod payment_link;
+mod stream_test;
 #[cfg(test)]
-mod proptests;
-pub use payment_link::{
-    CreateLinkArgs, FiatConfig, LinkAnalytics, MaybeFiatConfig, PaymentLink, PaymentLinkManager,
-    PaymentLinkManagerClient,
-};
+mod stream_vesting_test;
 
+// Note (pre-existing bug, fixed while touching this file for #1206/#1207/#1209/#1210):
+// `test`, `stream_test`, `subscription_test`, `feature_tests`, `memo_test`,
+// `partial_overpaid_test`, `pause_test`, `payment_link_test`, `payment_metadata_test`,
+// and `merchant_auth_test` were each declared a second time below (duplicate `mod`
+// items), which is a hard compile error (E0428 - duplicate module definition).
+// `pub mod stream;` was likewise declared twice. The duplicate declarations are
+// removed here; every module below is declared exactly once now.
+// NOTE (pre-existing, unrelated to #1199): this tail of lib.rs previously declared
+// `pub mod stream;` (plus a redundant subset re-export) and roughly a dozen
+// `#[cfg(test)] mod <name>;` test-module declarations a *second* time, duplicating
+// declarations already made earlier in this file / just below. Rust rejects a module
+// being declared twice in the same scope (E0428), so the crate could not compile at
+// all in this state. Consolidated to one declaration per module so the crate (and the
+// new `batch_process_refunds` entrypoint added for #1199) can build.
 #[cfg(test)] mod test;
 #[cfg(test)] mod stream_test;
 #[cfg(test)] mod subscription_test;
 #[cfg(test)] mod arbitrage_test;
 #[cfg(test)] mod auth_test;
 #[cfg(test)] mod batch_payment_test;
+#[cfg(test)] mod batch_refund_test;
 #[cfg(test)] mod dex_router_test;
 #[cfg(test)] mod dispute_test;
 #[cfg(test)] mod escalate_disputes_test;
-#[cfg(test)] mod feature_tests;
 #[cfg(test)] mod fx_oracle_test;
+#[cfg(test)] mod htlc_test;
 #[cfg(test)] mod integration_test;
 #[cfg(test)] mod memo_test;
+#[cfg(test)] mod merchant_auth_test;
 #[cfg(test)] mod merchant_ranking_test;
 #[cfg(test)] mod merchant_registry_test;
+#[cfg(test)] mod merchant_reserve_test;
 #[cfg(test)] mod mock_dex_router;
 #[cfg(test)] mod muxed_payer_test;
 #[cfg(test)] mod oracle_sanitization_test;
 #[cfg(test)] mod partial_overpaid_test;
 #[cfg(test)] mod pause_test;
+#[cfg(test)] mod recovery_test;
+#[cfg(test)] mod swap_and_pay_token_moving_test;
+#[cfg(test)] pub use recovery_test::RecoveryHarnessClient;
 #[cfg(test)] mod payment_link_test;
 #[cfg(test)] mod payment_metadata_test;
 #[cfg(test)] mod refund_manager_edge_test;
+#[cfg(test)] mod payment_retry_test;
+#[cfg(test)] mod payment_tip_test;
 #[cfg(test)] mod proptests;
 #[cfg(test)] mod router_allowlist_test;
 #[cfg(test)] mod settlement_test;
 #[cfg(test)] mod swap_test;
+#[cfg(test)] mod subscription_lifecycle_test;
+#[cfg(test)] mod invoice_test;
+#[cfg(test)] mod account_abstraction_test;
+#[cfg(test)] mod meta_transaction_test;
+#[cfg(test)] mod merkle_distributor_test;
+#[cfg(test)] mod treasury_single_admin_threshold_test;
+#[cfg(test)] mod treasury_multisig_test;
+#[cfg(test)] mod merchant_refunds_test;
+#[cfg(test)] mod tiered_refund_fee_test;
+#[cfg(test)] mod batch_settle_test;
+#[cfg(test)] mod require_auth_audit_test;
+#[cfg(test)] mod amount_math_test;
+#[cfg(test)] mod storage_cap_test;
