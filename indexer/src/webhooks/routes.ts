@@ -35,6 +35,61 @@ function error(res: Response, status: number, code: string, message: string) {
   return res.status(status).json({ error: { code, message } });
 }
 
+/** Documented per-endpoint retry defaults (see docs/webhooks.md). */
+export const RETRY_POLICY_DEFAULTS = {
+  max_retries: 5,
+  initial_delay_ms: 1000,
+  backoff_multiplier: 2,
+  max_delay_ms: 3_600_000,
+} as const;
+
+export const RETRY_POLICY_BOUNDS = {
+  max_retries: { min: 0, max: 20 },
+  initial_delay_ms: { min: 100, max: 3_600_000 },
+  backoff_multiplier: { min: 1, max: 10 },
+  max_delay_ms: { min: 100, max: 86_400_000 },
+} as const;
+
+export interface RetryPolicyInput {
+  max_retries?: number;
+  initial_delay_ms?: number;
+  backoff_multiplier?: number;
+  max_delay_ms?: number;
+}
+
+/**
+ * Validate a partial retry policy. Returns an error message, or null if valid.
+ * Omitted fields are allowed here; defaults are applied at create time.
+ */
+export function validateRetryPolicy(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "retry_policy must be an object.";
+  }
+  const policy = value as Record<string, unknown>;
+  for (const key of Object.keys(policy)) {
+    if (!(key in RETRY_POLICY_BOUNDS)) return `retry_policy.${key} is not a supported field.`;
+  }
+  for (const [key, bounds] of Object.entries(RETRY_POLICY_BOUNDS)) {
+    const field = policy[key];
+    if (field === undefined) continue;
+    if (typeof field !== "number" || !Number.isFinite(field)) {
+      return `retry_policy.${key} must be a number.`;
+    }
+    if (key !== "backoff_multiplier" && !Number.isInteger(field)) {
+      return `retry_policy.${key} must be an integer.`;
+    }
+    if (field < bounds.min || field > bounds.max) {
+      return `retry_policy.${key} must be between ${bounds.min} and ${bounds.max}.`;
+    }
+  }
+  const merged = { ...RETRY_POLICY_DEFAULTS, ...policy } as Record<string, number>;
+  if (merged.max_delay_ms < merged.initial_delay_ms) {
+    return "retry_policy.max_delay_ms must be greater than or equal to initial_delay_ms.";
+  }
+  return null;
+}
+
 export function registerWebhookRoutes(app: Express, deps: WebhookRouteDeps): void {
   const { store, merchantIdFromRequest } = deps;
   const doFetch = deps.fetch ?? (globalThis.fetch as unknown as FetchLike);

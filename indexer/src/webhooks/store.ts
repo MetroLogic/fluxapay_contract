@@ -42,6 +42,29 @@ export const DEFAULT_WEBHOOK_CLAIM_LEASE_MS = 120_000;
 /** Rows one sweep may claim. */
 export const MAX_WEBHOOK_CLAIM_BATCH = 100;
 
+/** Documented default retry policy, applied when an endpoint has no override. */
+export const DEFAULT_RETRY_POLICY = {
+  max_retries: 5,
+  initial_delay_ms: 1_000,
+  backoff_multiplier: 2,
+  max_delay_ms: 3_600_000,
+} as const;
+
+/** Validation bounds for per-endpoint retry policy fields. */
+export const RETRY_POLICY_BOUNDS = {
+  max_retries: { min: 0, max: 20 },
+  initial_delay_ms: { min: 100, max: 3_600_000 },
+  backoff_multiplier: { min: 1, max: 10 },
+  max_delay_ms: { min: 100, max: 86_400_000 },
+} as const;
+
+export interface WebhookRetryPolicy {
+  max_retries: number;
+  initial_delay_ms: number;
+  backoff_multiplier: number;
+  max_delay_ms: number;
+}
+
 /** A DLQ row this worker holds the lease for, with its fencing token. */
 export interface ClaimedWebhookRetry {
   id: number;

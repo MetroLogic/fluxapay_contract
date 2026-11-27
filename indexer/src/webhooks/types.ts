@@ -7,6 +7,8 @@
  * leaving the merchant to wonder why nothing arrived.
  */
 
+import type { WebhookRetryPolicy } from "./retry";
+
 export const WEBHOOK_EVENT_TYPES = [
   "payment.created",
   "payment.pending",
@@ -41,6 +43,11 @@ export interface WebhookEndpoint {
   eventTypes: string[];
   enabled: boolean;
   signingAlgorithm?: WebhookSigningAlgorithm;
+  /**
+   * Per-endpoint retry policy. Absent or partial values are resolved against
+   * DEFAULT_WEBHOOK_RETRY_POLICY (see resolveWebhookRetryPolicy).
+   */
+  retryPolicy?: Partial<WebhookRetryPolicy>;
 }
 
 export interface WebhookEnvelope {
