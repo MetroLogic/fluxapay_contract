@@ -77,30 +77,32 @@ When a payment (or refund/dispute) transitions state, FluxaPay’s off-chain ind
 | Webhook event | Trigger | Typical on-chain source |
 |---------------|---------|-------------------------|
 | `payment.created` | Charge created | `PAYMENT/CREATED` |
-| `payment.pending` | Awaiting on-chain confirmation | payment still `Pending` |
-| `payment.confirmed` | Deposit verified | `PAYMENT/CONFIRMED` / verify |
+| `payment.pending` | Awaiting on-chain confirmation | `PAYMENT/PENDING` |
+| `payment.confirmed` | Deposit verified | `PAYMENT/CONFIRMED` / `PAYMENT/VERIFIED` |
 | `payment.expired` | Payment TTL elapsed before funding | `PAYMENT/EXPIRED` |
-| `payment.failed` | Failed or invalid | failed status |
 | `payment.settled` | Merchant settled | `PAYMENT/SETTLED` |
+| `payment.partially_paid` | Payment received partial funding | `PAYMENT/PARTIALLY_PAID` |
+| `payment.overpaid` | Payment received excess funding | `PAYMENT/OVERPAID` |
+| `payment.failed` | Payment failed | `PAYMENT/FAILED` |
+| `payment.cancelled` | Payment cancelled | `PAYMENT/CANCELLED` |
 
 ### Refund events (`REFUND/*`)
 
 | Webhook event | Trigger | On-chain source |
 |---------------|---------|-----------------|
-| `refund.requested` | Refund filed | `REFUND/REQUESTED` |
-| `refund.processed` | Refund completed | `REFUND/PROCESSED` / `COMPLETED` |
-| `refund.rejected` | Refund rejected | `REFUND/REJECTED` |
+| `refund.created` | Refund created | `REFUND/CREATED` |
+| `refund.completed` | Refund completed | `REFUND/COMPLETED` |
 
 ### Dispute events (`DISPUTE/*`)
 
 | Webhook event | Trigger | On-chain source |
 |---------------|---------|-----------------|
-| `dispute.created` | Dispute opened | `DISPUTE/CREATED` |
-| `dispute.reviewed` | Moved under review | `DISPUTE/REVIEWED` |
-| `dispute.resolved` | Resolution applied | `DISPUTE/RESOLVED` |
-| `dispute.rejected` | Dispute rejected | `DISPUTE/REJECTED` |
+| `dispute.opened` | Dispute opened | `DISPUTE/CREATED` |
+| `dispute.responded` | Response submitted / moved under review | `DISPUTE/REVIEWED` |
 | `dispute.escalated` | Deadline / escalation | `DISPUTE/ESCALATED` |
-| `dispute.batch_created` | Bulk filing result | `DISPUTE/BATCH_CREATED` |
+| `dispute.vote_cast` | Dispute vote cast | `DISPUTE/VOTE_CAST` |
+| `dispute.resolved` | Resolution applied | `DISPUTE/RESOLVED` |
+| `dispute.auto_resolved` | Dispute automatically resolved | `DISPUTE/AUTO_RESOLVED` |
 
 ---
 
@@ -170,7 +172,7 @@ All webhooks share a common envelope:
 
 ```json
 {
-  "type": "refund.processed",
+  "type": "refund.completed",
   "data": {
     "refund_id": "ref_...",
     "payment_id": "pay_...",
@@ -186,7 +188,7 @@ Deduplicate on `event_id`; store `refund_id` (falling back to `payment_id`) for 
 
 ```json
 {
-  "type": "dispute.created",
+  "type": "dispute.opened",
   "data": {
     "dispute_id": "dsp_...",
     "payment_id": "pay_...",
@@ -378,19 +380,22 @@ The runnable examples below implement this flow; their tests are in [`docs/examp
 | On-chain `(namespace, action)` | Webhook `type` |
 |--------------------------------|----------------|
 | `PAYMENT/CREATED` | `payment.created` |
-| (indexer pending state) | `payment.pending` |
-| `PAYMENT/CONFIRMED` | `payment.confirmed` |
-| `PAYMENT/EXPIRED` / failed | `payment.failed` |
+| `PAYMENT/PENDING` | `payment.pending` |
+| `PAYMENT/CONFIRMED` / `PAYMENT/VERIFIED` | `payment.confirmed` |
+| `PAYMENT/EXPIRED` | `payment.expired` |
 | `PAYMENT/SETTLED` | `payment.settled` |
-| `REFUND/REQUESTED` | `refund.requested` |
-| `REFUND/PROCESSED` | `refund.processed` |
-| `REFUND/REJECTED` | `refund.rejected` |
-| `DISPUTE/CREATED` | `dispute.created` |
-| `DISPUTE/REVIEWED` | `dispute.reviewed` |
+| `PAYMENT/PARTIALLY_PAID` | `payment.partially_paid` |
+| `PAYMENT/OVERPAID` | `payment.overpaid` |
+| `PAYMENT/FAILED` | `payment.failed` |
+| `PAYMENT/CANCELLED` | `payment.cancelled` |
+| `REFUND/CREATED` | `refund.created` |
+| `REFUND/COMPLETED` | `refund.completed` |
+| `DISPUTE/CREATED` | `dispute.opened` |
+| `DISPUTE/REVIEWED` | `dispute.responded` |
 | `DISPUTE/RESOLVED` | `dispute.resolved` |
-| `DISPUTE/REJECTED` | `dispute.rejected` |
 | `DISPUTE/ESCALATED` | `dispute.escalated` |
-| `DISPUTE/BATCH_CREATED` | `dispute.batch_created` |
+| `DISPUTE/VOTE_CAST` | `dispute.vote_cast` |
+| `DISPUTE/AUTO_RESOLVED` | `dispute.auto_resolved` |
 
 ---
 
