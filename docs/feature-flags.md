@@ -30,7 +30,7 @@ opt-in `cargo build --no-default-features --features contract-<name>`.
 | Module | Feature flag | Independently deployable |
 | --- | --- | --- |
 | `payment_processor.rs` | `contract-payment-processor` (default) | yes |
-| `stream.rs` / `payment_streaming.rs` | `contract-payment-streaming` | yes |
+| `stream.rs` | `contract-payment-streaming` | yes |
 | `refund_manager.rs` | `contract-refund-manager` | yes |
 | `gas_estimator.rs` | `contract-gas-estimator` | yes |
 | `fx_oracle.rs` | `contract-fx-oracle` | yes |
@@ -39,28 +39,60 @@ opt-in `cargo build --no-default-features --features contract-<name>`.
 | `dex_router.rs` | `contract-dex-router` | yes |
 | `htlc.rs` | `contract-htlc` | yes |
 
-## Missing flags
+## Modules that remain part of PaymentProcessor / RefundManager
 
-The following modules have **no** feature flag, so they are not independently
-deployable today — they compile as part of the default build and cannot be selected
-on their own:
+The following modules compile as library code inside the primary contracts. Each
+is a support module with no standalone `#[contract]` struct of its own, so they
+do not need — and must not receive — an independent feature flag.
 
-- `account_abstraction.rs` — account abstraction
-- `meta_transaction.rs` — meta-transactions
-- `subscription.rs` — subscriptions
-- `dispute.rs` — dispute resolution
-- `merkle_distributor.rs` — merkle-batch payouts
+| Module | Host contract | Reason |
+| --- | --- | --- |
+| `account_abstraction.rs` | PaymentProcessor | Session-key and merchant-delegation helpers called by PaymentProcessor entry points; exposes only free functions and types, no standalone contract struct. |
+| `meta_transaction.rs` | PaymentProcessor | Sponsored meta-transaction relay; dispatches into `PaymentProcessor::create_payment` and related methods. No standalone contract struct. |
+| `dispute.rs` | PaymentProcessor | Dispute bond/bitmap helpers; dispute entry points live in PaymentProcessor's `contractimpl` block. No standalone contract struct. |
+| `merkle_distributor.rs` | PaymentProcessor | Pure Merkle hashing and bitmap helpers; `create_batch` / `claim_batch_payment` entry points live in PaymentProcessor's `contractimpl` block per the module doc comment. No standalone contract struct. |
 
-> Note: the originating issue lists `htlc` among the missing, but `contract-htlc`
-> already exists in `Cargo.toml`, so `htlc` is covered. The genuinely missing flags
-> are the five above. Each needs a `contract-<name>` feature in `Cargo.toml` plus
-> a `cfg_attr(... contract-<name>, contractimpl)` gate on its `#[contractimpl]`
-> block before it can be deployed in isolation.
+## Orphaned duplicate: `subscription.rs`
 
-## Next steps
+`fluxapay/src/subscription.rs` defines a `SubscriptionContract` struct with
+`#[contract]` / `#[contractimpl]`, but it is **not declared as a module in
+`lib.rs`** (there is no `mod subscription;` outside of `#[cfg(test)]` blocks).
+The complete, production subscription implementation lives inside
+`PaymentProcessor`'s `contractimpl` block in `lib.rs`, which integrates
+subscriptions with payments, refunds, and the merchant registry.
 
-- Add a `contract-<name>` feature for each missing module and gate its
-  `#[contractimpl]` so an opt-in build produces only that contract.
-- Extend CI to build each contract with its feature and assert the resulting WASM
-  stays under the Soroban size budget, so a regression that bloats one contract is
-  caught before deploy.
+Additionally, `subscription.rs` contains several compile-breaking syntax errors
+(`Option(u32)` instead of `Option<u32>`, `Ok()` instead of `Ok(())`, the
+undefined symbol `GRACE_CANCHL`) that make the file unshippable as-is.
+
+**This file is an orphaned duplicate and must not be added to the deployable
+feature list.** It is excluded from the build by virtue of never being declared
+as a module. If a truly standalone `SubscriptionContract` WASM is ever needed in
+the future, it should be derived from the production implementation in `lib.rs`,
+not from this file.
+
+## `htlc` — already covered
+
+The originating issue listed `htlc` among the missing, but `contract-htlc`
+already exists in `Cargo.toml` and `htlc.rs` already carries the matching
+`cfg_attr` gate. It is covered.
+
+## Build verification
+
+Each deployable contract can be built in isolation with:
+
+```bash
+# Primary contract (default)
+cargo build --target wasm32-unknown-unknown --release
+
+# Any other standalone contract
+cargo build --target wasm32-unknown-unknown --release \
+  --no-default-features --features contract-<name>
+```
+
+Supported values for `<name>`: `payment-streaming`, `refund-manager`,
+`gas-estimator`, `fx-oracle`, `merchant-registry`, `payment-link`,
+`dex-router`, `htlc`.
+
+Each build produces exactly one contract WASM. CI should assert each artifact
+stays under the Soroban size budget so a regression is caught before deploy.

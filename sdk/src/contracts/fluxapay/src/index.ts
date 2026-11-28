@@ -244,6 +244,32 @@ export interface SwapRoute {
   amount_in: i128;
 }
 
+/**
+ * Issue #1270: On-chain record for a collaboratively settled dispute.
+ * Mirrors the `CollaborativeSettlement` struct returned by
+ * `get_collaborative_settlement`.
+ */
+export interface CollaborativeSettlement {
+  dispute_id: string;
+  settlement_amount: i128;
+  refund_id: string;
+  settled_at: u64;
+}
+
+/**
+ * Issue #1270: A single metered-billing usage record as stored on-chain.
+ * Mirrors the `UsageMetrics` struct returned by `get_usage_metrics`.
+ */
+export interface UsageMetrics {
+  subscription_id: string;
+  units_used: i128;
+  unit_price: i128;
+  token: string;
+  total_amount: i128;
+  timestamp: u64;
+  operator: string;
+}
+
 export interface Client {
   /**
    * Construct and simulate a get_merchant transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -742,6 +768,75 @@ export interface Client {
     { admin, threshold }: { admin: string; threshold: u64 },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<void>>>;
+
+  /**
+   * Issue #1270: Settle a dispute collaboratively when both parties have
+   * signed a settlement amount off-chain. Returns the refund ID created for
+   * the settlement.
+   */
+  settle_dispute_collaboratively: (
+    {
+      dispute_id,
+      settlement_amount,
+      buyer_pubkey,
+      signature_buyer,
+      merchant_pubkey,
+      signature_merchant,
+    }: {
+      dispute_id: string;
+      settlement_amount: i128;
+      buyer_pubkey: Buffer;
+      signature_buyer: Buffer;
+      merchant_pubkey: Buffer;
+      signature_merchant: Buffer;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<string>>>;
+
+  /**
+   * Issue #1270: Retrieve the collaborative settlement record for a dispute.
+   */
+  get_collaborative_settlement: (
+    { dispute_id }: { dispute_id: string },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<CollaborativeSettlement>>>;
+
+  /**
+   * Issue #1270: Submit metered usage for a subscription billing period.
+   */
+  submit_usage_metrics: (
+    {
+      operator,
+      subscription_id,
+      units_used,
+      unit_price,
+      token,
+    }: {
+      operator: string;
+      subscription_id: string;
+      units_used: i128;
+      unit_price: i128;
+      token: string;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
+
+  /**
+   * Issue #1270: Retrieve usage-metric records for a subscription within a
+   * timestamp range.
+   */
+  get_usage_metrics: (
+    {
+      subscription_id,
+      from_timestamp,
+      to_timestamp,
+    }: {
+      subscription_id: string;
+      from_timestamp: u64;
+      to_timestamp: u64;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<Array<UsageMetrics>>>>;
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
@@ -873,5 +968,11 @@ export class Client extends ContractClient {
     get_settlement_amount: (json: string) => (this as any).txFromJSON(json),
     get_staleness_threshold: (json: string) => (this as any).txFromJSON(json),
     set_staleness_threshold: (json: string) => (this as any).txFromJSON(json),
+    settle_dispute_collaboratively: (json: string) =>
+      (this as any).txFromJSON(json),
+    get_collaborative_settlement: (json: string) =>
+      (this as any).txFromJSON(json),
+    submit_usage_metrics: (json: string) => (this as any).txFromJSON(json),
+    get_usage_metrics: (json: string) => (this as any).txFromJSON(json),
   };
 }

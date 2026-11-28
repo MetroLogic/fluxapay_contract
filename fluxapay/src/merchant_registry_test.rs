@@ -2,8 +2,8 @@ use super::merchant_registry::*;
 use crate::merchant_registry::MaybeFeeConfig;
 use crate::{PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient};
 use soroban_sdk::{
-    testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, String, Symbol,
-    TryIntoVal,
+    testutils::Address as _, testutils::Events, testutils::Ledger, token, Address, Env, String,
+    Symbol, TryIntoVal,
 };
 
 #[test]
@@ -395,7 +395,7 @@ fn test_unverified_merchant_cannot_create_payment() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     };
 
     // This should panic with Unauthorized error
@@ -460,7 +460,7 @@ fn test_verified_merchant_can_create_payment() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     };
 
     let payment = payment_client.create_payment(&args);
@@ -538,6 +538,263 @@ fn test_reinstate_merchant() {
     assert_eq!(reinstated.suspension_reason, None);
     assert_eq!(reinstated.suspended_at, None);
     assert!(!env.events().all().events().is_empty());
+}
+
+#[test]
+fn test_stake_weighted_merchant_suspension_quorum_and_execution() {
+    use crate::{constants::VOTE_WEIGHT_UNIT, merchant_registry::DEFAULT_SUSPENSION_QUORUM_BPS};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let governance_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let governance_token_admin = token::StellarAssetClient::new(&env, &governance_token);
+
+    client.initialize(&admin);
+    client.set_suspension_governance_token(&admin, &governance_token);
+    client.grant_role(&admin, &Symbol::new(&env, "ARBITRATOR"), &proposer);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+
+    let reason = String::from_str(&env, "Stake-weighted governance vote");
+    let proposal_id = client.propose_merchant_suspension(&proposer, &merchant_id, &reason);
+    let proposal = client.get_suspension_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.quorum_bps, DEFAULT_SUSPENSION_QUORUM_BPS);
+    assert_eq!(
+        proposal.expires_at,
+        1_000 + DEFAULT_SUSPENSION_PROPOSAL_TTL_SECS
+    );
+
+    let approving_voter = Address::generate(&env);
+    let rejecting_voter = Address::generate(&env);
+    let approving_stake = 51 * VOTE_WEIGHT_UNIT;
+    let rejecting_stake = 49 * VOTE_WEIGHT_UNIT;
+    governance_token_admin.mint(&approving_voter, &approving_stake);
+    governance_token_admin.mint(&rejecting_voter, &rejecting_stake);
+    client.lock_suspension_stake(
+        &approving_voter,
+        &proposal_id,
+        &governance_token,
+        &approving_stake,
+    );
+    client.lock_suspension_stake(
+        &rejecting_voter,
+        &proposal_id,
+        &governance_token,
+        &rejecting_stake,
+    );
+    client.vote_merchant_suspension(&approving_voter, &proposal_id, &true);
+    let late_voter = Address::generate(&env);
+    assert_eq!(
+        client.try_lock_suspension_stake(
+            &late_voter,
+            &proposal_id,
+            &governance_token,
+            &VOTE_WEIGHT_UNIT,
+        ),
+        Err(Ok(MerchantError::SuspensionVotingStarted))
+    );
+    client.vote_merchant_suspension(&rejecting_voter, &proposal_id, &false);
+
+    let tally = client.get_suspension_proposal(&proposal_id).unwrap();
+    assert_eq!(tally.total_registered_weight, 100);
+    assert_eq!(tally.approve_weight, 51);
+    assert_eq!(tally.reject_weight, 49);
+
+    client.execute_merchant_suspension(&proposal_id);
+    let merchant = client.get_merchant(&merchant_id);
+    assert!(!merchant.active);
+    assert_eq!(merchant.suspension_reason, Some(reason));
+    assert!(
+        client
+            .get_suspension_proposal(&proposal_id)
+            .unwrap()
+            .executed
+    );
+
+    client.release_suspension_stake(&approving_voter, &proposal_id);
+    assert_eq!(
+        governance_token_admin.balance(&approving_voter),
+        approving_stake
+    );
+
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b))
+                if a == Symbol::new(&env, "MERCHANT")
+                    && b == Symbol::new(&env, "SUSPENDED_BY_VOTE")
+        )
+    });
+    assert!(found, "MERCHANT/SUSPENDED_BY_VOTE event was not emitted");
+    let proposal_event_found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b))
+                if a == Symbol::new(&env, "MERCHANT")
+                    && b == Symbol::new(&env, "SUSPENSION_PROPOSED")
+        )
+    });
+    assert!(
+        proposal_event_found,
+        "MERCHANT/SUSPENSION_PROPOSED event was not emitted"
+    );
+}
+
+#[test]
+fn test_merchant_suspension_quorum_not_reached() {
+    use crate::constants::VOTE_WEIGHT_UNIT;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let governance_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token_client = token::StellarAssetClient::new(&env, &governance_token);
+
+    client.initialize(&admin);
+    client.set_suspension_governance_token(&admin, &governance_token);
+    client.grant_role(&admin, &Symbol::new(&env, "ARBITRATOR"), &proposer);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+    let proposal_id = client.propose_merchant_suspension(
+        &proposer,
+        &merchant_id,
+        &String::from_str(&env, "Insufficient quorum"),
+    );
+
+    let approving_voter = Address::generate(&env);
+    let rejecting_voter = Address::generate(&env);
+    let stake = 50 * VOTE_WEIGHT_UNIT;
+    token_client.mint(&approving_voter, &stake);
+    token_client.mint(&rejecting_voter, &stake);
+    client.lock_suspension_stake(&approving_voter, &proposal_id, &governance_token, &stake);
+    client.lock_suspension_stake(&rejecting_voter, &proposal_id, &governance_token, &stake);
+    client.vote_merchant_suspension(&approving_voter, &proposal_id, &true);
+    client.vote_merchant_suspension(&rejecting_voter, &proposal_id, &false);
+
+    assert_eq!(
+        client.try_execute_merchant_suspension(&proposal_id),
+        Err(Ok(MerchantError::ProposalThresholdNotMet))
+    );
+    assert!(client.get_merchant(&merchant_id).active);
+}
+
+#[test]
+fn test_merchant_suspension_proposal_expiry_and_stake_release() {
+    use crate::constants::MIN_ARBITRATOR_STAKE;
+    use crate::merchant_registry::DEFAULT_SUSPENSION_PROPOSAL_TTL_SECS;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let governance_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token_client = token::StellarAssetClient::new(&env, &governance_token);
+
+    client.initialize(&admin);
+    client.set_suspension_governance_token(&admin, &governance_token);
+    client.set_suspension_proposal_ttl(&admin, &60);
+    client.set_suspension_quorum_bps(&admin, &6_000);
+    assert_eq!(client.get_suspension_proposal_ttl(), 60);
+    assert_eq!(client.get_suspension_quorum_bps(), 6_000);
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &MaybeFeeConfig::None,
+    );
+    token_client.mint(&proposer, &MIN_ARBITRATOR_STAKE);
+
+    // A token holder with the minimum stake can propose without the arbitrator role.
+    let proposal_id = client.propose_merchant_suspension(
+        &proposer,
+        &merchant_id,
+        &String::from_str(&env, "Expired proposal"),
+    );
+    assert_eq!(
+        client
+            .get_suspension_proposal(&proposal_id)
+            .unwrap()
+            .expires_at,
+        1_060
+    );
+    assert_eq!(
+        client
+            .get_suspension_proposal(&proposal_id)
+            .unwrap()
+            .quorum_bps,
+        6_000
+    );
+    client.lock_suspension_stake(
+        &proposer,
+        &proposal_id,
+        &governance_token,
+        &MIN_ARBITRATOR_STAKE,
+    );
+    env.ledger().with_mut(|li| li.timestamp = 1_060);
+
+    assert_eq!(
+        client.try_vote_merchant_suspension(&proposer, &proposal_id, &true),
+        Err(Ok(MerchantError::ProposalExpired))
+    );
+    assert_eq!(
+        client.try_execute_merchant_suspension(&proposal_id),
+        Err(Ok(MerchantError::ProposalExpired))
+    );
+    client.release_suspension_stake(&proposer, &proposal_id);
+    assert_eq!(token_client.balance(&proposer), MIN_ARBITRATOR_STAKE);
+
+    assert_eq!(DEFAULT_SUSPENSION_PROPOSAL_TTL_SECS, 7 * 24 * 60 * 60);
 }
 
 #[test]
@@ -1391,7 +1648,7 @@ fn test_basic_tier_cap_enforced() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1419,7 +1676,7 @@ fn test_basic_tier_cap_enforced() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
 
     let result = payment_client.try_verify_payment(
@@ -1468,7 +1725,7 @@ fn test_business_tier_no_cap() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1515,7 +1772,7 @@ fn test_volume_resets_next_month() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1546,7 +1803,7 @@ fn test_volume_resets_next_month() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1970,7 +2227,7 @@ fn test_non_whitelisted_payer_rejected() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
 
     assert!(result.is_err(), "Expected PayerNotWhitelisted error");
@@ -2013,7 +2270,7 @@ fn test_whitelisted_payer_accepted() {
         idempotency_key: None,
         metadata_hash: None,
         metadata: None,
-            tip_enabled: false,
+        tip_enabled: false,
     });
 
     assert_eq!(payment.merchant_id, merchant);
@@ -2146,17 +2403,32 @@ fn test_kyc_tier_limits_all_tiers_and_boundaries() {
     );
 
     // Tier 0 (Unverified): Max single 100 USDC (100_000_000), monthly 500 USDC (500_000_000)
-    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_ok());
-    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_001).is_err());
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &100_000_000)
+        .is_ok());
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &100_000_001)
+        .is_err());
 
     // Upgrade to Tier 1 (Basic): Max single 10,000 USDC (10_000_000_000), monthly 50,000 USDC (50_000_000_000)
-    client.set_kyc_tier_with_signature(&admin, &merchant_id, &KycTier::Basic, &MaybeFeeConfig::None);
-    assert!(client.try_check_kyc_limit(&merchant_id, &10_000_000_000).is_ok());
-    assert!(client.try_check_kyc_limit(&merchant_id, &10_000_000_001).is_err());
+    client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant_id,
+        &KycTier::Basic,
+        &MaybeFeeConfig::None,
+    );
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &10_000_000_000)
+        .is_ok());
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &10_000_000_001)
+        .is_err());
 
     // Upgrade to Tier 2 (Full): Unlimited
     client.set_kyc_tier_with_signature(&admin, &merchant_id, &KycTier::Full, &MaybeFeeConfig::None);
-    assert!(client.try_check_kyc_limit(&merchant_id, &1_000_000_000_000).is_ok());
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &1_000_000_000_000)
+        .is_ok());
 }
 
 #[test]
@@ -2183,16 +2455,22 @@ fn test_kyc_tier_monthly_volume_reset() {
 
     // Accumulate volume up to tier 0 monthly cap (500 USDC)
     for _ in 0..5 {
-        assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_ok());
+        assert!(client
+            .try_check_kyc_limit(&merchant_id, &100_000_000)
+            .is_ok());
     }
     // 6th payment in same month breaches 500 USDC cap
-    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_err());
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &100_000_000)
+        .is_err());
 
     // Advance to 2026-02-01 00:00:00 UTC = 1769904000 (1st of next month)
     env.ledger().with_mut(|li| li.timestamp = 1769904000);
 
     // Monthly volume resets, payment succeeds again
-    assert!(client.try_check_kyc_limit(&merchant_id, &100_000_000).is_ok());
+    assert!(client
+        .try_check_kyc_limit(&merchant_id, &100_000_000)
+        .is_ok());
 }
 
 fn test_list_merchants_page_size_too_large() {

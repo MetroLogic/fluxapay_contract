@@ -96,7 +96,7 @@ impl RefundManager {
             .unwrap_or(REFUND_FEE_BPS)
     }
 
-    fn get_refund_cooldown_secs(env: &Env) -> u64 {
+    pub(crate) fn get_refund_cooldown_secs(env: &Env) -> u64 {
         env.storage()
             .persistent()
             .get::<DataKey, u64>(&DataKey::RefundCooldownSecs)
@@ -2375,14 +2375,14 @@ impl RefundManager {
         counter
     }
 
-    fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
+    pub(crate) fn get_refund_internal(env: &Env, refund_id: &String) -> Result<Refund, Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Refund(refund_id.clone()))
             .ok_or(Error::RefundNotFound)
     }
 
-    fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
+    pub(crate) fn get_payment_refunds_internal(env: &Env, payment_id: &String) -> Vec<String> {
         env.storage()
             .persistent()
             .get(&DataKey::PaymentRefunds(payment_id.clone()))
@@ -2614,6 +2614,17 @@ impl RefundManager {
         env.storage()
             .persistent()
             .set(&DataKey::Dispute(dispute_id_to_key(&env, &dispute_id)), &dispute);
+
+        let mut dispute_index: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeIndex)
+            .unwrap_or_else(|| vec![env]);
+        dispute_index.push_back(dispute_id.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeIndex, &dispute_index);
+        Self::bump_ttl(env, &DataKey::DisputeIndex, LONG_LIVE_TTL);
 
         let mut payment_disputes = Self::get_payment_disputes_internal(env, &payment_id);
         payment_disputes.push_back(dispute_id.clone());
@@ -4028,6 +4039,26 @@ impl RefundManager {
         Ok(disputes)
     }
 
+    /// Get all disputes with pagination in creation order.
+    pub fn get_all_disputes(env: Env, offset: u32, limit: u32) -> Vec<Dispute> {
+        let dispute_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeIndex)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut disputes = vec![&env];
+        let end = core::cmp::min(dispute_ids.len(), offset.saturating_add(limit));
+        let mut index = offset;
+        while index < end {
+            if let Some(dispute_id) = dispute_ids.get(index) {
+                if let Ok(dispute) = Self::get_dispute_internal(&env, &dispute_id) {
+                    disputes.push_back(dispute);
+                }
+            }
+            index += 1;
+        }
+        disputes
     /// Issue #575: Get disputes for a payment filtered by dispute status.
     pub fn get_payment_disputes_by_status(
         env: Env,

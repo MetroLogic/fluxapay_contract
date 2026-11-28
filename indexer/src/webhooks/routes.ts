@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import {
   buildEnvelope,
@@ -38,6 +39,46 @@ export function registerWebhookRoutes(app: Express, deps: WebhookRouteDeps): voi
   const { store, merchantIdFromRequest } = deps;
   const doFetch = deps.fetch ?? (globalThis.fetch as unknown as FetchLike);
 
+  function publicEndpoint(endpoint: Awaited<ReturnType<WebhookStore["getEndpoint"]>>) {
+    if (!endpoint) return null;
+    return {
+      id: endpoint.id,
+      merchant_id: endpoint.merchantId,
+      url: endpoint.url,
+      event_types: endpoint.eventTypes,
+      enabled: endpoint.enabled,
+      signing_algorithm: endpoint.signingAlgorithm ?? "hmac_sha256",
+    };
+  }
+
+  function validateEndpointUrl(value: unknown): value is string {
+    if (typeof value !== "string") return false;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+      if (!url.hostname || url.username || url.password) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function validateEventTypes(value: unknown): value is string[] {
+    return Array.isArray(value)
+      && value.length <= 100
+      && new Set(value).size === value.length
+      && value.every((item) => typeof item === "string" && isWebhookEventType(item));
+  }
+
+  function getMerchant(req: Request, res: Response): string | null {
+    const merchantId = merchantIdFromRequest(req);
+    if (!merchantId) {
+      error(res, 401, "Unauthenticated", "A merchant API key is required.");
+      return null;
+    }
+    return merchantId;
+  }
+
   // ── GET /webhooks/public-key (Issue #775) ───────────────────────────────
   const getPublicKeyHandler = (_req: Request, res: Response) => {
     const publicKey = getPlatformEd25519PublicKey();
@@ -50,6 +91,221 @@ export function registerWebhookRoutes(app: Express, deps: WebhookRouteDeps): voi
 
   app.get("/webhooks/public-key", getPublicKeyHandler);
   app.get("/v1/webhooks/public-key", getPublicKeyHandler);
+
+  // ── Merchant-scoped endpoint management ─────────────────────────────────
+  app.post(
+    "/v1/webhooks",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = getMerchant(req, res);
+        if (!merchantId) return;
+
+        const { url, event_types: eventTypes, signing_algorithm: signingAlgorithm } = req.body ?? {};
+        if (!validateEndpointUrl(url)) {
+          return error(res, 400, "InvalidEndpointUrl", "url must be a valid HTTP or HTTPS URL.");
+        }
+        if (eventTypes !== undefined && !validateEventTypes(eventTypes)) {
+          return error(
+            res,
+            400,
+            "InvalidEventTypes",
+            `event_types must contain unique supported values: ${WEBHOOK_EVENT_TYPES.join(", ")}`,
+          );
+        }
+        if (signingAlgorithm !== undefined
+          && signingAlgorithm !== "hmac_sha256"
+          && signingAlgorithm !== "ed25519") {
+          return error(res, 400, "InvalidSigningAlgorithm", "signing_algorithm must be hmac_sha256 or ed25519.");
+        }
+
+        const signingSecret = typeof req.body?.signing_secret === "string" && req.body.signing_secret
+          ? req.body.signing_secret
+          : randomBytes(32).toString("base64url");
+        if (signingSecret.length < 16) {
+          return error(res, 400, "InvalidSigningSecret", "signing_secret must be at least 16 characters.");
+        }
+
+        const endpoint = await store.createEndpoint({
+          merchantId,
+          url,
+          eventTypes: eventTypes ?? [],
+          signingSecret,
+          signingAlgorithm,
+        });
+        return res.status(201).json({
+          ...publicEndpoint(endpoint),
+          signing_secret: signingSecret,
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/webhooks",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = getMerchant(req, res);
+        if (!merchantId) return;
+        const endpoints = await store.listEndpoints(merchantId);
+        return res.status(200).json({
+          data: endpoints.map((endpoint) => publicEndpoint(endpoint)),
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/webhooks/:endpointId",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = getMerchant(req, res);
+        if (!merchantId) return;
+        const endpoint = await store.getEndpointForMerchant(req.params.endpointId, merchantId);
+        if (!endpoint) {
+          return error(res, 404, "EndpointNotFound", `No webhook endpoint ${req.params.endpointId}.`);
+        }
+        return res.status(200).json(publicEndpoint(endpoint));
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  const updateEndpointHandler = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const merchantId = getMerchant(req, res);
+      if (!merchantId) return;
+
+      const body = req.body ?? {};
+      if (body.url !== undefined && !validateEndpointUrl(body.url)) {
+        return error(res, 400, "InvalidEndpointUrl", "url must be a valid HTTP or HTTPS URL.");
+      }
+      if (body.event_types !== undefined && !validateEventTypes(body.event_types)) {
+        return error(
+          res,
+          400,
+          "InvalidEventTypes",
+          `event_types must contain unique supported values: ${WEBHOOK_EVENT_TYPES.join(", ")}`,
+        );
+      }
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+        return error(res, 400, "InvalidRequest", "enabled must be a boolean.");
+      }
+      if (body.signing_algorithm !== undefined
+        && body.signing_algorithm !== "hmac_sha256"
+        && body.signing_algorithm !== "ed25519") {
+        return error(res, 400, "InvalidSigningAlgorithm", "signing_algorithm must be hmac_sha256 or ed25519.");
+      }
+
+      let signingSecret: string | undefined;
+      if (body.rotate_signing_secret === true) {
+        signingSecret = randomBytes(32).toString("base64url");
+      } else if (typeof body.signing_secret === "string" && body.signing_secret) {
+        if (body.signing_secret.length < 16) {
+          return error(res, 400, "InvalidSigningSecret", "signing_secret must be at least 16 characters.");
+        }
+        signingSecret = body.signing_secret;
+      }
+
+      const endpoint = await store.updateEndpoint(req.params.endpointId, merchantId, {
+        url: body.url,
+        eventTypes: body.event_types,
+        enabled: body.enabled,
+        signingAlgorithm: body.signing_algorithm,
+        signingSecret,
+      });
+      if (!endpoint) {
+        return error(res, 404, "EndpointNotFound", `No webhook endpoint ${req.params.endpointId}.`);
+      }
+
+      const response: Record<string, unknown> = publicEndpoint(endpoint) ?? {};
+      // Only a newly generated or caller-supplied replacement is ever returned.
+      if (signingSecret) response.signing_secret = signingSecret;
+      return res.status(200).json(response);
+    } catch (err) {
+      return next(err);
+    }
+  };
+
+  app.patch("/v1/webhooks/:endpointId", updateEndpointHandler);
+  app.put("/v1/webhooks/:endpointId", updateEndpointHandler);
+
+  const disableEndpointHandler = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const merchantId = getMerchant(req, res);
+      if (!merchantId) return;
+      const endpoint = await store.updateEndpoint(req.params.endpointId, merchantId, { enabled: false });
+      if (!endpoint) {
+        return error(res, 404, "EndpointNotFound", `No webhook endpoint ${req.params.endpointId}.`);
+      }
+      return res.status(200).json(publicEndpoint(endpoint));
+    } catch (err) {
+      return next(err);
+    }
+  };
+
+  app.post("/v1/webhooks/:endpointId/disable", disableEndpointHandler);
+  app.patch("/v1/webhooks/:endpointId/disable", disableEndpointHandler);
+
+  app.post(
+    "/v1/webhooks/:endpointId/rotate-secret",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = getMerchant(req, res);
+        if (!merchantId) return;
+        const rotated = await store.rotateSigningSecret(req.params.endpointId, merchantId);
+        if (!rotated) {
+          return error(res, 404, "EndpointNotFound", `No webhook endpoint ${req.params.endpointId}.`);
+        }
+        return res.status(200).json({
+          ...publicEndpoint(rotated.endpoint),
+          signing_secret: rotated.signingSecret,
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+  app.post(
+    "/v1/webhooks/:endpointId/rotate",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = getMerchant(req, res);
+        if (!merchantId) return;
+        const rotated = await store.rotateSigningSecret(req.params.endpointId, merchantId);
+        if (!rotated) {
+          return error(res, 404, "EndpointNotFound", `No webhook endpoint ${req.params.endpointId}.`);
+        }
+        return res.status(200).json({
+          ...publicEndpoint(rotated.endpoint),
+          signing_secret: rotated.signingSecret,
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  app.delete(
+    "/v1/webhooks/:endpointId",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const merchantId = getMerchant(req, res);
+        if (!merchantId) return;
+        const deleted = await store.deleteEndpoint(req.params.endpointId, merchantId);
+        if (!deleted) {
+          return error(res, 404, "EndpointNotFound", `No webhook endpoint ${req.params.endpointId}.`);
+        }
+        return res.status(204).send();
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
 
   /**
    * Resolve an endpoint and confirm the caller owns it.

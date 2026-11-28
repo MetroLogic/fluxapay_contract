@@ -270,6 +270,8 @@ pub enum DataKey {
     PendingTimelockAction(String),
     /// Issue #624: Counter for pending action IDs.
     TimelockActionCounter,
+    /// Append-only index of dispute IDs for paginated dispute enumeration.
+    DisputeIndex,
     /// Issue #761: Payment idempotency key to payment id.
     PaymentIdempotencyKey(String),
     /// Queued auto-refund created when a partially funded payment expires.
