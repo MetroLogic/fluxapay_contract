@@ -106,7 +106,7 @@ When a payment (or refund/dispute) transitions state, FluxaPay’s off-chain ind
 
 ## Payload schema
 
-All webhooks share a common envelope:
+All webhooks share a common **v1** envelope (`WebhookEnvelope` in [`indexer/src/webhooks/types.ts`](../indexer/src/webhooks/types.ts)):
 
 ```json
 {
@@ -145,6 +145,12 @@ All webhooks share a common envelope:
 | `data.currency` | string | e.g. `USDC` |
 | `data.status` | string | Current status snapshot |
 | `data.metadata` | object\|null | Merchant metadata from create |
+
+### Versioning & compatibility notes
+
+- **Canonical v1 contract:** The runtime `WebhookEnvelope` serializes `createdAt` (camelCase) as an ISO-8601 UTC string (`Date.prototype.toISOString()`), alongside `id`, `event_id`, `type`, `livemode`, optional `replayed`, and `data`.
+- **No breaking runtime change:** Keeping `createdAt` as an ISO-8601 UTC string preserves compatibility with existing webhook consumers already parsing the live indexer payload.
+- **Migration note for consumers built against older docs:** Earlier versions of this guide showed `created_at` (numeric Unix seconds) and `api_version` in examples. Those fields are not emitted by the v1 runtime envelope. Consumers should parse `createdAt` as an ISO-8601 timestamp (and use the `X-FluxaPay-Timestamp` header for Unix-second replay-window checks). Any future change to envelope field naming or timestamp encoding will be introduced under a new schema version.
 
 ### Payment expired payload (`payment.expired`)
 
